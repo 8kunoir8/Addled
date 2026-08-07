@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+*.log
+backend/memory/*.db
+backend/memory/*.json
+backend/memory/.vault*
+backend/memory/*.log
+dashboard/.next/
+dashboard/node_modules/
+bots/auth/
+__pycache__/
+*.pyc
+*.spec
+build/

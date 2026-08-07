@@ -1,0 +1,22 @@
+appId: com.kunoir.addled
+productName: Addled
+directories:
+  output: dist
+  buildResources: assets
+files:
+  - electron/**/*
+  - dashboard/.next/**/*
+  - bots/**/*
+  - package.json
+extraResources:
+  - from: dist/addled-backend.exe
+    to: backend/addled-backend.exe
+win:
+  target: nsis
+  icon: assets/icon.png
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Addled
