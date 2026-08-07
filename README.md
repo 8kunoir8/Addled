@@ -2,6 +2,8 @@
 
 > An AI desktop companion with a floating animated character and full dashboard.
 > Combines the best of Vox's PyQt6 character engine with Skales' rich capabilities.
+>
+> **Repository**: [github.com/8kunoir8/Addled](https://github.com/8kunoir8/Addled)
 
 ## Quick Start (Development)
 
