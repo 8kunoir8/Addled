@@ -21,6 +21,7 @@ from backend.character.shapes import SHAPE_REGISTRY, DEFAULT_SHAPE
 from backend.character.movement import Mover
 from backend.character.animation import Animator
 from backend.character.states import StateMachine, CharacterState
+from backend.character.particles import ParticleSystem, Particle
 
 
 # Addled blue as fallback
@@ -66,6 +67,7 @@ class CharacterWidget(QWidget):
         self._animator._base_glow = self._settings.get("glow_intensity", 0.6)
         self._animator.glow_intensity = self._settings.get("glow_intensity", 0.6)
         self._state_machine = StateMachine()
+        self._particles = ParticleSystem()
         self._color = self._parse_color(self._settings.get("color", "#3380FF"))
         self._show_eyes = self._settings.get("eyes", True)
 
@@ -225,6 +227,11 @@ class CharacterWidget(QWidget):
         self._animator.update(state, dt)
         self._sync_position()
 
+        # Particle system
+        cx = self.width() / 2
+        cy = self.height() / 2
+        self._particles.update(state, dt, cx, cy)
+
         # Track cursor for eye gaze
         cursor_pos = QCursor.pos()
         widget_center = self.geometry().center()
@@ -310,6 +317,9 @@ class CharacterWidget(QWidget):
         if state in (CharacterState.THINKING, CharacterState.WORKING):
             self._draw_progress_ring(painter, center_x + offset_x, center_y, a)
 
+        # Particles
+        self._draw_particles(painter, center_x + offset_x, center_y, state)
+
         painter.restore()
 
     def _draw_eyes(self, painter: QPainter, cx: float, cy: float, a: Animator):
@@ -359,6 +369,53 @@ class CharacterWidget(QWidget):
             int(radius * 2), int(radius * 2),
             90 * 16, -span,
         )
+
+    def _draw_particles(self, painter: QPainter, cx: float, cy: float, state: CharacterState):
+        """Render active particles (zzz, sparkle, gear, glow_burst)."""
+        for p in self._particles.get_particles():
+            alpha = int(255 * p.life)
+            if alpha <= 0:
+                continue
+            color = QColor(255, 255, 255, alpha)
+
+            if p.kind == "zzz":
+                painter.setPen(QPen(color, 1.5))
+                painter.setFont(QFont("Segoe UI", p.size))
+                painter.drawText(int(p.x - 5), int(p.y + 5), "z")
+            elif p.kind == "sparkle":
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 220, 100, alpha))
+                r = p.size * p.life
+                painter.drawEllipse(int(p.x - r), int(p.y - r), int(r * 2), int(r * 2))
+            elif p.kind == "glow_burst":
+                painter.setPen(Qt.PenStyle.NoPen)
+                glow = QRadialGradient(p.x, p.y, p.size * (1 - p.life))
+                c = QColor(100, 180, 255, alpha)
+                glow.setColorAt(0, c)
+                c.setAlpha(0)
+                glow.setColorAt(1, c)
+                painter.setBrush(glow)
+                r = p.size * (1 - p.life)
+                painter.drawEllipse(int(p.x - r), int(p.y - r), int(r * 2), int(r * 2))
+            elif p.kind == "lightbulb":
+                painter.setPen(QPen(QColor(255, 255, 150, alpha), 1))
+                painter.setBrush(QColor(255, 255, 200, int(alpha * 0.3)))
+                painter.drawEllipse(int(p.x - p.size), int(p.y - p.size),
+                                    int(p.size * 2), int(p.size * 2))
+
+        # Gear particles for WORKING state
+        if state == CharacterState.WORKING:
+            gear_angle = self._particles.gear_angle
+            painter.save()
+            painter.translate(cx, cy)
+            for i in range(4):
+                angle = gear_angle + i * math.pi / 2
+                gx = math.cos(math.radians(angle)) * 20
+                gy = math.sin(math.radians(angle)) * 20
+                painter.setPen(QPen(QColor(255, 255, 255, 120), 1))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(int(gx - 4), int(gy - 4), 8, 8)
+            painter.restore()
 
     @staticmethod
     def _parse_color(hex_str: str) -> QColor:

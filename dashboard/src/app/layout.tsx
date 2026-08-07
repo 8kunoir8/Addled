@@ -43,7 +43,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
   return (
     <html lang="en" className="dark">
-      <body className="flex h-screen overflow-hidden bg-[#0d1117]">
+      <body className="flex h-screen overflow-hidden">
         <aside className={`sidebar flex flex-col transition-all duration-200 ${sidebarCollapsed ? 'w-14' : 'w-[220px]'}`}>
           <div className="flex items-center gap-2 px-3 py-3 border-b border-[#30363d]">
             <button

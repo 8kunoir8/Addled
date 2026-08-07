@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import traceback
 from typing import Callable, Awaitable
 
 import websockets
@@ -172,6 +171,8 @@ def _register_default_handlers():
         section = params.get("section")
         if section:
             return {"settings": {section: config.get(section, default={})}}
+        # Ensure config is loaded before accessing private _data
+        config._ensure_loaded()
         return {"settings": dict(config._data)}
 
     async def settings_set(params: dict, ws) -> dict:
