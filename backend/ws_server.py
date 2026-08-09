@@ -17,6 +17,14 @@ from websockets.server import WebSocketServerProtocol
 
 log = logging.getLogger("addled.ws")
 
+# Reference to the engine instance (set by main.py after engine is created)
+_engine_ref = None
+
+def set_engine(engine):
+    """Called by main.py to give WS handlers access to engine state."""
+    global _engine_ref
+    _engine_ref = engine
+
 # ---- message types ----------------------------------------------------------
 
 HandlerFunc = Callable[[dict, WebSocketServerProtocol], Awaitable[dict | None]]
@@ -154,12 +162,17 @@ def _register_default_handlers():
 
     async def system_status(params: dict, ws) -> dict:
         from backend.config import config
+        import time
+        engine_state = "unknown"
+        char_state = "idle"
+        if _engine_ref:
+            engine_state = _engine_ref.state.name.lower() if hasattr(_engine_ref, 'state') else "running"
         return {
-            "engineState": "running",
+            "engineState": engine_state,
             "provider": config.active_provider,
             "agentName": config.agent_name,
-            "characterState": "idle",
-            "uptime": 0,
+            "characterState": char_state,
+            "uptime": int(getattr(_engine_ref, '_tick_count', 0) * 5) if _engine_ref else 0,
         }
 
     async def system_get_providers(params: dict, ws) -> dict:
@@ -263,6 +276,14 @@ def _register_default_handlers():
     async def character_set_state(params: dict, ws) -> dict:
         from backend.ws_server import get_server
         state = params.get("state", "idle")
+        # Tell the engine to change state (triggers actual animation)
+        if _engine_ref:
+            if state in ("sleeping",):
+                _engine_ref.set_sleeping(True)
+            elif state in ("idle", "wake"):
+                _engine_ref.set_sleeping(False)
+            _engine_ref.sig_agent_state.emit(state)
+        # Broadcast to all WS clients
         await get_server().broadcast("state.changed", {"state": state})
         return {"success": True, "state": state}
 

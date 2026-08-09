@@ -122,6 +122,10 @@ def main():
     engine.start()
     log.info("Engine started")
 
+    # Wire engine to WS server so handlers can query real state
+    from backend.ws_server import set_engine
+    set_engine(engine)
+
     # ---- event loop ----------------------------------------------------------
     exit_code = app.exec()
 
