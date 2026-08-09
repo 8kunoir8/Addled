@@ -85,7 +85,7 @@ def main():
 
     # Save mark first-run as complete (happens after wizard in main flow)
     if config.is_first_run:
-        config.set("first_run_complete", False)
+        config.set("first_run_complete", value=False)
 
     log.info("Active provider: %s", config.active_provider)
     app.setApplicationDisplayName("Addled - " + config.agent_name)

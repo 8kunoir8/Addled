@@ -181,7 +181,7 @@ def _register_default_handlers():
         key = params.get("key")
         value = params.get("value")
         if section and key is not None:
-            config.set(section, key, value)
+            config.set(section, key, value=value)
         return {"success": True}
 
     _server.register("system.status", system_status)
