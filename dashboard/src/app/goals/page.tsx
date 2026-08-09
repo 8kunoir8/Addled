@@ -40,7 +40,17 @@ export default function GoalsPage() {
     if (!title.trim() || wsState !== 'connected') return;
     setCreating(true);
     try {
-      await send('goal.create', { title: title.trim(), description: description.trim(), priority });
+      const r = await send('goal.create', { title: title.trim(), description: description.trim(), priority });
+      // Add goal to local list with the returned ID
+      const newGoal: Goal = {
+        id: r?.goalId || `goal_${Date.now()}`,
+        title: title.trim(),
+        description: description.trim(),
+        status: 'pending',
+        priority: priority as Goal['priority'],
+        createdAt: new Date().toISOString(),
+      };
+      setGoals(prev => [newGoal, ...prev]);
       setTitle(''); setDescription('');
     } catch {}
     setCreating(false);

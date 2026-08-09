@@ -289,9 +289,22 @@ def _register_default_handlers():
         """Stub: browser.* actions — full implementation in Phase 3."""
         return {"success": True, "message": "Browser actions coming in Phase 3."}
 
+    async def code_edit(params: dict, ws) -> dict:
+        """Stub: code.edit — full implementation in Phase 5."""
+        wp = params.get("workspaceId", "")
+        instruction = params.get("instruction", "")
+        # Return a placeholder diff indicating what would happen
+        return {"diffs": [{
+            "file": params.get("filePath", "unknown"),
+            "instruction": instruction,
+            "status": "pending",
+            "message": "Code editing engine coming in Phase 5. Instruction saved."
+        }]}
+
     _server.register("chat.send", chat_send)
     _server.register("code.bind", code_bind)
     _server.register("code.read", code_read)
+    _server.register("code.edit", code_edit)
     _server.register("goal.create", goal_create)
     _server.register("swarm.spawn", swarm_spawn)
     _server.register("browser.navigate", browser_navigate)

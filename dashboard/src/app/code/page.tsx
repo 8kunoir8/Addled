@@ -87,9 +87,22 @@ export default function CodePage() {
             <div className="border-t border-[#30363d] p-3 flex gap-2">
               <input value={instruction} onChange={e=>setInstruction(e.target.value)} placeholder="Ask Addled to edit this file..."
                 className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-xs text-[#e8eaed] placeholder-[#484f58]"/>
-              <button disabled={!instruction.trim()||wsState!=='connected'}
+              <button
+                onClick={async () => {
+                  if (!instruction.trim() || wsState !== 'connected') return;
+                  setLoading(true);
+                  try {
+                    const r = await send('code.edit', { workspaceId: workspacePath, instruction: instruction.trim() });
+                    if (r?.diffs?.length) {
+                      setFileContent(`// Diffs generated (${r.diffs.length} changes). Full diff viewer coming in Phase 5.\n// Original file: ${selectedFile?.path}\n`);
+                    }
+                    setInstruction('');
+                  } catch (e: any) { setFileContent(`// Edit error: ${e.message}`); }
+                  setLoading(false);
+                }}
+                disabled={!instruction.trim()||wsState!=='connected'}
                 className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1.5 text-xs font-medium">
-                Edit
+                {loading?'Editing...':'Edit'}
               </button>
             </div>
           </>
