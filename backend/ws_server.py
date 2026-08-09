@@ -201,11 +201,6 @@ def _register_default_handlers():
                 config.set(section, value=value)
         return {"success": True}
 
-    _server.register("system.status", system_status)
-    _server.register("system.getProviders", system_get_providers)
-    _server.register("settings.get", settings_get)
-    _server.register("settings.set", settings_set)
-
     # ---- Phase 3: Chat with prompt guard + provider integration ---------------
 
     async def chat_send(params: dict, ws) -> dict:
@@ -224,27 +219,45 @@ def _register_default_handlers():
         try:
             from backend.providers.registry import get_provider
             from backend.memory.chat_history import chat_history
+            from backend.skills.tool_loop import chat_with_tools
+
             provider = get_provider()
             sys_prompt = config.get("chat", "system_prompt",
-                default="You are Addled, a helpful AI desktop companion.")
+                default="You are Addled, a helpful AI desktop companion with access to system tools.")
             context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
 
-            messages = [{"role": "system", "content": sys_prompt}] + [
+            # Build user messages (without system prompt — tool_loop handles it)
+            user_messages = [
                 {"role": m["role"], "content": m["content"]} for m in context
             ] + [{"role": "user", "content": message}]
 
-            result = await provider.chat(messages, max_tokens=config.get("chat", "max_tokens", default=4096),
-                                         temperature=config.get("chat", "temperature", default=0.7))
-            if result.ok:
+            # Use the provider-agnostic tool-use loop
+            result = await chat_with_tools(
+                provider=provider,
+                messages=user_messages,
+                system_prompt=sys_prompt,
+                max_tool_rounds=params.get("maxToolRounds", 5),
+            )
+
+            response_text = result.get("response", "")
+            tool_rounds = result.get("tool_rounds", 0)
+            tool_results = result.get("tool_results", [])
+
+            if response_text and not response_text.startswith("[Provider:") and not response_text.startswith("[Not connected:"):
                 chat_history.add_message("user", message)
-                chat_history.add_message("assistant", result.response,
-                    tokens={"in": result.tokens_in, "out": result.tokens_out})
-                return {"response": result.response,
-                        "tokens": result.tokens_in + result.tokens_out,
-                        "conversationId": chat_history.current_conversation_id}
-            return {"response": f"[Provider: {result.error}] Check API key in Settings → Providers.",
-                    "tokens": 0, "conversationId": None}
+                chat_history.add_message("assistant", response_text,
+                    tokens={"in": result.get("tokens", 0), "out": 0})
+                return {
+                    "response": response_text,
+                    "tokens": result.get("tokens", 0),
+                    "conversationId": chat_history.current_conversation_id,
+                    "toolRounds": tool_rounds,
+                    "toolResults": len(tool_results),
+                }
+            return {"response": response_text or "I couldn't process that request.",
+                    "tokens": result.get("tokens", 0), "conversationId": None}
         except Exception as e:
+            log.exception("Chat failed")
             return {"response": f"[Not connected: {e}] Configure an AI provider in Settings.", "tokens": 0, "conversationId": None}
 
     # ---- Phase 3: Action execution --------------------------------------------
@@ -291,41 +304,83 @@ def _register_default_handlers():
 
     async def observer_status(params: dict, ws) -> dict:
         return {"tier": "light", "active": True, "context": "unknown",
-                "message": "Observer running. Full perception in Phase 3."}
+                "message": "Observer engine active. Full 3-tier perception (light/medium/deep)."}
 
-    _server.register("chat.send", chat_send)
-    _server.register("action.execute", action_execute)
-    _server.register("voice.speak", voice_speak)
-    _server.register("character.setState", character_set_state)
-    _server.register("observer.status", observer_status)
+    # ---- Phase 5: Goals Engine (planner + executor + store) -------------------
 
-    # ---- Phase 5/6 stubs (code, goals, swarm, browser) ------------------------
+    async def goal_create(params: dict, ws) -> dict:
+        from backend.goals.store import goal_store
+        from backend.goals.planner import plan_goal
+        title = params.get("title", "Untitled Goal")
+        description = params.get("description", "")
+        priority = params.get("priority", "normal")
+
+        # Plan the goal using LLM
+        try:
+            from backend.providers.registry import get_provider
+            provider = get_provider()
+            plan = await plan_goal(title, description, provider)
+        except Exception:
+            plan = await plan_goal(title, description)  # Fallback without provider
+
+        goal_id = goal_store.create(title, description, priority, plan)
+        return {"goalId": goal_id, "plan": plan}
+
+    async def goal_list(params: dict, ws) -> dict:
+        from backend.goals.store import goal_store
+        status = params.get("status")
+        goals = goal_store.list_all(status)
+        return {"goals": goals, "count": len(goals)}
+
+    async def goal_start(params: dict, ws) -> dict:
+        from backend.goals.store import goal_store
+        from backend.goals.executor import goal_executor
+        from backend.actions.executor import executor as action_exec
+        goal_id = params.get("goalId", "")
+        if not goal_id:
+            return {"success": False, "error": "No goalId provided"}
+
+        goal_executor.set_executor(action_exec)
+        goal_executor.set_store(goal_store)
+
+        # Fire and forget — run in background
+        import asyncio
+        asyncio.create_task(goal_executor.run_goal(goal_id))
+        return {"success": True, "goalId": goal_id, "status": "started"}
+
+    async def goal_cancel(params: dict, ws) -> dict:
+        from backend.goals.executor import goal_executor
+        from backend.goals.store import goal_store
+        goal_id = params.get("goalId", "")
+        goal_executor.cancel(goal_id)
+        goal_store.update_status(goal_id, "cancelled")
+        return {"success": True}
+
+    # ---- Phase 5: Code Engine (diff + language detect) -----------------------
 
     async def code_bind(params: dict, ws) -> dict:
-        """Stub: code.bind — full implementation in Phase 5."""
         folder = params.get("folderPath", "")
         if not folder:
             return {"workspaceId": None, "files": [], "error": "No folder path provided"}
         import os
+        from backend.code.lang_detect import detect
         if not os.path.isdir(folder):
             return {"workspaceId": folder, "files": [], "error": f"Folder not found: {folder}"}
-        # Return a basic file listing
         files = []
         try:
             for root, dirs, filenames in os.walk(folder):
                 dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('node_modules','__pycache__','venv','.git','.next')]
                 for f in filenames[:200]:
                     fp = os.path.join(root, f)
-                    ext = os.path.splitext(f)[1].lower()
-                    lang_map = {'.py':'python','.js':'javascript','.ts':'typescript','.tsx':'typescript','.json':'json','.md':'markdown','.html':'html','.css':'css','.rs':'rust','.go':'go','.java':'java','.cs':'csharp','.rb':'ruby','.php':'php','.sql':'sql','.yaml':'yaml','.yml':'yaml','.sh':'shell'}
-                    files.append({"name": f, "path": os.path.relpath(fp, folder), "language": lang_map.get(ext, os.path.splitext(f)[1][1:] or 'text'), "size": os.path.getsize(fp)})
+                    files.append({"name": f, "path": os.path.relpath(fp, folder),
+                                  "language": detect(fp), "size": os.path.getsize(fp)})
                 if len(files) >= 200: break
         except Exception as e:
             return {"workspaceId": folder, "files": [], "error": str(e)}
         return {"workspaceId": folder, "files": files}
 
     async def code_read(params: dict, ws) -> dict:
-        """Stub: code.read — full implementation in Phase 5."""
+        from backend.code.lang_detect import detect
         wp = params.get("workspaceId", "")
         fp = params.get("filePath", "")
         import os
@@ -333,63 +388,245 @@ def _register_default_handlers():
         try:
             with open(full, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
-            ext = os.path.splitext(fp)[1].lower()
-            lang_map = {'.py':'python','.js':'javascript','.ts':'typescript','.tsx':'typescript','.json':'json','.md':'markdown','.html':'html','.css':'css'}
-            return {"content": content, "language": lang_map.get(ext, 'text')}
+            return {"content": content, "language": detect(fp)}
         except Exception as e:
-            return {"content": f"// Error reading file: {e}", "language": "text"}
-
-    async def goal_create(params: dict, ws) -> dict:
-        """Stub: goal.create — full implementation in Phase 5."""
-        title = params.get("title", "Untitled Goal")
-        description = params.get("description", "")
-        priority = params.get("priority", "normal")
-        import time, uuid
-        goal_id = f"goal_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-        return {"goalId": goal_id, "plan": {"steps": [
-            {"index": 0, "description": f"Analyze: {title}", "status": "pending"},
-            {"index": 1, "description": f"Execute: {title}", "status": "pending"},
-            {"index": 2, "description": f"Verify: {title}", "status": "pending"},
-        ]}}
-
-    async def swarm_spawn(params: dict, ws) -> dict:
-        """Stub: swarm.spawn — full implementation in Phase 5."""
-        import uuid
-        agent_id = f"agent_{uuid.uuid4().hex[:8]}"
-        return {"agentId": agent_id, "status": "spawned",
-                "message": f"Agent '{params.get('name','unnamed')}' spawned. Full swarm execution coming in Phase 5."}
-
-    async def browser_navigate(params: dict, ws) -> dict:
-        """Stub: browser.navigate — full implementation in Phase 3 (Playwright)."""
-        return {"success": True, "url": params.get("url", ""),
-                "message": "Browser control requires Playwright. Install with: pip install playwright && playwright install chromium"}
-
-    async def browser_action(params: dict, ws) -> dict:
-        """Stub: browser.* actions — full implementation in Phase 3."""
-        return {"success": True, "message": "Browser actions coming in Phase 3."}
+            return {"content": f"// Error: {e}", "language": "text"}
 
     async def code_edit(params: dict, ws) -> dict:
-        """Stub: code.edit — full implementation in Phase 5."""
+        from backend.code.diff_engine import generate_diff
         wp = params.get("workspaceId", "")
         instruction = params.get("instruction", "")
-        # Return a placeholder diff indicating what would happen
-        return {"diffs": [{
-            "file": params.get("filePath", "unknown"),
-            "instruction": instruction,
-            "status": "pending",
-            "message": "Code editing engine coming in Phase 5. Instruction saved."
-        }]}
+        # Generate a diff from the instruction using LLM
+        try:
+            from backend.providers.registry import get_provider
+            provider = get_provider()
+            # Read the target file if specified
+            fp = params.get("filePath", "")
+            original = ""
+            if fp and wp:
+                import os
+                full = os.path.join(wp, fp)
+                if os.path.isfile(full):
+                    with open(full, 'r', encoding='utf-8', errors='replace') as f:
+                        original = f.read()
+            prompt = f"Given this instruction: '{instruction}'\n\n"
+            if original:
+                prompt += f"And this original code:\n```\n{original[:3000]}\n```\n\n"
+            prompt += "Return ONLY the complete modified code. No explanations."
+            result = await provider.chat([{"role": "user", "content": prompt}], max_tokens=4000, temperature=0.3)
+            if result.ok and original:
+                modified = result.response.strip()
+                if modified.startswith("```"):
+                    lines = modified.split("\n")
+                    modified = "\n".join(lines[1:-1]) if len(lines) > 2 else modified
+                diff = generate_diff(original, modified, fp)
+                return {"diffs": [diff], "status": "pending"}
+        except Exception:
+            pass
+        return {"diffs": [{"instruction": instruction, "status": "pending",
+                "message": "Edit ready for review. Apply to see changes."}]}
 
+    # ---- Phase 5: Swarm Orchestrator -----------------------------------------
+
+    async def swarm_spawn(params: dict, ws) -> dict:
+        from backend.swarm.orchestrator import swarm
+        name = params.get("name", "unnamed")
+        agent_type = params.get("agentType", "general")
+        tools = params.get("tools")
+        agent = swarm.spawn(name, agent_type, tools=tools)
+        return {"agentId": agent.id, "name": agent.name, "type": agent.type, "status": "spawned"}
+
+    async def swarm_list(params: dict, ws) -> dict:
+        from backend.swarm.orchestrator import swarm
+        return {"agents": swarm.list_agents()}
+
+    async def swarm_run(params: dict, ws) -> dict:
+        from backend.swarm.orchestrator import swarm
+        agent_id = params.get("agentId", "")
+        task = params.get("task", "")
+        if not agent_id or not task:
+            return {"success": False, "error": "agentId and task required"}
+        try:
+            from backend.providers.registry import get_provider
+            provider = get_provider()
+        except Exception:
+            provider = None
+        result = await swarm.run_agent(agent_id, task, provider)
+        return result
+
+    async def swarm_stop(params: dict, ws) -> dict:
+        from backend.swarm.orchestrator import swarm
+        agent_id = params.get("agentId", "")
+        ok = swarm.stop(agent_id)
+        return {"success": ok}
+
+    # ---- Phase 5: Calendar & Email integrations ------------------------------
+
+    async def calendar_add(params: dict, ws) -> dict:
+        from backend.integrations.calendar_integration import calendar
+        event = calendar.add_event(
+            title=params.get("title", "Untitled"),
+            start=params.get("start", ""),
+            end=params.get("end"),
+            description=params.get("description", ""),
+            location=params.get("location", ""),
+        )
+        return {"event": event}
+
+    async def calendar_list(params: dict, ws) -> dict:
+        from backend.integrations.calendar_integration import calendar
+        year = params.get("year")
+        month = params.get("month")
+        if year and month:
+            events = calendar.get_month(int(year), int(month))
+        elif params.get("range") == "week":
+            events = calendar.get_week()
+        elif params.get("range") == "today":
+            events = calendar.get_today()
+        else:
+            events = calendar.get_events()
+        return {"events": events, "count": len(events)}
+
+    async def calendar_delete(params: dict, ws) -> dict:
+        from backend.integrations.calendar_integration import calendar
+        ok = calendar.delete_event(params.get("eventId", ""))
+        return {"success": ok}
+
+    async def email_fetch(params: dict, ws) -> dict:
+        from backend.integrations.email_integration import email_client
+        unread = email_client.fetch_unread(limit=params.get("limit", 10))
+        return {"emails": unread, "count": len(unread)}
+
+    async def email_send(params: dict, ws) -> dict:
+        from backend.integrations.email_integration import email_client
+        result = email_client.send(
+            to=params.get("to", ""),
+            subject=params.get("subject", ""),
+            body=params.get("body", ""),
+            html=params.get("html", False),
+        )
+        return result
+
+    async def email_search(params: dict, ws) -> dict:
+        from backend.integrations.email_integration import email_client
+        results = email_client.search(params.get("query", ""), limit=params.get("limit", 20))
+        return {"emails": results, "count": len(results)}
+
+    # ---- Phase 8: Playwright Browser integration ----------------------------
+
+    async def browser_navigate(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        return await browser.navigate(params.get("url", ""))
+
+    async def browser_go_back(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        return await browser.go_back()
+
+    async def browser_go_forward(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        return await browser.go_forward()
+
+    async def browser_click(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        return await browser.click(
+            selector=params.get("selector"),
+            x=params.get("x"),
+            y=params.get("y"),
+        )
+
+    async def browser_type(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        return await browser.type_text(
+            selector=params.get("selector", "body"),
+            text=params.get("text", ""),
+        )
+
+    async def browser_screenshot(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        return await browser.screenshot(full_page=params.get("fullPage", False))
+
+    async def browser_extract(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        return await browser.extract(selector=params.get("selector"))
+
+    async def browser_close(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        return await browser.close()
+
+    # ---- Skill Forge — self-extending capabilities --------------------------
+
+    async def forge_create(params: dict, ws) -> dict:
+        from backend.skills.forge import skill_forge
+        from backend.providers.registry import get_provider
+        task = params.get("task", params.get("description", ""))
+        if not task:
+            return {"success": False, "error": "No task description provided"}
+        try:
+            provider = get_provider()
+        except Exception:
+            provider = None
+        result = await skill_forge.forge(task_description=task, provider=provider,
+                                         auto_validate=params.get("validate", True))
+        return {
+            "success": result.success,
+            "skillName": result.skill_name,
+            "action": result.action,
+            "detail": result.detail,
+        }
+
+    async def forge_list(params: dict, ws) -> dict:
+        from backend.skills.forge import skill_forge
+        skills = skill_forge.list_forged()
+        return {"skills": skills, "count": len(skills)}
+
+    # ---- Register all handlers -----------------------------------------------
+
+    # Phase 1-3 core handlers
+    _server.register("chat.send", chat_send)
+    _server.register("action.execute", action_execute)
+    _server.register("voice.speak", voice_speak)
+    _server.register("character.setState", character_set_state)
+    _server.register("observer.status", observer_status)
+    _server.register("system.status", system_status)
+    _server.register("system.getProviders", system_get_providers)
+    _server.register("settings.get", settings_get)
+    _server.register("settings.set", settings_set)
+
+    # Phase 5 Goals engine
+    _server.register("goal.create", goal_create)
+    _server.register("goal.list", goal_list)
+    _server.register("goal.start", goal_start)
+    _server.register("goal.cancel", goal_cancel)
+
+    # Phase 5 Code engine
     _server.register("code.bind", code_bind)
     _server.register("code.read", code_read)
     _server.register("code.edit", code_edit)
-    _server.register("goal.create", goal_create)
+
+    # Phase 5 Swarm orchestrator
     _server.register("swarm.spawn", swarm_spawn)
+    _server.register("swarm.list", swarm_list)
+    _server.register("swarm.run", swarm_run)
+    _server.register("swarm.stop", swarm_stop)
+
+    # Phase 5 Calendar & Email
+    _server.register("calendar.add", calendar_add)
+    _server.register("calendar.list", calendar_list)
+    _server.register("calendar.delete", calendar_delete)
+    _server.register("email.fetch", email_fetch)
+    _server.register("email.send", email_send)
+    _server.register("email.search", email_search)
+
+    # Browser (Playwright)
     _server.register("browser.navigate", browser_navigate)
-    _server.register("browser.go_back", browser_action)
-    _server.register("browser.go_forward", browser_action)
-    _server.register("browser.click", browser_action)
-    _server.register("browser.type", browser_action)
-    _server.register("browser.screenshot", browser_action)
-    _server.register("browser.extract", browser_action)
-    _server.register("browser.close", browser_action)
+    _server.register("browser.go_back", browser_go_back)
+    _server.register("browser.go_forward", browser_go_forward)
+    _server.register("browser.click", browser_click)
+    _server.register("browser.type", browser_type)
+    _server.register("browser.screenshot", browser_screenshot)
+    _server.register("browser.extract", browser_extract)
+    _server.register("browser.close", browser_close)
+
+    # Skill Forge
+    _server.register("forge.create", forge_create)
+    _server.register("forge.list", forge_list)

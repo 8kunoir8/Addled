@@ -49,6 +49,7 @@ def get_provider(provider_id: str | None = None):
     from backend.providers.claude_provider import ClaudeProvider
     from backend.providers.gemini_provider import GeminiProvider
     from backend.providers.ollama_provider import OllamaProvider
+    from backend.providers.lmstudio_provider import LMStudioProvider
 
     pid = provider_id or config.active_provider
     cfg = config.provider_config(pid)
@@ -64,8 +65,7 @@ def get_provider(provider_id: str | None = None):
     elif pid == "ollama":
         return OllamaProvider(cfg)
     elif pid == "lmstudio":
-        return OpenAIProvider({**cfg, "base_url": cfg.get("base_url", "http://localhost:1234/v1"),
-                               "provider_id": "lmstudio"})
+        return LMStudioProvider(cfg)
     elif pid == "copilot":
         from backend.providers.copilot_provider import CopilotProvider
         return CopilotProvider(cfg)

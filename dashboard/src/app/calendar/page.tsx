@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { useWS } from '@/lib/useWS';
 
 const DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -8,10 +9,59 @@ const MONTHS=['January','February','March','April','May','June','July','August',
 interface CalendarEvent { id:string; title:string; start:string; end:string; source:string; }
 
 export default function CalendarPage() {
+  const { state: wsState, send } = useWS();
   const today=new Date();
   const [viewDate,setViewDate]=useState(new Date(today.getFullYear(),today.getMonth(),1));
   const [events,setEvents]=useState<CalendarEvent[]>([]);
   const [selectedDate,setSelectedDate]=useState<string|null>(null);
+  const [newTitle, setNewTitle] = useState('');
+  const [adding, setAdding] = useState(false);
+
+  // Fetch events for the current month from backend
+  const fetchEvents = useCallback(async () => {
+    if (wsState !== 'connected') return;
+    try {
+      const r = await send('calendar.list', { year: viewDate.getFullYear(), month: viewDate.getMonth() + 1 });
+      if (r?.events) {
+        setEvents(r.events.map((e: Record<string, unknown>) => ({
+          id: e.id as string,
+          title: e.title as string,
+          start: e.start as string,
+          end: (e.end as string) || '',
+          source: (e.source as string) || 'local',
+        })));
+      }
+    } catch {}
+  }, [wsState, send, viewDate]);
+
+  useEffect(() => { fetchEvents(); }, [fetchEvents]);
+
+  const handleAddEvent = async () => {
+    if (!newTitle.trim() || !selectedDate || wsState !== 'connected') return;
+    setAdding(true);
+    try {
+      const r = await send('calendar.add', { title: newTitle.trim(), start: selectedDate });
+      if (r?.event) {
+        setEvents(prev => [...prev, {
+          id: r.event.id,
+          title: r.event.title,
+          start: r.event.start,
+          end: r.event.end || '',
+          source: 'local',
+        }]);
+      }
+      setNewTitle('');
+    } catch {}
+    setAdding(false);
+  };
+
+  const handleDelete = async (eventId: string) => {
+    if (wsState !== 'connected') return;
+    try {
+      await send('calendar.delete', { eventId });
+      setEvents(prev => prev.filter(e => e.id !== eventId));
+    } catch {}
+  };
 
   const year=viewDate.getFullYear(),month=viewDate.getMonth();
   const firstDay=new Date(year,month,1).getDay();
@@ -50,9 +100,25 @@ export default function CalendarPage() {
             </div>))}
           </div>
         </div>
-        <div className="w-64 border-l border-[#30363d] p-4">
+        <div className="w-64 border-l border-[#30363d] p-4 flex flex-col">
           <h3 className="text-xs font-medium text-[#8b949e] mb-3">{selectedDate||'Select a date'}</h3>
-          {selectedEvents.length===0?<p className="text-xs text-[#484f58]">No events</p>:selectedEvents.map(e=><div key={e.id} className="mb-2 p-2 bg-[#161b22] rounded border border-[#21262d]"><p className="text-xs text-[#e8eaed]">{e.title}</p><p className="text-[10px] text-[#8b949e]">{e.start} – {e.end}</p></div>)}
+
+          {selectedDate && (
+            <div className="mb-3 flex gap-1">
+              <input value={newTitle} onChange={e=>setNewTitle(e.target.value)} placeholder="New event..."
+                className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"/>
+              <button onClick={handleAddEvent} disabled={!newTitle.trim()||adding||wsState!=='connected'}
+                className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-2 py-1 text-xs">+</button>
+            </div>
+          )}
+
+          {selectedEvents.length===0?<p className="text-xs text-[#484f58] flex-1">No events</p>:selectedEvents.map(e=><div key={e.id} className="mb-2 p-2 bg-[#161b22] rounded border border-[#21262d] group">
+            <div className="flex items-start justify-between">
+              <p className="text-xs text-[#e8eaed] flex-1">{e.title}</p>
+              <button onClick={()=>handleDelete(e.id)} className="text-[10px] text-[#484f58] hover:text-[#f85149] opacity-0 group-hover:opacity-100 transition-opacity ml-1">×</button>
+            </div>
+            <p className="text-[10px] text-[#8b949e]">{e.start}{e.end ? ` – ${e.end}` : ''}</p>
+          </div>)}
         </div>
       </div>
     </div>

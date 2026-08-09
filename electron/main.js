@@ -37,6 +37,14 @@ const isDev = !app.isPackaged;
 const DASHBOARD_PORT = 3000;
 const WS_PORT = 9876;
 
+// ─── Auto-updater ─────────────────────────────────────────────────────────────
+let updater = null;
+try {
+  updater = require('./updater');
+} catch (e) {
+  console.log('[Addled] Auto-updater not available:', e.message);
+}
+
 // ─── Paths ────────────────────────────────────────────────────────────────────
 const ROOT_DIR = isDev ? path.join(__dirname, '..') : path.dirname(app.getPath('exe'));
 const BACKEND_DIR = path.join(ROOT_DIR, 'backend');
@@ -212,7 +220,7 @@ function createTray() {
     {
       label: 'Check for Updates',
       click: () => {
-        // TODO: Auto-updater integration
+        if (updater) updater.checkForUpdates();
       },
     },
     {
@@ -263,6 +271,9 @@ app.whenReady().then(async () => {
   setupIPC();
   createTray();
   startPythonBackend();
+
+  // Start auto-updater checks (every 4 hours)
+  if (updater) updater.startUpdateChecks();
 
   if (!isDev) {
     startNextDashboard();

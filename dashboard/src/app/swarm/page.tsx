@@ -1,35 +1,64 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useWS } from '@/lib/useWS';
 
 interface Agent { id:string; name:string; emoji:string; type:string; status:'offline'|'ready'|'running'|'error'; currentTask?:string; tools:string[]; }
 
-const BUILTIN_AGENTS:Agent[]=[
-  {id:'coder',name:'Code Assistant',emoji:'👨‍💻',type:'coder',status:'ready',tools:['code-analysis','git']},
-  {id:'writer',name:'Content Writer',emoji:'✍️',type:'writer',status:'ready',tools:['grammar-check','research']},
-  {id:'analyst',name:'Data Analyst',emoji:'📊',type:'analyst',status:'ready',tools:['data-processing','charts']},
-  {id:'planner',name:'Strategic Planner',emoji:'🎯',type:'planner',status:'ready',tools:['timeline','gantt']},
-  {id:'researcher',name:'Web Researcher',emoji:'🔍',type:'researcher',status:'ready',tools:['browser','web_search']},
-  {id:'devops',name:'DevOps Helper',emoji:'🐳',type:'devops',status:'ready',tools:['terminal','docker','git']},
-  {id:'general',name:'General Assistant',emoji:'🤖',type:'general',status:'ready',tools:['all']},
-];
+const EMOJI_MAP: Record<string, string> = {
+  coder: '👨‍💻', writer: '✍️', analyst: '📊', planner: '🎯',
+  researcher: '🔍', devops: '🐳', general: '🤖',
+};
 
 const STATUS_DOT:Record<string,string>={offline:'bg-[#484f58]',ready:'bg-[#3fb950]',running:'bg-[#d29922] animate-pulse',error:'bg-[#f85149]'};
 
 export default function SwarmPage() {
   const { state:wsState, send }=useWS();
-  const [agents,setAgents]=useState<Agent[]>(BUILTIN_AGENTS);
+  const [agents,setAgents]=useState<Agent[]>([]);
   const [taskInputs,setTaskInputs]=useState<Record<string,string>>({});
   const [spawning,setSpawning]=useState<string|null>(null);
+
+  // Fetch agents from backend
+  const fetchAgents = useCallback(async () => {
+    if (wsState !== 'connected') return;
+    try {
+      const r = await send('swarm.list', {});
+      if (r?.agents) {
+        setAgents(r.agents.map((a: Record<string, unknown>) => ({
+          id: a.id as string,
+          name: a.name as string,
+          emoji: EMOJI_MAP[a.type as string] || '🤖',
+          type: a.type as string,
+          status: (a.status as Agent['status']) || 'ready',
+          currentTask: a.currentTask as string | undefined,
+          tools: (a.tools as string[]) || ['all'],
+        })));
+      }
+    } catch {}
+  }, [wsState, send]);
+
+  useEffect(() => { fetchAgents(); }, [fetchAgents]);
 
   const handleSpawn=async(agent:Agent)=>{
     const task=taskInputs[agent.id]?.trim();
     if(!task||wsState!=='connected')return;
     setSpawning(agent.id);
-    try{await send('swarm.spawn',{agentType:agent.type,name:agent.name,task});setAgents(prev=>prev.map(a=>a.id===agent.id?{...a,status:'running',currentTask:task}:a));}
+    try{
+      await send('swarm.spawn',{agentType:agent.type,name:agent.name,tools:agent.tools});
+      // Also run the task
+      await send('swarm.run',{agentId:agent.id,task});
+      setAgents(prev=>prev.map(a=>a.id===agent.id?{...a,status:'running',currentTask:task}:a));
+    }
     catch{setAgents(prev=>prev.map(a=>a.id===agent.id?{...a,status:'error'}:a));}
     setSpawning(null);
+  };
+
+  const handleStop=async(agent:Agent)=>{
+    if(wsState!=='connected')return;
+    try{
+      await send('swarm.stop',{agentId:agent.id});
+      setAgents(prev=>prev.map(a=>a.id===agent.id?{...a,status:'ready',currentTask:undefined}:a));
+    }catch{}
   };
 
   return (
@@ -51,7 +80,7 @@ export default function SwarmPage() {
                   <button onClick={()=>handleSpawn(agent)} disabled={!taskInputs[agent.id]?.trim()||spawning===agent.id||wsState!=='connected'} className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1 text-xs font-medium">{spawning===agent.id?'...':'Run'}</button>
                 </div>
               ):(
-                <button onClick={()=>setAgents(prev=>prev.map(a=>a.id===agent.id?{...a,status:'ready',currentTask:undefined}:a))} className="text-xs px-3 py-1 bg-[#f85149] text-white rounded hover:bg-[#ff6a63]">Stop</button>
+                <button onClick={()=>handleStop(agent)} className="text-xs px-3 py-1 bg-[#f85149] text-white rounded hover:bg-[#ff6a63]">Stop</button>
               )}
             </div>
           ))}

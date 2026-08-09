@@ -83,12 +83,22 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Addled")
 
-    # Save mark first-run as complete (happens after wizard in main flow)
-    if config.is_first_run:
-        config.set("first_run_complete", value=False)
-
     log.info("Active provider: %s", config.active_provider)
     app.setApplicationDisplayName("Addled - " + config.agent_name)
+
+    # ---- first-run onboarding wizard -----------------------------------------
+    from backend.onboarding.wizard import is_first_run, show_onboarding
+    if is_first_run():
+        log.info("First run detected — launching onboarding wizard")
+        completed = show_onboarding()
+        if not completed:
+            log.info("Onboarding cancelled by user")
+            sys.exit(0)
+        log.info("Onboarding complete")
+        # Reload config after wizard saves it
+        config._dirty = False
+    else:
+        log.info("Already onboarded — skipping wizard")
 
     # ---- start WebSocket server (runs in background) --------------------------
     from backend.ws_server import start_ws_server

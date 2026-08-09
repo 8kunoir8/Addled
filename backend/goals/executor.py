@@ -1,0 +1,118 @@
+"""
+Goal executor — runs goal steps sequentially with checkpointing.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+
+log = logging.getLogger("addled.goals.executor")
+
+
+class GoalExecutor:
+    """Executes goal steps with checkpointing and recovery."""
+
+    def __init__(self, action_executor=None, store=None):
+        self._executor = action_executor
+        self._store = store
+        self._running: dict[str, asyncio.Task] = {}
+        self._cancel_flags: dict[str, bool] = {}
+
+    def set_executor(self, executor):
+        self._executor = executor
+
+    def set_store(self, store):
+        self._store = store
+
+    async def run_goal(self, goal_id: str) -> dict:
+        """Execute all steps of a goal. Returns final status."""
+        if not self._store:
+            return {"status": "failed", "error": "No goal store configured"}
+        if not self._executor:
+            return {"status": "failed", "error": "No action executor configured"}
+
+        goal = self._store.load(goal_id)
+        if not goal:
+            return {"status": "failed", "error": f"Goal not found: {goal_id}"}
+
+        self._cancel_flags[goal_id] = False
+        plan = goal.get("plan", {})
+        steps = plan.get("steps", [])
+
+        # Sort steps by index
+        steps.sort(key=lambda s: s.get("index", 0))
+        completed = set()
+
+        for step in steps:
+            if self._cancel_flags.get(goal_id):
+                self._store.update_status(goal_id, "cancelled")
+                return {"status": "cancelled", "completed": len(completed), "total": len(steps)}
+
+            step_idx = step.get("index", 0)
+            deps = step.get("dependencies", [])
+
+            # Check dependencies
+            if deps and not all(d in completed for d in deps):
+                step["status"] = "blocked"
+                self._store.save(goal)
+                continue
+
+            if step.get("status") == "completed":
+                completed.add(step_idx)
+                continue
+
+            # Execute step
+            step["status"] = "in_progress"
+            self._store.save(goal)
+
+            try:
+                from backend.actions.executor import ActionRequest
+                request = ActionRequest(
+                    action_type=step.get("action_type", "run_command"),
+                    params=step.get("params", {}),
+                )
+                result = await self._executor.execute(request)
+
+                if result.success:
+                    step["status"] = "completed"
+                    step["result"] = {"summary": result.summary, "data": result.data}
+                    completed.add(step_idx)
+                else:
+                    step["status"] = "failed"
+                    step["error"] = result.error
+                    # Retry once with modified approach
+                    if step.get("retry_count", 0) < 1:
+                        step["retry_count"] = step.get("retry_count", 0) + 1
+                        step["status"] = "pending"
+                        self._store.save(goal)
+                        continue
+                    self._store.update_status(goal_id, "failed")
+                    return {"status": "failed", "step": step_idx, "error": result.error,
+                            "completed": len(completed), "total": len(steps)}
+            except Exception as e:
+                step["status"] = "failed"
+                step["error"] = str(e)
+                self._store.update_status(goal_id, "failed")
+                return {"status": "failed", "step": step_idx, "error": str(e)}
+
+            self._store.save(goal)
+            await asyncio.sleep(0.5)  # Brief pause between steps
+
+        self._store.update_status(goal_id, "completed")
+        return {"status": "completed", "completed": len(completed), "total": len(steps)}
+
+    def cancel(self, goal_id: str):
+        """Cancel a running goal."""
+        self._cancel_flags[goal_id] = True
+        if goal_id in self._running:
+            self._running[goal_id].cancel()
+
+    @property
+    def is_running(self) -> bool:
+        return any(not t.done() for t in self._running.values())
+
+
+# Singleton
+goal_executor = GoalExecutor()

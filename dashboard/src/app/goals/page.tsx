@@ -1,15 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useWS } from '@/lib/useWS';
 
 interface Goal {
   id: string;
   title: string;
   description: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
   priority: 'low' | 'normal' | 'high' | 'urgent';
   createdAt: string;
+  plan?: { steps: { index: number; description: string; status: string }[] };
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -17,6 +18,7 @@ const STATUS_COLORS: Record<string, string> = {
   in_progress: 'bg-[#1f6feb22] text-[#58a6ff]',
   completed: 'bg-[#3fb95022] text-[#3fb950]',
   failed: 'bg-[#f8514922] text-[#f85149]',
+  cancelled: 'bg-[#f8514922] text-[#f85149]',
 };
 
 const PRIORITY_COLORS: Record<string, string> = {
@@ -36,12 +38,32 @@ export default function GoalsPage() {
   const [filter, setFilter] = useState<string>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // Fetch goals from backend on mount
+  const fetchGoals = useCallback(async () => {
+    if (wsState !== 'connected') return;
+    try {
+      const r = await send('goal.list', {});
+      if (r?.goals) {
+        setGoals(r.goals.map((g: Record<string, unknown>) => ({
+          id: g.id as string,
+          title: g.title as string,
+          description: (g.description as string) || '',
+          status: g.status as Goal['status'],
+          priority: (g.priority as Goal['priority']) || 'normal',
+          createdAt: g.created_at ? new Date((g.created_at as number) * 1000).toISOString() : new Date().toISOString(),
+          plan: g.plan as Goal['plan'],
+        })));
+      }
+    } catch {}
+  }, [wsState, send]);
+
+  useEffect(() => { fetchGoals(); }, [fetchGoals]);
+
   const handleCreate = async () => {
     if (!title.trim() || wsState !== 'connected') return;
     setCreating(true);
     try {
       const r = await send('goal.create', { title: title.trim(), description: description.trim(), priority });
-      // Add goal to local list with the returned ID
       const newGoal: Goal = {
         id: r?.goalId || `goal_${Date.now()}`,
         title: title.trim(),
@@ -49,11 +71,30 @@ export default function GoalsPage() {
         status: 'pending',
         priority: priority as Goal['priority'],
         createdAt: new Date().toISOString(),
+        plan: r?.plan,
       };
       setGoals(prev => [newGoal, ...prev]);
       setTitle(''); setDescription('');
     } catch {}
     setCreating(false);
+  };
+
+  const handleStart = async (goalId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (wsState !== 'connected') return;
+    try {
+      await send('goal.start', { goalId });
+      setGoals(prev => prev.map(g => g.id === goalId ? { ...g, status: 'in_progress' } : g));
+    } catch {}
+  };
+
+  const handleCancel = async (goalId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (wsState !== 'connected') return;
+    try {
+      await send('goal.cancel', { goalId });
+      setGoals(prev => prev.map(g => g.id === goalId ? { ...g, status: 'cancelled' } : g));
+    } catch {}
   };
 
   const filtered = filter === 'all' ? goals : goals.filter(g => g.status === filter);
@@ -115,9 +156,12 @@ export default function GoalsPage() {
               )}
               {expandedId === goal.id && (
                 <div className="flex gap-2 mt-3 pt-3 border-t border-[#21262d]">
-                  {goal.status === 'pending' && <button onClick={(e)=>{e.stopPropagation();setGoals(prev=>prev.map(g=>g.id===goal.id?{...g,status:'in_progress'}:g))}} className="text-xs px-3 py-1 bg-[#1f6feb] text-white rounded hover:bg-[#388bfd]">Start</button>}
-                  {goal.status === 'in_progress' && <button onClick={(e)=>{e.stopPropagation();setGoals(prev=>prev.map(g=>g.id===goal.id?{...g,status:'pending'}:g))}} className="text-xs px-3 py-1 bg-[#d29922] text-black rounded hover:bg-[#e2a93b]">Pause</button>}
-                  {goal.status !== 'completed' && goal.status !== 'failed' && <button onClick={(e)=>{e.stopPropagation();setGoals(prev=>prev.map(g=>g.id===goal.id?{...g,status:'failed'}:g))}} className="text-xs px-3 py-1 bg-[#f85149] text-white rounded hover:bg-[#ff6a63]">Cancel</button>}
+                  {goal.status === 'pending' && <button onClick={(e) => handleStart(goal.id, e)}
+                    className="text-xs px-3 py-1 bg-[#1f6feb] text-white rounded hover:bg-[#388bfd]">Start</button>}
+                  {goal.status === 'in_progress' && <button onClick={(e) => handleCancel(goal.id, e)}
+                    className="text-xs px-3 py-1 bg-[#d29922] text-black rounded hover:bg-[#e2a93b]">Pause</button>}
+                  {(goal.status === 'pending' || goal.status === 'in_progress') && <button onClick={(e) => handleCancel(goal.id, e)}
+                    className="text-xs px-3 py-1 bg-[#f85149] text-white rounded hover:bg-[#ff6a63]">Cancel</button>}
                 </div>
               )}
             </div>

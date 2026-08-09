@@ -1,22 +1,59 @@
 appId: com.kunoir.addled
 productName: Addled
+copyright: Copyright © 2026 Kunoir
+
 directories:
   output: dist
-  buildResources: assets
+  buildResources: electron/icons
+
 files:
   - electron/**/*
   - dashboard/.next/**/*
-  - bots/**/*
+  - dashboard/out/**/*
+  - dashboard/package.json
+  - backend/**/*.py
+  - backend/**/*.txt
+  - bots/**/*.js
+  - bots/**/*.json
   - package.json
+  - '!**/__pycache__/**'
+  - '!**/*.pyc'
+  - '!**/.git'
+
 extraResources:
-  - from: dist/addled-backend.exe
-    to: backend/addled-backend.exe
+  - from: backend/memory
+    to: memory
+    filter: ['**/*']
+  - from: electron/icons
+    to: icons
+    filter: ['**/*']
+
 win:
-  target: nsis
-  icon: assets/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  icon: electron/icons/icon.ico
+  artifactName: '${productName}-${version}-${arch}.${ext}'
+
 nsis:
   oneClick: false
+  perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Addled
+  uninstallDisplayName: Addled
+  license: LICENSE
+  installerIcon: electron/icons/icon.ico
+  uninstallerIcon: electron/icons/icon.ico
+
+portable:
+  artifactName: '${productName}-${version}-portable.${ext}'
+
+publish:
+  provider: github
+  owner: 8kunoir8
+  repo: Addled
+  releaseType: release

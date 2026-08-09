@@ -83,11 +83,21 @@ class Engine(QObject):
         """Lazy-init all subsystems in order."""
         from backend.safety.presence_guard import PresenceGuard
         from backend.cognition.decision import DecisionEngine
+        from backend.perception.observer import Observer
+        from backend.goals.executor import goal_executor
+        from backend.goals.store import goal_store
+        from backend.actions.executor import executor as action_exec
 
         self._presence_guard = PresenceGuard()
         self._decision = DecisionEngine()
+        self._observer = Observer(decision=self._decision)
 
-        log.info("Engine subsystems initialized")
+        # Wire goal executor with action executor + store
+        goal_executor.set_executor(action_exec)
+        goal_executor.set_store(goal_store)
+        self._goal_executor = goal_executor
+
+        log.info("Engine subsystems initialized (observer, presence, decision, goals)")
 
     async def _tick(self):
         """One engine tick (~5s)."""
@@ -105,15 +115,37 @@ class Engine(QObject):
                 self._set_state(EngineState.RUNNING)
                 self.sig_agent_state.emit("idle")
 
-        # 2. Light observation (screen hash)
-        # TODO: Full observer integration in Phase 3
+        # 2. Light observation — screen hash + context classification
+        if self._observer:
+            try:
+                obs = await self._observer.tick()
+                if obs and obs.context != "unknown" and obs.changed:
+                    log.debug("Observer: context=%s tier=%s", obs.context, obs.tier)
+                    # Emit observing state if screen changed
+                    if obs.tier == "light":
+                        self.sig_agent_state.emit("observing")
+                    elif obs.tier == "deep" and obs.decision:
+                        self.sig_agent_state.emit(obs.decision)
+            except Exception as e:
+                log.warning("Observer tick failed: %s", e)
 
-        # 3. Idle state if no activity
+        # 3. Process pending goal steps — one step per tick
+        if self._goal_executor:
+            try:
+                from backend.goals.store import goal_store
+                in_progress = goal_store.list_all(status="in_progress")
+                if in_progress:
+                    goal = in_progress[0]
+                    # Fire-and-forget step processing (don't block tick)
+                    if goal["id"] not in self._goal_executor._running:
+                        self.sig_agent_state.emit("goal_executing")
+                        asyncio.ensure_future(self._goal_executor.run_goal(goal["id"]))
+            except Exception as e:
+                log.warning("Goal tick failed: %s", e)
+
+        # 4. Idle state if no activity detected
         if self._state == EngineState.RUNNING:
             self.sig_agent_state.emit("idle")
-
-        # 4. Process pending goal steps
-        # TODO: Goal executor integration in Phase 5
 
     def stop(self):
         """Request graceful shutdown."""
