@@ -277,7 +277,7 @@ class CharacterWidget(QWidget):
             gradient.setColorAt(0.6, glow_color)
             gradient.setColorAt(1, QColor(0, 0, 0, 0))
             painter.setBrush(gradient)
-            painter.setPen(QPainter.PenStyle.NoPen)
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(
                 int(center_x - self._size * 1.2 + offset_x),
                 int(center_y - self._size * 1.2),

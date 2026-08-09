@@ -35,7 +35,7 @@ def draw_triangle(painter: QPainter, size: float, color: QColor):
 
 def draw_circle(painter: QPainter, size: float, color: QColor):
     painter.setBrush(color)
-    painter.setPen(QPainter.PenStyle.NoPen)
+    painter.setPen(Qt.PenStyle.NoPen)
     margin = size * 0.06
     painter.drawEllipse(margin, margin, size - 2 * margin, size - 2 * margin)
 
@@ -90,7 +90,7 @@ def draw_star(painter: QPainter, size: float, color: QColor):
 def draw_square(painter: QPainter, size: float, color: QColor):
     margin = size * 0.15
     painter.setBrush(color)
-    painter.setPen(QPainter.PenStyle.NoPen)
+    painter.setPen(Qt.PenStyle.NoPen)
     painter.drawRoundedRect(int(margin), int(margin),
                             int(size - 2 * margin), int(size - 2 * margin),
                             size * 0.08, size * 0.08)
