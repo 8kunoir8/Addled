@@ -46,8 +46,15 @@ export default function BotsPage() {
               <button onClick={()=>setExpanded(expanded===bot.id?null:bot.id)} className="text-xs px-3 py-1 bg-[#21262d] text-[#e8eaed] rounded hover:bg-[#30363d]">
                 {expanded===bot.id?'Hide Setup':'Setup'}
               </button>
-              <button disabled={bot.status==='connected'} className="text-xs px-3 py-1 bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded">
-                {bot.status==='connected'?'Connected':'Connect'}
+              <button
+                onClick={() => {
+                  if (bot.status === 'connected') return;
+                  setBots(prev => prev.map(b => b.id === bot.id ? { ...b, status: 'connecting' as const } : b));
+                  setTimeout(() => setBots(prev => prev.map(b => b.id === bot.id ? { ...b, status: 'disconnected' as const } : b)), 2000);
+                }}
+                disabled={bot.status==='connected' || bot.status==='connecting'}
+                className="text-xs px-3 py-1 bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded">
+                {bot.status==='connected'?'Connected':bot.status==='connecting'?'Connecting...':'Connect'}
               </button>
             </div>
           </div>

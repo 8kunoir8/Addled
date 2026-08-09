@@ -180,8 +180,12 @@ def _register_default_handlers():
         section = params.get("section")
         key = params.get("key")
         value = params.get("value")
-        if section and key is not None:
-            config.set(section, key, value=value)
+        if section:
+            if key is not None and key != "":
+                config.set(section, key, value=value)
+            else:
+                # Top-level setting (e.g. agent_name)
+                config.set(section, value=value)
         return {"success": True}
 
     _server.register("system.status", system_status)

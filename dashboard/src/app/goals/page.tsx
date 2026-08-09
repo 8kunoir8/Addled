@@ -105,9 +105,9 @@ export default function GoalsPage() {
               )}
               {expandedId === goal.id && (
                 <div className="flex gap-2 mt-3 pt-3 border-t border-[#21262d]">
-                  {goal.status === 'pending' && <button className="text-xs px-3 py-1 bg-[#1f6feb] text-white rounded hover:bg-[#388bfd]">Start</button>}
-                  {goal.status === 'in_progress' && <button className="text-xs px-3 py-1 bg-[#d29922] text-black rounded hover:bg-[#e2a93b]">Pause</button>}
-                  {goal.status !== 'completed' && goal.status !== 'failed' && <button className="text-xs px-3 py-1 bg-[#f85149] text-white rounded hover:bg-[#ff6a63]">Cancel</button>}
+                  {goal.status === 'pending' && <button onClick={(e)=>{e.stopPropagation();setGoals(prev=>prev.map(g=>g.id===goal.id?{...g,status:'in_progress'}:g))}} className="text-xs px-3 py-1 bg-[#1f6feb] text-white rounded hover:bg-[#388bfd]">Start</button>}
+                  {goal.status === 'in_progress' && <button onClick={(e)=>{e.stopPropagation();setGoals(prev=>prev.map(g=>g.id===goal.id?{...g,status:'pending'}:g))}} className="text-xs px-3 py-1 bg-[#d29922] text-black rounded hover:bg-[#e2a93b]">Pause</button>}
+                  {goal.status !== 'completed' && goal.status !== 'failed' && <button onClick={(e)=>{e.stopPropagation();setGoals(prev=>prev.map(g=>g.id===goal.id?{...g,status:'failed'}:g))}} className="text-xs px-3 py-1 bg-[#f85149] text-white rounded hover:bg-[#ff6a63]">Cancel</button>}
                 </div>
               )}
             </div>

@@ -28,7 +28,10 @@ export default function SettingsPage() {
     setSaving(`${section}.${key}`);
     try {
       await send('settings.set', { section, key, value });
-      setSettings((prev: any) => ({ ...prev, [section]: { ...prev?.[section], [key]: value } }));
+      setSettings((prev: any) => {
+        if (!key) return { ...prev, [section]: value };  // top-level setting
+        return { ...prev, [section]: { ...prev?.[section], [key]: value } };
+      });
       setSaveStatus({ key: `${section}.${key}`, ok: true });
     } catch { setSaveStatus({ key: `${section}.${key}`, ok: false }); }
     setSaving(null);
@@ -115,7 +118,7 @@ function CharacterSection({ settings, update, saving, status }: any) {
     <SettingRow label="Color"><div className="flex items-center gap-2"><input type="color" value={c.color||'#3380FF'} onChange={e=>update('character','color',e.target.value)} className="w-8 h-8 rounded cursor-pointer border-0"/><input type="text" value={c.color||'#3380FF'} onChange={e=>update('character','color',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed] w-24 font-mono"/></div></SettingRow>
     <SettingRow label="Size" description={`${c.size||64}px`}><input type="range" min={32} max={128} value={c.size||64} onChange={e=>update('character','size',parseInt(e.target.value))} className="w-32"/></SettingRow>
     <SettingRow label="Glow" description={`${Math.round((c.glow_intensity||0.6)*100)}%`}><input type="range" min={0} max={100} value={Math.round((c.glow_intensity||0.6)*100)} onChange={e=>update('character','glow_intensity',parseInt(e.target.value)/100)} className="w-32"/></SettingRow>
-    <SettingRow label="Eyes"><button onClick={()=>update('character','eyes',!(c.eyes!==false))} className={`w-10 h-5 rounded-full transition-colors ${c.eyes!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${c.eyes!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
+    <SettingRow label="Eyes"><button onClick={()=>update('character','eyes',c.eyes===false)} className={`w-10 h-5 rounded-full transition-colors ${c.eyes!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${c.eyes!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
     <SettingRow label="Speed"><select value={c.movement_speed||'medium'} onChange={e=>update('character','movement_speed',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="slow">Slow</option><option value="medium">Medium</option><option value="fast">Fast</option></select></SettingRow>
   </div>;
 }
@@ -125,14 +128,14 @@ function VoiceSection({ settings, update, saving, status }: any) {
   return <div className="space-y-1">
     <SettingRow label="TTS Engine"><select value={v.tts_engine||'edge'} onChange={e=>update('voice','tts_engine',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="edge">Edge TTS (Free)</option><option value="elevenlabs">ElevenLabs</option><option value="openai">OpenAI TTS</option><option value="cosyvoice">CosyVoice (Local)</option></select></SettingRow>
     <SettingRow label="Wake Word"><input type="text" value={v.wake_word||'hey addled'} onChange={e=>update('voice','wake_word',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-40"/></SettingRow>
-    <SettingRow label="Auto TTS"><button onClick={()=>update('voice','auto_tts',!(v.auto_tts!==false))} className={`w-10 h-5 rounded-full transition-colors ${v.auto_tts!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${v.auto_tts!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
+    <SettingRow label="Auto TTS"><button onClick={()=>update('voice','auto_tts',v.auto_tts===false)} className={`w-10 h-5 rounded-full transition-colors ${v.auto_tts!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${v.auto_tts!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
     <SettingRow label="Language"><select value={v.language||'en'} onChange={e=>update('voice','language',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="en">English</option><option value="zh">Chinese</option><option value="ja">Japanese</option><option value="ko">Korean</option><option value="auto">Auto</option></select></SettingRow>
   </div>;
 }
 
 function SafetySection({ settings, update, saving, status }: any) {
   const s=settings?.safety||{};
-  const Toggle=({label,desc,key}:{label:string;desc?:string;key:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('safety',key,!(s[key]!==false))} className={`w-10 h-5 rounded-full transition-colors ${s[key]!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${s[key]!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const Toggle=({label,desc,key}:{label:string;desc?:string;key:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('safety',key,s[key]===false)} className={`w-10 h-5 rounded-full transition-colors ${s[key]!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${s[key]!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   return <div className="space-y-1">
     <SettingRow label="File Access"><select value={s.file_access_mode||'workspace_only'} onChange={e=>update('safety','file_access_mode',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="workspace_only">Workspace Only</option><option value="custom">Custom</option><option value="unrestricted">Full</option></select></SettingRow>
     <SettingRow label="Kill Switch"><input type="text" value={s.kill_switch_hotkey||'ctrl+shift+alt+k'} onChange={e=>update('safety','kill_switch_hotkey',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-44 font-mono"/></SettingRow>
@@ -149,15 +152,17 @@ function NotificationsSection({ settings, update, saving, status }: any) {
   return <div className="space-y-1">
     <SettingRow label="Bubble Duration" description={`${n.bubble_duration_s||8}s`}><input type="range" min={3} max={30} value={n.bubble_duration_s||8} onChange={e=>update('notifications','bubble_duration_s',parseInt(e.target.value))} className="w-32"/></SettingRow>
     <SettingRow label="Max Bubbles"><input type="number" min={1} max={10} value={n.max_bubbles||3} onChange={e=>update('notifications','max_bubbles',parseInt(e.target.value))} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-20"/></SettingRow>
-    <SettingRow label="Show State"><button onClick={()=>update('notifications','show_character_state',!(n.show_character_state!==false))} className={`w-10 h-5 rounded-full transition-colors ${n.show_character_state!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${n.show_character_state!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
+    <SettingRow label="Show State"><button onClick={()=>update('notifications','show_character_state',n.show_character_state===false)} className={`w-10 h-5 rounded-full transition-colors ${n.show_character_state!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${n.show_character_state!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
   </div>;
 }
 
 function MemorySection() {
+  const [msg,setMsg]=useState('');
   return <div className="space-y-1">
-    <SettingRow label="Chat History"><button className="px-3 py-1.5 text-sm bg-[#21262d] hover:bg-[#30363d] text-[#e8eaed] rounded">Clear History</button></SettingRow>
+    <SettingRow label="Chat History"><button onClick={()=>setMsg('History would be cleared (Phase 5)')} className="px-3 py-1.5 text-sm bg-[#21262d] hover:bg-[#30363d] text-[#e8eaed] rounded">Clear History</button></SettingRow>
     <SettingRow label="Vector Store"><span className="text-xs text-[#8b949e]">SQLite + numpy (384-dim)</span></SettingRow>
-    <SettingRow label="Export Data"><button className="px-3 py-1.5 text-sm bg-[#21262d] hover:bg-[#30363d] text-[#e8eaed] rounded">Export All</button></SettingRow>
+    <SettingRow label="Export Data"><button onClick={()=>setMsg('Export coming in Phase 5')} className="px-3 py-1.5 text-sm bg-[#21262d] hover:bg-[#30363d] text-[#e8eaed] rounded">Export All</button></SettingRow>
+    {msg&&<p className="text-xs text-[#d29922] mt-2">{msg}</p>}
   </div>;
 }
 
