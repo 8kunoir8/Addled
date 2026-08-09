@@ -101,12 +101,15 @@ class ActionExecutor:
             result = await handler(request.params)
             elapsed = int((time.monotonic() - started) * 1000)
             if isinstance(result, dict):
+                # Capture all non-meta keys as data
+                known_meta = {"success", "summary", "data", "error"}
+                extra_data = {k: v for k, v in result.items() if k not in known_meta}
                 return ActionResult(
                     success=result.get("success", True),
                     action_type=request.action_type,
                     summary=result.get("summary", ""),
                     duration_ms=elapsed,
-                    data=result.get("data"),
+                    data=result.get("data") or extra_data or None,
                     error=result.get("error"),
                 )
             return ActionResult(True, request.action_type, duration_ms=elapsed, data=result)
