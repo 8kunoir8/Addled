@@ -193,34 +193,83 @@ def _register_default_handlers():
     _server.register("settings.get", settings_get)
     _server.register("settings.set", settings_set)
 
-    # ---- Phase 3+ stubs (return meaningful messages until fully implemented) ----
+    # ---- Phase 3: Chat with prompt guard + provider integration ---------------
 
     async def chat_send(params: dict, ws) -> dict:
-        """Stub: chat.send — full implementation in Phase 3 (voice + provider integration)."""
         message = params.get("message", "")
         if not message:
-            return {"response": "I didn't catch that. What would you like to talk about?", "tokens": 0, "conversationId": None}
-        # Try to use an actual provider if configured
+            return {"response": "I didn't catch that.", "tokens": 0, "conversationId": None}
+
+        # Prompt guard check
+        from backend.config import config
+        if config.get("safety", "prompt_guard", default=True):
+            from backend.safety.prompt_guard import sanitize
+            sanitized, blocked = sanitize(message)
+            if blocked:
+                return {"response": sanitized, "tokens": 0, "conversationId": None}
+
         try:
             from backend.providers.registry import get_provider
-            from backend.config import config
+            from backend.memory.chat_history import chat_history
             provider = get_provider()
             sys_prompt = config.get("chat", "system_prompt",
                 default="You are Addled, a helpful AI desktop companion.")
-            result = await provider.chat([
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": message},
-            ])
+            context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
+
+            messages = [{"role": "system", "content": sys_prompt}] + [
+                {"role": m["role"], "content": m["content"]} for m in context
+            ] + [{"role": "user", "content": message}]
+
+            result = await provider.chat(messages, max_tokens=config.get("chat", "max_tokens", default=4096),
+                                         temperature=config.get("chat", "temperature", default=0.7))
             if result.ok:
-                from backend.memory.chat_history import chat_history
                 chat_history.add_message("user", message)
                 chat_history.add_message("assistant", result.response,
                     tokens={"in": result.tokens_in, "out": result.tokens_out})
-                return {"response": result.response, "tokens": result.tokens_in + result.tokens_out,
+                return {"response": result.response,
+                        "tokens": result.tokens_in + result.tokens_out,
                         "conversationId": chat_history._data.get("current_conversation")}
-            return {"response": f"(Provider error: {result.error})\n\nI'm having trouble reaching the AI. Check your API key in Settings.", "tokens": 0, "conversationId": None}
+            return {"response": f"[Provider: {result.error}] Check API key in Settings → Providers.",
+                    "tokens": 0, "conversationId": None}
         except Exception as e:
-            return {"response": f"(Not connected: {e})\n\nConfigure an AI provider in Settings → Providers to enable chat.", "tokens": 0, "conversationId": None}
+            return {"response": f"[Not connected: {e}] Configure an AI provider in Settings.", "tokens": 0, "conversationId": None}
+
+    # ---- Phase 3: Action execution --------------------------------------------
+
+    async def action_execute(params: dict, ws) -> dict:
+        from backend.actions.executor import executor, ActionRequest
+        action_type = params.get("type", "")
+        action_params = params.get("params", {})
+        if not action_type:
+            return {"success": False, "error": "No action type specified"}
+        result = await executor.execute(ActionRequest(action_type=action_type, params=action_params))
+        return {"success": result.success, "action_type": result.action_type,
+                "summary": result.summary, "duration_ms": result.duration_ms,
+                "error": result.error, "data": result.data}
+
+    # ---- Phase 3: Voice TTS --------------------------------------------------
+
+    async def voice_speak(params: dict, ws) -> dict:
+        from backend.voice.tts import speak
+        text = params.get("text", "")
+        voice = params.get("voice", "en-US-JennyNeural")
+        if not text:
+            return {"success": False, "error": "No text to speak"}
+        result = await speak(text, voice)
+        return result
+
+    # ---- Phase 3: Observer status ---------------------------------------------
+
+    async def observer_status(params: dict, ws) -> dict:
+        return {"tier": "light", "active": True, "context": "unknown",
+                "message": "Observer running. Full perception in Phase 3."}
+
+    _server.register("chat.send", chat_send)
+    _server.register("action.execute", action_execute)
+    _server.register("voice.speak", voice_speak)
+    _server.register("observer.status", observer_status)
+
+    # ---- Phase 5/6 stubs (code, goals, swarm, browser) ------------------------
 
     async def code_bind(params: dict, ws) -> dict:
         """Stub: code.bind — full implementation in Phase 5."""
@@ -301,7 +350,6 @@ def _register_default_handlers():
             "message": "Code editing engine coming in Phase 5. Instruction saved."
         }]}
 
-    _server.register("chat.send", chat_send)
     _server.register("code.bind", code_bind)
     _server.register("code.read", code_read)
     _server.register("code.edit", code_edit)
