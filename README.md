@@ -69,7 +69,7 @@ scripts\dev.bat
 | Character Engine | PyQt6 QWidget, QPainter, 30fps animation loop | ✅ Built |
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
 | Desktop Shell | Electron 28+, system tray, auto-updater | ✅ Built |
-| Bot Bridges | Node.js (grammY, Baileys, discord.js) | ⏳ Stubs |
+| Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
 | Communication | WebSocket JSON-RPC 2.0 (18 handlers) | ✅ Built |
 
 ---
@@ -88,7 +88,7 @@ scripts\dev.bat
 | 🐝 **Agent Swarm** | 7 built-in agent types (Coder, Writer, Analyst, Planner, Researcher, DevOps, General), spawn/stop controls |
 | 🌐 **Browser** | URL bar with nav controls, screenshot viewport, action log, session management |
 | 📅 **Calendar** | Full month grid, prev/next navigation, today highlight, date selection with event detail |
-| 🤖 **Bot Bridges** | Telegram, WhatsApp, Discord connection UI with setup instructions |
+| 🤖 **Bot Bridges** | Telegram, WhatsApp, Discord — full implementations with command forwarding |
 | 🛡️ **Safety** | Presence guard (meeting/gaming/quiet-hours detection), prompt guard, clipboard filter, kill switch config |
 | 🧠 **Memory** | Chat history (JSON), session context, vector store (SQLite + numpy cosine similarity) |
 | 📡 **WebSocket API** | 18 JSON-RPC methods: system, settings, chat, code, goals, swarm, browser |
@@ -104,7 +104,6 @@ scripts\dev.bat
 | Code diff engine | Phase 5 |
 | Agent swarm execution | Phase 5 |
 | Calendar + Email integration | Phase 5 |
-| Bot bridge implementations | Phase 6 |
 | Installer + auto-updater | Phase 7 |
 | Onboarding wizard | Phase 7 |
 

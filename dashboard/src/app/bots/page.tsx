@@ -5,9 +5,12 @@ import { useState } from 'react';
 interface BotStatus { id:string; name:string; platform:string; status:'disconnected'|'connecting'|'connected'; icon:string; instructions:string; }
 
 const BOTS:BotStatus[]=[
-  {id:'telegram',name:'Telegram Bot',platform:'telegram',status:'disconnected',icon:'✈️',instructions:'1. Create a bot with @BotFather\n2. Set TELEGRAM_BOT_TOKEN env var\n3. Start the bridge'},
-  {id:'whatsapp',name:'WhatsApp Bot',platform:'whatsapp',status:'disconnected',icon:'💬',instructions:'1. Scan QR code to pair\n2. Keep phone connected\n3. Messages appear here'},
-  {id:'discord',name:'Discord Bot',platform:'discord',status:'disconnected',icon:'🎮',instructions:'1. Create app at discord.com/developers\n2. Set DISCORD_BOT_TOKEN env var\n3. Invite bot to server'},
+  {id:'telegram',name:'Telegram Bot',platform:'telegram',status:'disconnected',icon:'✈️',
+   instructions:'1. Create a bot with @BotFather on Telegram\n2. Set TELEGRAM_BOT_TOKEN env var\n3. Run: node bots/telegram-bot.js\n\nCommands: /chat, /goal, /status, /screenshot, /sleep, /wake'},
+  {id:'whatsapp',name:'WhatsApp Bot',platform:'whatsapp',status:'disconnected',icon:'💬',
+   instructions:'1. Run: node bots/whatsapp-bot.js\n2. Scan the QR code in terminal\n3. Keep your phone connected\n\nSupports text + mentions in groups'},
+  {id:'discord',name:'Discord Bot',platform:'discord',status:'disconnected',icon:'🎮',
+   instructions:'1. Create app at discord.com/developers\n2. Set DISCORD_BOT_TOKEN env var\n3. Run: node bots/discord-bot.js\n4. Invite bot with applications.commands scope\n\nSlash commands: /chat, /goal, /status, /sleep, /wake\nAlso responds to @mentions and DMs'},
 ];
 
 export default function BotsPage() {
