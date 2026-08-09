@@ -108,6 +108,12 @@ class ChatHistory:
             for c in convs
         ]
 
+    @property
+    def current_conversation_id(self) -> str | None:
+        """Get the current conversation ID."""
+        self._load()
+        return self._data.get("current_conversation")
+
     def clear(self, conversation_id: str | None = None):
         """Clear a conversation or all conversations."""
         self._load()

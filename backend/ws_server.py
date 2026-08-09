@@ -228,7 +228,7 @@ def _register_default_handlers():
                     tokens={"in": result.tokens_in, "out": result.tokens_out})
                 return {"response": result.response,
                         "tokens": result.tokens_in + result.tokens_out,
-                        "conversationId": chat_history._data.get("current_conversation")}
+                        "conversationId": chat_history.current_conversation_id}
             return {"response": f"[Provider: {result.error}] Check API key in Settings → Providers.",
                     "tokens": 0, "conversationId": None}
         except Exception as e:
@@ -258,6 +258,14 @@ def _register_default_handlers():
         result = await speak(text, voice)
         return result
 
+    # ---- Phase 3: Character state control (used by bots) --------------------
+
+    async def character_set_state(params: dict, ws) -> dict:
+        from backend.ws_server import get_server
+        state = params.get("state", "idle")
+        await get_server().broadcast("state.changed", {"state": state})
+        return {"success": True, "state": state}
+
     # ---- Phase 3: Observer status ---------------------------------------------
 
     async def observer_status(params: dict, ws) -> dict:
@@ -267,6 +275,7 @@ def _register_default_handlers():
     _server.register("chat.send", chat_send)
     _server.register("action.execute", action_execute)
     _server.register("voice.speak", voice_speak)
+    _server.register("character.setState", character_set_state)
     _server.register("observer.status", observer_status)
 
     # ---- Phase 5/6 stubs (code, goals, swarm, browser) ------------------------
