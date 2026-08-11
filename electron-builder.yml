@@ -34,6 +34,8 @@ win:
       arch: [x64]
   icon: electron/icons/icon.ico
   artifactName: '${productName}-${version}-${arch}.${ext}'
+  sign: null
+  signAndEditExecutable: false
 
 nsis:
   oneClick: false
