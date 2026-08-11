@@ -32,7 +32,6 @@ win:
       arch: [x64]
     - target: portable
       arch: [x64]
-  icon: electron/icons/icon.ico
   artifactName: '${productName}-${version}-${arch}.${ext}'
   sign: null
   signAndEditExecutable: false
@@ -45,9 +44,6 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: Addled
   uninstallDisplayName: Addled
-  license: LICENSE
-  installerIcon: electron/icons/icon.ico
-  uninstallerIcon: electron/icons/icon.ico
 
 portable:
   artifactName: '${productName}-${version}-portable.${ext}'
