@@ -56,19 +56,36 @@ const DASHBOARD_DIR = isDev
   ? path.join(ROOT_DIR, 'dashboard')
   : path.join(process.resourcesPath, 'dashboard');
 
-// In packaged mode, resolve Python from bundled resources
+// In packaged mode, resolve Python from bundled resources or common install locations
 function resolvePython() {
   if (isDev) return process.platform === 'win32' ? 'python' : 'python3';
 
-  // Look for bundled Python in resources
-  const bundledPython = process.platform === 'win32'
-    ? path.join(ROOT_DIR, 'python', 'python.exe')
-    : path.join(ROOT_DIR, 'python', 'bin', 'python3');
+  // Check common Windows Python install locations
+  const candidates = [
+    path.join(ROOT_DIR, 'python', 'python.exe'),           // bundled
+    path.join(process.resourcesPath, 'python', 'python.exe'), // extraResources
+    'python',                                                // PATH
+    'python3',
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python314', 'python.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python313', 'python.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python312', 'python.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python311', 'python.exe'),
+    path.join('C:', 'Python314', 'python.exe'),
+    path.join('C:', 'Python313', 'python.exe'),
+    path.join('C:', 'Python312', 'python.exe'),
+  ];
 
-  if (fs.existsSync(bundledPython)) return bundledPython;
-
-  // Fall back to system PATH
-  return process.platform === 'win32' ? 'python' : 'python3';
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+    // For PATH-based ones, check via spawnSync
+    if (candidate === 'python' || candidate === 'python3') {
+      try {
+        const r = require('child_process').spawnSync(candidate, ['--version'], { timeout: 3000 });
+        if (r.status === 0) return candidate;
+      } catch {}
+    }
+  }
+  return 'python'; // fallback — will fail but show error
 }
 
 // In packaged mode, resolve Node.js from Electron's built-in node
@@ -373,7 +390,15 @@ function setupIPC() {
 app.whenReady().then(async () => {
   setupIPC();
   createTray();
-  startPythonBackend();
+
+  // Check if backend is already running on WS port
+  const backendRunning = !(await isPortFree(WS_PORT));
+  if (!backendRunning) {
+    startPythonBackend();
+    console.log('[Addled] Starting Python backend...');
+  } else {
+    console.log('[Addled] Backend already running on port', WS_PORT);
+  }
 
   // Start auto-updater checks (every 4 hours)
   if (updater) updater.startUpdateChecks();
@@ -382,7 +407,7 @@ app.whenReady().then(async () => {
   await new Promise(resolve => setTimeout(resolve, 2000));
   await createWindow();
 
-  console.log('[Addled] Companion started successfully');
+  console.log('[Addled] Started successfully');
 });
 
 app.on('window-all-closed', () => {

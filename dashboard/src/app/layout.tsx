@@ -76,6 +76,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <span>{STATE_LABELS[characterState] || characterState || 'Disconnected'}</span>
               )}
             </div>
+            {!sidebarCollapsed && wsState === 'disconnected' && (
+              <p className="text-[10px] text-[#f85149] mt-1 leading-tight">
+                Backend not running.<br/>
+                Start it: <code className="text-[#58a6ff]">python backend/main.py</code>
+              </p>
+            )}
           </div>
         </aside>
         <main className="flex-1 overflow-hidden flex flex-col">{children}</main>
