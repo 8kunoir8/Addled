@@ -46,9 +46,44 @@ try {
 }
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
-const ROOT_DIR = isDev ? path.join(__dirname, '..') : path.dirname(app.getPath('exe'));
-const BACKEND_DIR = path.join(ROOT_DIR, 'backend');
-const DASHBOARD_DIR = path.join(ROOT_DIR, 'dashboard');
+const ROOT_DIR = isDev
+  ? path.join(__dirname, '..')
+  : path.join(path.dirname(app.getPath('exe')), 'resources');
+const BACKEND_DIR = isDev
+  ? path.join(ROOT_DIR, 'backend')
+  : path.join(process.resourcesPath, 'backend');
+const DASHBOARD_DIR = isDev
+  ? path.join(ROOT_DIR, 'dashboard')
+  : path.join(process.resourcesPath, 'dashboard');
+
+// In packaged mode, resolve Python from bundled resources
+function resolvePython() {
+  if (isDev) return process.platform === 'win32' ? 'python' : 'python3';
+
+  // Look for bundled Python in resources
+  const bundledPython = process.platform === 'win32'
+    ? path.join(ROOT_DIR, 'python', 'python.exe')
+    : path.join(ROOT_DIR, 'python', 'bin', 'python3');
+
+  if (fs.existsSync(bundledPython)) return bundledPython;
+
+  // Fall back to system PATH
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
+// In packaged mode, resolve Node.js from Electron's built-in node
+function resolveNode() {
+  if (isDev) return process.platform === 'win32' ? 'node.exe' : 'node';
+
+  // Electron bundles its own Node.js — use it
+  const electronNode = path.join(
+    path.dirname(app.getPath('exe')),
+    process.platform === 'win32' ? 'node.exe' : 'node'
+  );
+
+  // If not found, try system PATH
+  return fs.existsSync(electronNode) ? electronNode : (process.platform === 'win32' ? 'node.exe' : 'node');
+}
 
 // ─── Port detection ───────────────────────────────────────────────────────────
 function isPortFree(port) {
@@ -69,7 +104,23 @@ async function findFreePort(start, count) {
 
 // ─── Spawn Python Backend ─────────────────────────────────────────────────────
 function startPythonBackend() {
-  const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+  const pythonCmd = resolvePython();
+
+  // Verify Python exists before spawning
+  if (!isDev) {
+    try {
+      const check = require('child_process').spawnSync(pythonCmd, ['--version'], { timeout: 5000 });
+      if (check.error || check.status !== 0) {
+        console.error('[Python] Python not found. Install Python 3.11+ or add it to PATH.');
+        console.error('[Python] Download: https://www.python.org/downloads/');
+        return;
+      }
+    } catch (e) {
+      console.error('[Python] Cannot run Python:', e.message);
+      return;
+    }
+  }
+
   pythonProcess = spawn(pythonCmd, ['main.py'], {
     cwd: BACKEND_DIR,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -103,8 +154,17 @@ function startNextDashboard() {
     return;
   }
 
-  const nextCmd = process.platform === 'win32' ? 'node.exe' : 'node';
-  nextProcess = spawn(nextCmd, ['node_modules/.bin/next', 'start', '-p', String(DASHBOARD_PORT)], {
+  // In packaged mode, try running next start with system Node.js
+  const nodeCmd = resolveNode();
+  const nextBin = path.join(DASHBOARD_DIR, 'node_modules', '.bin', 'next');
+
+  if (!fs.existsSync(nextBin + (process.platform === 'win32' ? '.cmd' : ''))) {
+    console.warn('[Next.js] Dashboard server not found. Will try connecting to localhost:3000');
+    console.warn('[Next.js] Start the dashboard manually: cd dashboard && npm run dev');
+    return;
+  }
+
+  nextProcess = spawn(nodeCmd, [nextBin, 'start', '-p', String(DASHBOARD_PORT)], {
     cwd: DASHBOARD_DIR,
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, NODE_ENV: 'production' },
@@ -120,6 +180,11 @@ function startNextDashboard() {
 
   nextProcess.on('close', (code) => {
     console.log(`[Next.js] Process exited with code ${code}`);
+    nextProcess = null;
+  });
+
+  nextProcess.on('error', (err) => {
+    console.error(`[Next.js] Failed to start: ${err.message}`);
     nextProcess = null;
   });
 }

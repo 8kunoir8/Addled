@@ -11,8 +11,6 @@ files:
   - dashboard/.next/**/*
   - dashboard/out/**/*
   - dashboard/package.json
-  - backend/**/*.py
-  - backend/**/*.txt
   - bots/**/*.js
   - bots/**/*.json
   - package.json
@@ -21,8 +19,8 @@ files:
   - '!**/.git'
 
 extraResources:
-  - from: backend/memory
-    to: memory
+  - from: backend
+    to: backend
     filter: ['**/*']
   - from: electron/icons
     to: icons
