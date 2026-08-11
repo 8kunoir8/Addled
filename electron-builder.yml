@@ -8,9 +8,6 @@ directories:
 
 files:
   - electron/**/*
-  - dashboard/.next/**/*
-  - dashboard/out/**/*
-  - dashboard/package.json
   - bots/**/*.js
   - bots/**/*.json
   - package.json
@@ -21,6 +18,9 @@ files:
 extraResources:
   - from: backend
     to: backend
+    filter: ['**/*']
+  - from: dashboard/out
+    to: dashboard
     filter: ['**/*']
   - from: electron/icons
     to: icons

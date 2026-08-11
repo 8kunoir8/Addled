@@ -209,10 +209,48 @@ async function createWindow() {
     backgroundColor: '#0d1117',
   });
 
-  // Load dashboard
-  const dashboardUrl = isDev
-    ? `http://localhost:${DASHBOARD_PORT}`
-    : `http://127.0.0.1:${DASHBOARD_PORT}`;
+  // Load dashboard — static files in production, dev server in dev
+  let dashboardUrl;
+  if (isDev) {
+    dashboardUrl = `http://localhost:${DASHBOARD_PORT}`;
+  } else {
+    // Start a local static file server for the dashboard
+    const http = require('http');
+    const servePort = 3001;
+    const outDir = isDev
+      ? path.join(DASHBOARD_DIR, 'out')
+      : path.join(DASHBOARD_DIR); // extraResources maps dashboard/out → dashboard/
+
+    if (fs.existsSync(outDir)) {
+      // Simple static file server for Next.js export
+      const server = http.createServer((req, res) => {
+        let filePath = path.join(outDir, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
+        if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+          filePath = path.join(outDir, 'index.html');
+        }
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeTypes = {
+          '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css',
+          '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml',
+          '.ico': 'image/x-icon',
+        };
+        try {
+          const data = fs.readFileSync(filePath);
+          res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'text/plain' });
+          res.end(data);
+        } catch {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(fs.readFileSync(path.join(outDir, 'index.html')));
+        }
+      });
+      server.listen(servePort, '127.0.0.1');
+      dashboardUrl = `http://127.0.0.1:${servePort}`;
+      console.log(`[Dashboard] Serving static files on ${dashboardUrl}`);
+    } else {
+      console.warn('[Dashboard] No static build found. Run: cd dashboard && npm run build');
+      dashboardUrl = `http://127.0.0.1:${DASHBOARD_PORT}`; // fallback
+    }
+  }
 
   mainWindow.loadURL(dashboardUrl);
 
@@ -339,10 +377,6 @@ app.whenReady().then(async () => {
 
   // Start auto-updater checks (every 4 hours)
   if (updater) updater.startUpdateChecks();
-
-  if (!isDev) {
-    startNextDashboard();
-  }
 
   // Wait briefly for backend to start, then create window
   await new Promise(resolve => setTimeout(resolve, 2000));
