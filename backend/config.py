@@ -149,6 +149,10 @@ DEFAULT_SETTINGS: dict = {
         "monitors": "all",
         "privacy_zones": [],
     },
+    "vision": {
+        "fallback_enabled": True,
+        "hf_model": "deepseek-ai/deepseek-vl2-tiny",
+    },
     "notifications": {
         "bubble_duration_s": 8,
         "max_bubbles": 3,

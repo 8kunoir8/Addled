@@ -23,6 +23,11 @@ Pillow>=10.0.0
 pytesseract>=0.3.0
 mss>=9.0.0
 
+# Local vision fallback (DeepSeek-VL2-tiny via Hugging Face)
+# Heavy install (~2GB+) — only needed if you want offline/fallback vision
+transformers>=4.40.0
+torch>=2.2.0
+
 # Browser Automation
 playwright>=1.45.0
 

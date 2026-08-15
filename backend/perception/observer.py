@@ -123,10 +123,20 @@ class Observer:
             sc = SystemControls()
             result = await sc.screenshot()
             if result.get("success") and result.get("image_b64"):
+                prompt = ("Describe what's on this screen in detail. Focus on: "
+                          "what application, what the user is working on, "
+                          "any errors visible. Be concise.")
                 vision_result = await self._provider.vision(
-                    result["image_b64"],
-                    "Describe what's on this screen in detail. Focus on: what application, what the user is working on, any errors visible. Be concise.",
-                )
+                    result["image_b64"], prompt)
+
+                # ── Global fallback: local DeepSeek-VL2-tiny via HF ────────
+                if not vision_result.ok:
+                    log.debug("Provider vision failed (%s) — trying HF fallback",
+                              vision_result.error)
+                    from backend.providers.hf_vision import hf_vision
+                    vision_result = await hf_vision.analyze(
+                        result["image_b64"], prompt)
+
                 if vision_result.ok:
                     return vision_result.response
         except Exception as e:

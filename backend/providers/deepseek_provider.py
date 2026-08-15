@@ -96,18 +96,19 @@ class DeepSeekProvider(BaseProvider):
                     duration_ms=int((time.monotonic() - t0) * 1000),
                 )
         except httpx.HTTPStatusError as e:
-            return ProviderResult(
-                ok=False,
-                error=f"Vision request failed ({e.response.status_code}): "
-                      f"{e.response.text[:200]}",
-                duration_ms=int((time.monotonic() - t0) * 1000),
-            )
+            api_error = (f"Vision request failed ({e.response.status_code}): "
+                         f"{e.response.text[:200]}")
         except Exception as e:
-            return ProviderResult(
-                ok=False,
-                error=str(e),
-                duration_ms=int((time.monotonic() - t0) * 1000),
-            )
+            api_error = str(e)
+
+        # ── Fall back to local DeepSeek-VL2-tiny via Hugging Face ──────────
+        log.warning("DeepSeek cloud vision failed (%s) — falling back to HF %s",
+                    api_error, "deepseek-ai/deepseek-vl2-tiny")
+        from backend.providers.hf_vision import hf_vision
+        result = await hf_vision.analyze(image_b64, prompt)
+        if not result.ok:
+            result.error = f"Cloud vision failed: {api_error} | HF fallback: {result.error}"
+        return result
 
     async def chat(
         self,
