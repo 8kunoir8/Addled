@@ -58,7 +58,7 @@ DEFAULT_SETTINGS: dict = {
                 "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"],
                 "vision": True,
                 "vision_mode": "local",
-                "vision_model": "deepseek-ai/deepseek-vl2-tiny",
+                "vision_model": "microsoft/Florence-2-base",
             },
             "openai": {
                 "name": "OpenAI",
@@ -151,7 +151,7 @@ DEFAULT_SETTINGS: dict = {
     },
     "vision": {
         "fallback_enabled": True,
-        "hf_model": "deepseek-ai/deepseek-vl2-tiny",
+        "hf_model": "microsoft/Florence-2-base",
     },
     "notifications": {
         "bubble_duration_s": 8,

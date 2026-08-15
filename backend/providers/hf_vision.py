@@ -1,12 +1,12 @@
 """
-Hugging Face DeepSeek-VL2-tiny — local vision fallback for ALL providers.
+Hugging Face Florence-2-base — local vision fallback for ALL providers.
 
-Lazy-loads `deepseek-ai/deepseek-vl2-tiny` via transformers (trust_remote_code).
+Lazy-loads `microsoft/Florence-2-base` via transformers (trust_remote_code).
 Used when a provider's cloud vision call fails, so Addled always has eyes —
 even offline, with no API key at all.
 
 Requires: pip install transformers torch
-Model: https://huggingface.co/deepseek-ai/deepseek-vl2-tiny (~3.4B params)
+Model: https://huggingface.co/microsoft/Florence-2-base (~0.23B params, CPU-friendly)
 """
 
 from __future__ import annotations
@@ -22,20 +22,21 @@ from backend.providers.base import ProviderResult
 
 log = logging.getLogger("addled.hf_vision")
 
-DEFAULT_MODEL_ID = "deepseek-ai/deepseek-vl2-tiny"
+DEFAULT_MODEL_ID = "microsoft/Florence-2-base"
+DEFAULT_TASK = "<MORE_DETAILED_CAPTION>"
 
 
 class HFVisionFallback:
-    """Local DeepSeek-VL2-tiny vision model with lazy loading and caching."""
+    """Local Florence-2 vision model with lazy loading and caching."""
 
     def __init__(self, model_id: str | None = None):
         from backend.config import config
         self._model_id = model_id or config.get(
             "vision", "hf_model", default=DEFAULT_MODEL_ID)
-        self._vl_gpt = None
-        self._tokenizer = None
+        self._model = None
+        self._processor = None
         self._load_error: str | None = None
-        self._load_lock = asyncio.Lock()
+        self._on_cuda = False
 
     @property
     def enabled(self) -> bool:
@@ -48,7 +49,7 @@ class HFVisionFallback:
 
     def _ensure_loaded(self) -> bool:
         """Blocking load — call only from executor thread."""
-        if self._vl_gpt is not None:
+        if self._model is not None:
             return True
         if self._load_error:
             log.debug("HF vision unavailable (cached error): %s", self._load_error)
@@ -56,23 +57,21 @@ class HFVisionFallback:
 
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoModelForCausalLM, AutoProcessor
 
             log.info("Loading %s (first use — may take a few minutes)...", self._model_id)
-            self._vl_gpt = AutoModelForCausalLM.from_pretrained(
-                self._model_id,
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16,
-            )
-            self._tokenizer = AutoTokenizer.from_pretrained(
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self._model_id, trust_remote_code=True)
+            self._processor = AutoProcessor.from_pretrained(
                 self._model_id, trust_remote_code=True)
 
             if torch.cuda.is_available():
-                self._vl_gpt = self._vl_gpt.cuda().eval()
-                log.info("DeepSeek-VL2-tiny loaded on CUDA")
+                self._model = self._model.cuda().eval()
+                self._on_cuda = True
+                log.info("Florence-2 loaded on CUDA")
             else:
-                self._vl_gpt = self._vl_gpt.eval()
-                log.warning("No CUDA — DeepSeek-VL2-tiny on CPU will be slow")
+                self._model = self._model.eval()
+                log.warning("No CUDA — Florence-2 on CPU will be slower")
             return True
         except ImportError as e:
             self._load_error = f"Missing dependency: {e}. Run: pip install transformers torch"
@@ -85,42 +84,43 @@ class HFVisionFallback:
 
     def _generate_sync(self, image_path: str, prompt: str,
                        max_new_tokens: int = 512) -> str:
-        """Blocking generate using the official DeepSeek-VL2 recipe."""
+        """Blocking generate using the official Florence-2 recipe."""
         if not self._ensure_loaded():
             return ""
 
-        conversation = [
-            {
-                "role": "<|User|>",
-                "content": f"<image>\n{prompt}",
-                "images": [image_path],
-            },
-            {"role": "<|Assistant|>", "content": ""},
-        ]
+        try:
+            from PIL import Image
 
-        prepare_inputs = self._vl_gpt.prepare_inputs_processing(
-            conversation,
-            images=[image_path],
-            force_batchify=True,
-            system_prompt="",
-        ).to(self._vl_gpt.device)
+            image = Image.open(image_path).convert("RGB")
+            text_input = f"{DEFAULT_TASK}{prompt}"
 
-        inputs_embeds = self._vl_gpt.prepare_inputs_embeds(**prepare_inputs)
+            inputs = self._processor(
+                text=text_input, images=image, return_tensors="pt")
+            if self._on_cuda:
+                inputs = {k: v.cuda() for k, v in inputs.items()}
 
-        outputs = self._vl_gpt.language_model.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=prepare_inputs.attention_mask,
-            pad_token_id=self._tokenizer.eos_token_id,
-            bos_token_id=self._tokenizer.bos_token_id,
-            eos_token_id=self._tokenizer.eos_token_id,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            use_cache=True,
-        )
+            generated_ids = self._model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=max_new_tokens,
+                num_beams=3 if self._on_cuda else 1,
+                do_sample=False,
+            )
 
-        answer = self._tokenizer.decode(
-            outputs[0].cpu().tolist(), skip_special_tokens=True)
-        return answer.strip()
+            generated_text = self._processor.batch_decode(
+                generated_ids, skip_special_tokens=False)[0]
+
+            parsed = self._processor.post_process_generation(
+                generated_text,
+                task=DEFAULT_TASK,
+                image_size=(image.width, image.height),
+            )
+            answer = parsed.get(DEFAULT_TASK, generated_text)
+            return str(answer).strip()
+        except Exception as e:
+            log.warning("Florence-2 generation failed: %s", e)
+            self._load_error = f"Generation failed: {e}"
+            return ""
 
     async def analyze(self, image_b64: str, prompt: str,
                       max_new_tokens: int = 512) -> ProviderResult:

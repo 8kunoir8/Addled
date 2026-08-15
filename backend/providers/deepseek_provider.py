@@ -40,8 +40,8 @@ class DeepSeekProvider(BaseProvider):
         model: str | None = None,
     ) -> ProviderResult:
         """
-        Analyze an image using the LOCAL DeepSeek-VL2-tiny model via
-        Hugging Face transformers.
+        Analyze an image using the LOCAL vision model via Hugging Face
+        transformers (default: microsoft/Florence-2-base).
 
         DeepSeek's cloud API does not serve a vision model, so the
         provider goes straight to the local HF model — no cloud vision

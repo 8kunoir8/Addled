@@ -129,7 +129,7 @@ class Observer:
                 vision_result = await self._provider.vision(
                     result["image_b64"], prompt)
 
-                # ── Global fallback: local DeepSeek-VL2-tiny via HF ────────
+                # ── Global fallback: local Florence-2 via HF ─────────────
                 if not vision_result.ok:
                     log.debug("Provider vision failed (%s) — trying HF fallback",
                               vision_result.error)
