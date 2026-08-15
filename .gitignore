@@ -4,6 +4,7 @@ dist/
 *.log
 backend/memory/*.db
 backend/memory/*.json
+backend/memory/goals/
 backend/memory/.vault*
 backend/memory/*.log
 dashboard/.next/

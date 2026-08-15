@@ -10,7 +10,6 @@
 
 ```bash
 # 1. Install Python dependencies
-cd backend
 pip install -r requirements.txt
 
 # 2. Start the backend (Python + WebSocket server + character widget)
@@ -28,7 +27,7 @@ npx electron .
 
 Or use the one-click launcher:
 ```bash
-scripts\dev.bat
+launch.bat
 ```
 
 ---
@@ -234,17 +233,19 @@ Addled/
 │   ├── whatsapp-bot.js      # Baileys multi-device
 │   └── discord-bot.js       # discord.js 5 slash commands
 ├── scripts/
-│   ├── dev.bat              # 3-terminal launcher
-│   └── build.bat            # Full build pipeline → Windows installer
+│   └── verify_python.py     # Python environment check
+├── launch.bat               # One-click dev launcher
 └── electron-builder.yml     # NSIS + portable packaging config
 ```
 
 ## Build (Windows Installer)
 
 ```bash
-scripts\build.bat
-# → dist/Addled Setup x.y.z.exe (NSIS installer)
-# → dist/Addled x.y.z-portable.exe (portable)
+# from the repo root — static dashboard must be built first
+cd dashboard && npm install && npm run build && cd ..
+npm run build:win
+# → dist/Addled-1.0.0-x64.exe (NSIS installer)
+# → dist/Addled-1.0.0-portable.exe (portable)
 ```
 
 ---

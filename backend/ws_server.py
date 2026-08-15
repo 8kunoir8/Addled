@@ -311,7 +311,9 @@ def _register_default_handlers():
     async def goal_create(params: dict, ws) -> dict:
         from backend.goals.store import goal_store
         from backend.goals.planner import plan_goal
-        title = params.get("title", "Untitled Goal")
+        title = (params.get("title") or "").strip()
+        if not title:
+            return {"error": "title is required"}
         description = params.get("description", "")
         priority = params.get("priority", "normal")
 
@@ -464,8 +466,11 @@ def _register_default_handlers():
 
     async def calendar_add(params: dict, ws) -> dict:
         from backend.integrations.calendar_integration import calendar
+        title = (params.get("title") or "").strip()
+        if not title:
+            return {"error": "title is required"}
         event = calendar.add_event(
-            title=params.get("title", "Untitled"),
+            title=title,
             start=params.get("start", ""),
             end=params.get("end"),
             description=params.get("description", ""),
