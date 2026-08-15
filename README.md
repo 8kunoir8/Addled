@@ -240,13 +240,22 @@ Addled/
 
 ## Build (Windows Installer)
 
+One-click (installs deps, builds dashboard, packages everything):
 ```bash
-# from the repo root — static dashboard must be built first
+build.bat
+```
+
+Manual equivalent:
+```bash
+pip install -r requirements.txt
 cd dashboard && npm install && npm run build && cd ..
 npm run build:win
 # → dist/Addled-1.0.0-x64.exe (NSIS installer)
 # → dist/Addled-1.0.0-portable.exe (portable)
 ```
+
+> The app uses system Python — on the target PC install Python 3.11+
+> and run `pip install -r requirements.txt`.
 
 ---
 
