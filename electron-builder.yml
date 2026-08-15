@@ -10,7 +10,6 @@ files:
   - electron/**/*
   - bots/**/*.js
   - bots/**/*.json
-  - launch.bat
   - package.json
   - '!**/__pycache__/**'
   - '!**/*.pyc'
@@ -26,8 +25,13 @@ extraResources:
   - from: electron/icons
     to: icons
     filter: ['**/*']
+  - from: launch.bat
+    to: launch.bat
+  - from: requirements.txt
+    to: requirements.txt
 
 win:
+  icon: electron/icons/icon.png
   target:
     - target: nsis
       arch: [x64]
