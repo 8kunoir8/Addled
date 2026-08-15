@@ -57,8 +57,8 @@ DEFAULT_SETTINGS: dict = {
                 "default_model": "deepseek-v4-pro",
                 "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"],
                 "vision": True,
-                "vision_model": "deepseek-vl2",
-                "vision_base_url": "",
+                "vision_mode": "local",
+                "vision_model": "deepseek-ai/deepseek-vl2-tiny",
             },
             "openai": {
                 "name": "OpenAI",
