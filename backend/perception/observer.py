@@ -45,13 +45,14 @@ class Observer:
     async def tick(self) -> ObservationResult | None:
         """Called every ~5s. Returns None if nothing to report."""
         self._light_counter += 1
+        zones, excluded = self._privacy_config()
 
         # ---- LIGHT TIER (always, free) ---------------------------------------
         try:
             import hashlib
             from backend.actions.system_controls import SystemControls
             sc = SystemControls()
-            result = await sc.screenshot()
+            result = await sc.screenshot(mask_zones=zones)
             if result.get("success") and result.get("image_b64"):
                 raw = result["image_b64"][:1000]  # Hash first part for speed
                 new_hash = hashlib.md5(raw.encode()).hexdigest()
@@ -65,6 +66,11 @@ class Observer:
 
         if not changed:
             return ObservationResult(tier="light", screen_hash=new_hash, changed=False, context="unchanged")
+
+        # Privacy exclusion — active app is on the exclusion list: never analyze
+        if self._active_window_excluded(excluded):
+            return ObservationResult(tier="light", screen_hash=new_hash, changed=True,
+                                     context="private", decision="stay_quiet")
 
         # ---- MEDIUM TIER (every Nth cycle) -----------------------------------
         if self._light_counter % self._medium_cycles == 0:
@@ -98,6 +104,34 @@ class Observer:
                                      tokens=500, decision=decision)
 
         return ObservationResult(tier="light", screen_hash=new_hash, changed=True, context=self._last_context)
+
+    def _privacy_config(self) -> tuple[list, list]:
+        """Return (privacy_zones, excluded_apps) from settings."""
+        try:
+            from backend.config import config
+            zones = config.get("observation", "privacy_zones", default=[]) or []
+            excluded = config.get("safety", "privacy_excluded_apps", default=[]) or []
+            return zones, excluded
+        except Exception:
+            return [], []
+
+    def _active_window_excluded(self, excluded: list) -> bool:
+        """True if the foreground window matches an excluded app name."""
+        if not excluded:
+            return False
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return False
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value.lower()
+            return any(app.lower() in title for app in excluded)
+        except Exception:
+            return False
 
     async def _classify_context(self) -> str:
         """Classify what the user is doing from window titles."""
@@ -138,7 +172,8 @@ class Observer:
         try:
             from backend.actions.system_controls import SystemControls
             sc = SystemControls()
-            result = await sc.screenshot()
+            zones, _ = self._privacy_config()
+            result = await sc.screenshot(mask_zones=zones)
             if result.get("success") and result.get("image_b64"):
                 prompt = ("Describe what's on this screen in detail. Focus on: "
                           "what application, what the user is working on, "

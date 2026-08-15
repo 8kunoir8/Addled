@@ -56,8 +56,10 @@ class SystemControls:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def screenshot(self, monitor: int | None = None, region: dict | None = None) -> dict:
-        """Capture a screenshot. Returns base64 PNG."""
+    async def screenshot(self, monitor: int | None = None, region: dict | None = None,
+                         mask_zones: list | None = None) -> dict:
+        """Capture a screenshot. Returns base64 PNG.
+        mask_zones: list of {x, y, w, h} rects to black out (privacy)."""
         try:
             import mss
             import base64
@@ -70,8 +72,17 @@ class SystemControls:
                     img = sct.grab(region)
                 else:
                     img = sct.grab(sct.monitors[1])  # Primary monitor
-                from PIL import Image
+                from PIL import Image, ImageDraw
                 pil_img = Image.frombytes("RGB", img.size, img.bgra, "raw", "BGRX")
+                for zone in mask_zones or []:
+                    try:
+                        x, y = int(zone.get("x", 0)), int(zone.get("y", 0))
+                        w, h = int(zone.get("w", 0)), int(zone.get("h", 0))
+                        if w > 0 and h > 0:
+                            ImageDraw.Draw(pil_img).rectangle(
+                                [x, y, x + w, y + h], fill=(0, 0, 0))
+                    except (TypeError, ValueError):
+                        continue
                 buf = BytesIO()
                 pil_img.save(buf, format="PNG")
                 return {"success": True, "image_b64": base64.b64encode(buf.getvalue()).decode(),
@@ -84,7 +95,13 @@ class SystemControls:
     async def get_clipboard(self) -> dict:
         try:
             import pyperclip
-            return {"success": True, "text": pyperclip.paste()}
+            text = pyperclip.paste()
+            from backend.config import config
+            if config.get("safety", "clipboard_filter", default=True):
+                from backend.safety.clipboard_filter import redact
+                text, hits = redact(text)
+                return {"success": True, "text": text, "redacted": hits}
+            return {"success": True, "text": text}
         except ImportError:
             return {"success": False, "error": "pyperclip not installed"}
         except Exception as e:

@@ -136,6 +136,8 @@ DEFAULT_SETTINGS: dict = {
         "kill_switch_hotkey": "ctrl+shift+alt+k",
         "clipboard_filter": True,
         "prompt_guard": True,
+        "egress_guard": True,
+        "privacy_excluded_apps": [],
         "quiet_hours_start": "22:00",
         "quiet_hours_end": "07:00",
         "meeting_auto_sleep": True,

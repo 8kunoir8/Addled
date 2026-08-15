@@ -233,8 +233,17 @@ def _register_default_handlers():
             from backend.providers.registry import get_provider
             from backend.memory.chat_history import chat_history
             from backend.skills.tool_loop import chat_with_tools
+            from backend.safety.egress_monitor import egress
+
+            # Egress guard: scrub secrets before anything leaves the machine
+            if config.get("safety", "egress_guard", default=True):
+                message, hits = egress.scrub(message)
 
             provider = get_provider()
+            egress.record("chat.send", {
+                "provider": getattr(provider, "provider_id", "?"),
+                "payload_chars": len(message),
+            })
             sys_prompt = config.get("chat", "system_prompt",
                 default="You are Addled, a helpful AI desktop companion with access to system tools.")
             context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
@@ -328,6 +337,51 @@ def _register_default_handlers():
             cells=params.get("cells", []),
             grid=params.get("grid"),
         )
+
+    # ---- Privacy + egress -----------------------------------------------------
+
+    async def privacy_set_zones(params: dict, ws) -> dict:
+        """Replace the privacy blackout zones: [{x, y, w, h}, ...]."""
+        from backend.config import config
+        zones = params.get("zones", []) or []
+        try:
+            for z in zones:
+                int(z.get("x", 0)), int(z.get("y", 0)), int(z.get("w", 0)), int(z.get("h", 0))
+        except (TypeError, ValueError, AttributeError):
+            return {"success": False, "error": "zones must be [{x, y, w, h}, ...]"}
+        config.set("observation", "privacy_zones", value=zones)
+        return {"success": True, "zones": zones}
+
+    async def privacy_list(params: dict, ws) -> dict:
+        from backend.config import config
+        return {
+            "zones": config.get("observation", "privacy_zones", default=[]) or [],
+            "excludedApps": config.get("safety", "privacy_excluded_apps", default=[]) or [],
+        }
+
+    async def privacy_exclude_app(params: dict, ws) -> dict:
+        from backend.config import config
+        app = (params.get("app") or "").strip()
+        if not app:
+            return {"success": False, "error": "app name is required"}
+        excluded = list(config.get("safety", "privacy_excluded_apps", default=[]) or [])
+        if app not in excluded:
+            excluded.append(app)
+            config.set("safety", "privacy_excluded_apps", value=excluded)
+        return {"success": True, "excludedApps": excluded}
+
+    async def privacy_remove_app(params: dict, ws) -> dict:
+        from backend.config import config
+        app = (params.get("app") or "").strip()
+        excluded = [a for a in (config.get("safety", "privacy_excluded_apps", default=[]) or [])
+                    if a != app]
+        config.set("safety", "privacy_excluded_apps", value=excluded)
+        return {"success": True, "excludedApps": excluded}
+
+    async def egress_list(params: dict, ws) -> dict:
+        from backend.safety.egress_monitor import egress
+        entries = egress.list_recent(int(params.get("limit", 50)))
+        return {"entries": entries, "count": len(entries)}
 
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
@@ -726,3 +780,10 @@ def _register_default_handlers():
     # Excel operations
     _server.register("excel.read", excel_read)
     _server.register("excel.write", excel_write)
+
+    # Privacy + egress
+    _server.register("privacy.setZones", privacy_set_zones)
+    _server.register("privacy.list", privacy_list)
+    _server.register("privacy.excludeApp", privacy_exclude_app)
+    _server.register("privacy.removeApp", privacy_remove_app)
+    _server.register("egress.list", egress_list)

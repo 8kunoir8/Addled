@@ -6,6 +6,7 @@ Entry point. Boots Qt, spawns character, engine, and WebSocket server.
 import ctypes
 import os
 import sys
+import time
 from pathlib import Path
 
 # ---- single-instance lock ---------------------------------------------------
@@ -136,11 +137,28 @@ def main():
     from backend.ws_server import set_engine
     set_engine(engine)
 
+    # ---- kill switch (global hotkey: stops everything immediately) -----------
+    from backend.safety.kill_switch import kill_switch
+
+    def _on_kill():
+        log.warning("KILL SWITCH: halting engine and all actions")
+        engine.stop()
+        from backend.actions.executor import executor
+        executor.cancel_current()
+        from backend.ws_server import get_server
+        get_server().broadcast_nowait("kill.activated", {"ts": time.time()})
+        engine.sig_agent_state.emit("sleeping")
+
+    hotkey = config.get("safety", "kill_switch_hotkey", default="ctrl+shift+alt+k")
+    kill_switch.on_activated(_on_kill)
+    kill_switch.start(hotkey)
+
     # ---- event loop ----------------------------------------------------------
     exit_code = app.exec()
 
     # ---- cleanup -------------------------------------------------------------
     log.info("Shutting down...")
+    kill_switch.stop()
     engine.stop()
     _ws_loop.call_soon_threadsafe(_ws_loop.stop)
     _ws_thread.join(timeout=3)
