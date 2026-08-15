@@ -141,7 +141,11 @@ function startPythonBackend() {
   pythonProcess = spawn(pythonCmd, ['main.py'], {
     cwd: BACKEND_DIR,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: '1',
+      PYTHONNOUSERSITE: '1', // isolate bundled Python from any user site-packages
+    },
   });
 
   pythonProcess.stdout.on('data', (data) => {

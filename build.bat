@@ -18,7 +18,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [1/5] Installing Python dependencies...
+echo [1/6] Installing Python dependencies...
 pip install -r requirements.txt
 if errorlevel 1 (
     echo [WARN] Some Python packages failed to install - see errors above.
@@ -38,7 +38,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [2/5] Installing root JS dependencies ^(electron-builder, bots^)...
+echo [2/6] Installing root JS dependencies ^(electron-builder, bots^)...
 call npm install
 if errorlevel 1 (
     echo [ERROR] Root npm install failed.
@@ -47,7 +47,7 @@ if errorlevel 1 (
 )
 
 REM ---- 3. Static dashboard build -------------------------------------------
-echo [3/5] Installing dashboard dependencies...
+echo [3/6] Installing dashboard dependencies...
 pushd dashboard
 call npm install
 if errorlevel 1 (
@@ -56,7 +56,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [4/5] Building static dashboard...
+echo [4/6] Building static dashboard...
 call npm run build
 if errorlevel 1 (
     echo [ERROR] Dashboard build failed.
@@ -73,8 +73,17 @@ if errorlevel 1 (
     echo [WARN] verify_python.py reported issues - see above.
 )
 
-REM ---- 5. Electron packaging ------------------------------------------------
-echo [5/5] Packaging Windows installer + portable exe...
+REM ---- 5. Bundle embedded Python runtime -----------------------------------
+echo [5/6] Bundling embedded Python runtime for the installer...
+python scripts\bundle_python.py
+if errorlevel 1 (
+    echo [ERROR] Python bundling failed - see errors above.
+    pause
+    exit /b 1
+)
+
+REM ---- 6. Electron packaging ------------------------------------------------
+echo [6/6] Packaging Windows installer + portable exe...
 call npm run build:win
 if errorlevel 1 (
     echo [ERROR] electron-builder failed - see errors above.
@@ -89,9 +98,15 @@ echo.
 echo   dist\Addled-1.0.0-x64.exe      ^(NSIS installer^)
 echo   dist\Addled-1.0.0-portable.exe ^(portable, no install^)
 echo.
-echo   IMPORTANT: the app uses system Python.
-echo   On the target PC, install Python 3.11+ and run:
-echo       pip install -r requirements.txt
+echo   SELF-CONTAINED: Python 3.14.7 and all core
+echo   dependencies are bundled - no Python install
+echo   needed on the target PC.
+echo.
+echo   Optional extras ^(install on the target PC^):
+echo   - Local vision: torch + transformers ^(~400 MB, model
+echo     downloads on first use^)
+echo   - Browser automation: pip install playwright ^&^&
+echo     playwright install chromium
 echo  ==========================================
 echo.
 pause

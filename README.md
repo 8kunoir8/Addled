@@ -254,8 +254,10 @@ npm run build:win
 # → dist/Addled-1.0.0-portable.exe (portable)
 ```
 
-> The app uses system Python — on the target PC install Python 3.11+
-> and run `pip install -r requirements.txt`.
+> **Self-contained**: the installer bundles Python 3.14.7 + all core
+> dependencies — no Python install needed on the target PC.
+> Optional extras on the target PC: local vision (`torch` + `transformers`)
+> and browser automation (`playwright install chromium`).
 
 ---
 

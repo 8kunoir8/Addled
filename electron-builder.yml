@@ -29,6 +29,9 @@ extraResources:
     to: launch.bat
   - from: requirements.txt
     to: requirements.txt
+  - from: python-bundle
+    to: python
+    filter: ['**/*']
 
 win:
   icon: electron/icons/icon.png
