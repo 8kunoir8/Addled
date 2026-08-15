@@ -79,6 +79,46 @@ class Engine(QObject):
             self._set_state(EngineState.ERROR)
             self.sig_error.emit(str(e))
 
+    def _pick_vision_provider(self):
+        """
+        Choose a provider for the deep vision tier.
+
+        Priority: active provider if vision-capable → first provider in the
+        configured priority list that supports vision → None (vision off).
+        """
+        from backend.providers.registry import get_provider
+
+        builtin = config.get("providers", "builtin", default={}) or {}
+        custom = config.get("providers", "custom", default=[]) or []
+        active = config.active_provider
+
+        def is_vision(pid: str) -> bool:
+            if pid in builtin:
+                return bool(builtin[pid].get("vision", False))
+            for c in custom:
+                if c.get("id") == pid:
+                    return bool(c.get("vision", True))
+            return False
+
+        candidates = []
+        if active:
+            candidates.append(active)
+        candidates.extend(p for p in config.get("providers", "priority", default=[]) if p != active)
+
+        for pid in candidates:
+            if not is_vision(pid):
+                continue
+            try:
+                provider = get_provider(pid)
+                if provider is not None:
+                    log.info("Vision provider selected: %s", pid)
+                    return provider
+            except Exception as e:
+                log.warning("Vision provider %s unavailable: %s", pid, e)
+
+        log.info("No vision-capable provider available — deep vision tier disabled")
+        return None
+
     async def _init_subsystems(self):
         """Lazy-init all subsystems in order."""
         from backend.safety.presence_guard import PresenceGuard
@@ -90,7 +130,10 @@ class Engine(QObject):
 
         self._presence_guard = PresenceGuard()
         self._decision = DecisionEngine()
-        self._observer = Observer(decision=self._decision)
+        self._observer = Observer(
+            decision=self._decision,
+            provider=self._pick_vision_provider(),
+        )
 
         # Wire goal executor with action executor + store
         goal_executor.set_executor(action_exec)

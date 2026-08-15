@@ -19,6 +19,7 @@ class DeepSeekProvider(BaseProvider):
     provider_id = "deepseek"
     provider_name = "DeepSeek"
     supports_streaming = True
+    supports_vision = True  # via DeepSeek-VL2 (self-hosted or compatible endpoint)
 
     def _get_client(self) -> httpx.AsyncClient:
         api_key = self._config.get("api_key", "")
@@ -31,6 +32,82 @@ class DeepSeekProvider(BaseProvider):
             },
             timeout=60.0,
         )
+
+    def _get_vision_client(self) -> httpx.AsyncClient:
+        """Client for DeepSeek-VL2 — same API key, optionally different endpoint."""
+        api_key = self._config.get("api_key", "")
+        vision_base_url = self._config.get("vision_base_url") or \
+            self._config.get("base_url", "https://api.deepseek.com")
+        return httpx.AsyncClient(
+            base_url=vision_base_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=90.0,
+        )
+
+    async def vision(
+        self,
+        image_b64: str,
+        prompt: str,
+        model: str | None = None,
+    ) -> ProviderResult:
+        """
+        Analyze an image using DeepSeek-VL2.
+
+        Uses the OpenAI-compatible vision format with the SAME API key as chat.
+        If the endpoint doesn't serve DeepSeek-VL2 (e.g. the standard cloud API),
+        this returns a clear error — set vision_base_url to a VL2 endpoint
+        (vLLM / Ollama / LM Studio) in settings.
+        """
+        model = model or self._config.get("vision_model", "deepseek-vl2")
+        t0 = time.monotonic()
+        try:
+            async with self._get_vision_client() as client:
+                resp = await client.post("/chat/completions", json={
+                    "model": model,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": f"data:image/png;base64,{image_b64}"}},
+                        ],
+                    }],
+                    "max_tokens": 1024,
+                    "temperature": 0.3,
+                })
+                if resp.status_code == 404:
+                    return ProviderResult(
+                        ok=False,
+                        error=f"Model '{model}' not found on this endpoint. "
+                              f"Set vision_base_url to a DeepSeek-VL2 endpoint.",
+                    )
+                resp.raise_for_status()
+                data = resp.json()
+                choice = data["choices"][0]
+                return ProviderResult(
+                    ok=True,
+                    response=choice["message"]["content"],
+                    model=data.get("model", model),
+                    tokens_in=data.get("usage", {}).get("prompt_tokens", 0),
+                    tokens_out=data.get("usage", {}).get("completion_tokens", 0),
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
+        except httpx.HTTPStatusError as e:
+            return ProviderResult(
+                ok=False,
+                error=f"Vision request failed ({e.response.status_code}): "
+                      f"{e.response.text[:200]}",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+        except Exception as e:
+            return ProviderResult(
+                ok=False,
+                error=str(e),
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
 
     async def chat(
         self,
