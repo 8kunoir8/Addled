@@ -34,12 +34,15 @@ const STATE_LABELS: Record<string, string> = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { state: wsState, characterState } = useWS();
+  const { state: wsState, characterState, insight } = useWS();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [dismissedInsight, setDismissedInsight] = useState<number | null>(null);
 
   const wsStatusColor =
     wsState === 'connected' ? 'bg-green-500' :
     wsState === 'connecting' ? 'bg-yellow-500' : 'bg-red-500';
+
+  const showInsight = insight && insight.timestamp !== dismissedInsight;
 
   return (
     <html lang="en" className="dark">
@@ -84,7 +87,26 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             )}
           </div>
         </aside>
-        <main className="flex-1 overflow-hidden flex flex-col">{children}</main>
+        <main className="flex-1 overflow-hidden flex flex-col">
+          {showInsight && insight && (
+            <div className="mx-3 mt-2 px-3 py-2 rounded-md border border-[#d29922]/40 bg-[#1f1a10] text-sm flex items-start gap-2">
+              <span className="text-base leading-5">💡</span>
+              <span className="flex-1 text-[#e8eaed] leading-snug">
+                <span className="font-semibold text-[#d29922]">Addled noticed</span>
+                {insight.context !== 'unknown' && <> · {insight.context}</>}:
+                {insight.text}
+              </span>
+              <button
+                onClick={() => setDismissedInsight(insight.timestamp)}
+                className="text-[#8b949e] hover:text-[#e8eaed] px-1 leading-none"
+                aria-label="Dismiss insight"
+              >
+                ×
+              </button>
+            </div>
+          )}
+          {children}
+        </main>
       </body>
     </html>
   );

@@ -46,6 +46,8 @@ class ActionExecutor:
         self._terminal = None
         self._cancel_flag = False
         self._handlers: dict[str, callable] = {}
+        self._pending_approvals: dict[str, ActionRequest] = {}
+        self._approval_counter = 0
 
     def _lazy_init(self):
         if self._input is None:
@@ -73,6 +75,33 @@ class ActionExecutor:
         if self._input:
             self._input.cancel()
 
+    def pending_approvals(self) -> list[dict]:
+        """List destructive actions waiting for user approval."""
+        return [
+            {"approval_id": aid, "action_type": req.action_type, "params": req.params}
+            for aid, req in self._pending_approvals.items()
+        ]
+
+    async def approve(self, approval_id: str) -> ActionResult:
+        """Approve and execute a pending destructive action."""
+        request = self._pending_approvals.pop(approval_id, None)
+        if request is None:
+            return ActionResult(False, error=f"No pending approval: {approval_id}")
+        gate = self._gate
+        self._gate = None  # already approved — bypass the gate for this run
+        try:
+            return await self.execute(request)
+        finally:
+            self._gate = gate
+
+    def deny(self, approval_id: str) -> ActionResult:
+        """Deny a pending destructive action."""
+        request = self._pending_approvals.pop(approval_id, None)
+        if request is None:
+            return ActionResult(False, error=f"No pending approval: {approval_id}")
+        return ActionResult(True, request.action_type, summary="Action denied by user",
+                            data={"approval_id": approval_id})
+
     async def execute(self, request: ActionRequest) -> ActionResult:
         """Main entry point. All actions go through this pipeline."""
         self._lazy_init()
@@ -87,10 +116,14 @@ class ActionExecutor:
 
         # 2. Destruction gate classification
         if self._gate:
-            classification = self._gate.classify(request.action_type)
-            if classification == "destructive":
+            if self._gate.requires_approval(request.action_type, request.params):
+                self._approval_counter += 1
+                approval_id = f"appr_{self._approval_counter}"
+                self._pending_approvals[approval_id] = request
                 return ActionResult(False, request.action_type,
-                    error="Destructive action requires approval. Use action.approve.")
+                    error="Destructive action awaiting approval",
+                    data={"approval_id": approval_id, "action": request.action_type,
+                          "params": request.params})
 
         # 3. Dispatch
         handler = self._handlers.get(request.action_type)
@@ -178,6 +211,15 @@ class ActionExecutor:
         self._handlers["get_clipboard"] = lambda p: s.get_clipboard()
         self._handlers["set_clipboard"] = lambda p: s.set_clipboard(str(p.get("text", "")))
 
+        # Excel actions
+        from backend.actions.excel_ops import excel_ops
+        self._handlers["excel_read"] = lambda p: excel_ops.read(
+            str(p.get("path", "")), p.get("sheet"), p.get("max_rows", 500))
+        self._handlers["excel_write"] = lambda p: excel_ops.write(
+            str(p.get("path", "")), p.get("sheet", "Sheet1"),
+            p.get("cells", []), p.get("grid"))
 
-# Singleton
-executor = ActionExecutor()
+
+# Singleton (with destruction gate: destructive actions await approval)
+from backend.safety.destruction_gate import DestructionGate
+executor = ActionExecutor(gate=DestructionGate())

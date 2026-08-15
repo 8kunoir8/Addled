@@ -163,12 +163,17 @@ class Engine(QObject):
             try:
                 obs = await self._observer.tick()
                 if obs and obs.context != "unknown" and obs.changed:
-                    log.debug("Observer: context=%s tier=%s", obs.context, obs.tier)
-                    # Emit observing state if screen changed
+                    log.debug("Observer: context=%s tier=%s decision=%s",
+                              obs.context, obs.tier, obs.decision)
                     if obs.tier == "light":
                         self.sig_agent_state.emit("observing")
                     elif obs.tier == "deep" and obs.decision:
                         self.sig_agent_state.emit(obs.decision)
+                        if obs.decision in ("nudge", "suggest", "offer_action"):
+                            self._push_insight(obs)
+                    elif obs.decision in ("nudge", "suggest", "offer_action"):
+                        self.sig_agent_state.emit(obs.decision)
+                        self._push_insight(obs)
             except Exception as e:
                 log.warning("Observer tick failed: %s", e)
 
@@ -189,6 +194,32 @@ class Engine(QObject):
         # 4. Idle state if no activity detected
         if self._state == EngineState.RUNNING:
             self.sig_agent_state.emit("idle")
+
+    def _push_insight(self, obs):
+        """Deliver a proactive insight to dashboards/bots, and optionally
+        speak it when voice_insights is enabled in settings."""
+        if obs.tier == "deep" and obs.detail:
+            text = obs.detail.strip()
+        else:
+            text = (f"You've been in '{obs.context}' for a while — "
+                    "need a hand with anything?")
+        try:
+            from backend.ws_server import get_server
+            get_server().broadcast_nowait("observer.insight", {
+                "decision": obs.decision,
+                "context": obs.context,
+                "tier": obs.tier,
+                "text": text,
+                "timestamp": time.time(),
+            })
+        except Exception as e:
+            log.warning("Insight broadcast failed: %s", e)
+        if config.get("observation", "voice_insights", default=False):
+            try:
+                from backend.voice.tts import speak
+                asyncio.ensure_future(speak(text))
+            except Exception as e:
+                log.warning("Insight TTS failed: %s", e)
 
     def stop(self):
         """Request graceful shutdown."""

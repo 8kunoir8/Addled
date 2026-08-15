@@ -46,6 +46,25 @@ def generate_diff(original: str, modified: str, filepath: str = "file") -> dict:
     }
 
 
+def apply_content(filepath: str, content: str, backup: bool = True) -> dict:
+    """Replace a file's full content (with optional .bak backup).
+    Pure Python — does not depend on the unix `patch` utility."""
+    try:
+        if not os.path.exists(filepath):
+            return {"success": False, "error": f"File not found: {filepath}"}
+
+        backup_path = None
+        if backup:
+            backup_path = filepath + ".bak"
+            shutil.copy2(filepath, backup_path)
+
+        with open(filepath, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        return {"success": True, "backup": backup_path}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def apply_diff(filepath: str, diff_text: str, backup: bool = True) -> dict:
     """Apply a unified diff to a file. Optionally creates a backup."""
     try:

@@ -19,9 +19,18 @@ type PendingRequest = {
 
 type WSState = 'disconnected' | 'connecting' | 'connected';
 
+export type Insight = {
+  decision: string;
+  context: string;
+  tier: string;
+  text: string;
+  timestamp: number;
+};
+
 export function useWS() {
   const [state, setState] = useState<WSState>('disconnected');
   const [characterState, setCharacterState] = useState<string>('idle');
+  const [insight, setInsight] = useState<Insight | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pendingRef = useRef<Map<string, PendingRequest>>(new Map());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -78,6 +87,17 @@ export function useWS() {
           // Handle state changes
           if (msg.method === 'state.changed') {
             setCharacterState(msg.params?.state || 'idle');
+          }
+
+          // Proactive observer insights (bot noticed something)
+          if (msg.method === 'observer.insight') {
+            setInsight({
+              decision: msg.params?.decision || 'suggest',
+              context: msg.params?.context || 'unknown',
+              tier: msg.params?.tier || 'medium',
+              text: msg.params?.text || '',
+              timestamp: msg.params?.timestamp || Date.now(),
+            });
           }
           return;
         }
@@ -139,6 +159,7 @@ export function useWS() {
   return {
     state,
     characterState,
+    insight,
     send,
     onNotification,
     connect,

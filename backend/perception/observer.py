@@ -70,15 +70,32 @@ class Observer:
         if self._light_counter % self._medium_cycles == 0:
             context = await self._classify_context()
             self._last_context = context
-            return ObservationResult(tier="medium", screen_hash=new_hash, changed=True, context=context)
+            decision = "stay_quiet"
+            if self._decision:
+                try:
+                    self._decision.track_context(context)
+                    decision = self._decision.evaluate(context)
+                except Exception as e:
+                    log.warning("Decision evaluation failed: %s", e)
+            return ObservationResult(tier="medium", screen_hash=new_hash, changed=True,
+                                     context=context, decision=decision)
 
         # ---- DEEP TIER (every deep_interval_s) -------------------------------
         now = time.time()
         if now - self._last_deep_time >= self._deep_interval_s:
             self._last_deep_time = now
             detail = await self._deep_analyze()
+            decision = "stay_quiet"
+            if self._decision:
+                try:
+                    self._decision.track_context(self._last_context)
+                    decision = self._decision.evaluate(
+                        self._last_context, detail=detail, novel=bool(detail))
+                except Exception as e:
+                    log.warning("Deep decision evaluation failed: %s", e)
             return ObservationResult(tier="deep", screen_hash=new_hash, changed=True,
-                                     context=self._last_context, detail=detail, tokens=500)
+                                     context=self._last_context, detail=detail,
+                                     tokens=500, decision=decision)
 
         return ObservationResult(tier="light", screen_hash=new_hash, changed=True, context=self._last_context)
 

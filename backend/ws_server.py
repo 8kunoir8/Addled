@@ -20,6 +20,9 @@ log = logging.getLogger("addled.ws")
 # Reference to the engine instance (set by main.py after engine is created)
 _engine_ref = None
 
+# Pending code edits awaiting user approval: {workspaceId::filePath: content}
+_pending_edits: dict[str, str] = {}
+
 def set_engine(engine):
     """Called by main.py to give WS handlers access to engine state."""
     global _engine_ref
@@ -37,6 +40,7 @@ class WSServer:
         self._handlers: dict[str, HandlerFunc] = {}
         self._connections: set[WebSocketServerProtocol] = set()
         self._server = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def register(self, method: str, handler: HandlerFunc):
         """Register a JSON-RPC method handler."""
@@ -44,6 +48,7 @@ class WSServer:
 
     async def start(self, host: str = "127.0.0.1", port: int = 9876):
         """Start the WebSocket server."""
+        self._loop = asyncio.get_running_loop()
         self._server = await websockets.serve(
             self._handle_connection, host, port,
             max_size=10 * 1024 * 1024,  # 10MB max message
@@ -71,6 +76,14 @@ class WSServer:
             except websockets.ConnectionClosed:
                 dead.add(ws)
         self._connections -= dead
+
+    def broadcast_nowait(self, method: str, params: dict | None = None):
+        """Thread-safe fire-and-forget broadcast. Callable from any thread
+        (e.g. the engine loop, which runs on its own event loop)."""
+        if self._loop is None or self._loop.is_closed():
+            return
+        asyncio.run_coroutine_threadsafe(
+            self.broadcast(method, params), self._loop)
 
     async def _handle_connection(self, ws: WebSocketServerProtocol):
         """Handle a single WebSocket connection."""
@@ -273,6 +286,49 @@ def _register_default_handlers():
                 "summary": result.summary, "duration_ms": result.duration_ms,
                 "error": result.error, "data": result.data}
 
+    async def action_approve(params: dict, ws) -> dict:
+        """Approve a pending destructive action by its approval_id."""
+        from backend.actions.executor import executor
+        approval_id = params.get("approvalId", "")
+        if not approval_id:
+            return {"success": False, "error": "approvalId is required"}
+        result = await executor.approve(approval_id)
+        return {"success": result.success, "action_type": result.action_type,
+                "summary": result.summary, "error": result.error, "data": result.data}
+
+    async def action_deny(params: dict, ws) -> dict:
+        """Deny a pending destructive action."""
+        from backend.actions.executor import executor
+        approval_id = params.get("approvalId", "")
+        if not approval_id:
+            return {"success": False, "error": "approvalId is required"}
+        result = executor.deny(approval_id)
+        return {"success": result.success, "summary": result.summary, "error": result.error}
+
+    async def action_pending(params: dict, ws) -> dict:
+        """List actions waiting for approval."""
+        from backend.actions.executor import executor
+        return {"pending": executor.pending_approvals()}
+
+    # ---- Excel operations -----------------------------------------------------
+
+    async def excel_read(params: dict, ws) -> dict:
+        from backend.actions.excel_ops import excel_ops
+        return await excel_ops.read(
+            path=params.get("path", ""),
+            sheet=params.get("sheet"),
+            max_rows=params.get("maxRows", 500),
+        )
+
+    async def excel_write(params: dict, ws) -> dict:
+        from backend.actions.excel_ops import excel_ops
+        return await excel_ops.write(
+            path=params.get("path", ""),
+            sheet=params.get("sheet", "Sheet1"),
+            cells=params.get("cells", []),
+            grid=params.get("grid"),
+        )
+
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
     async def voice_speak(params: dict, ws) -> dict:
@@ -422,11 +478,38 @@ def _register_default_handlers():
                     lines = modified.split("\n")
                     modified = "\n".join(lines[1:-1]) if len(lines) > 2 else modified
                 diff = generate_diff(original, modified, fp)
-                return {"diffs": [diff], "status": "pending"}
+                _pending_edits[f"{wp}::{fp}"] = modified
+                return {"diffs": [diff], "status": "pending",
+                        "editId": f"{wp}::{fp}",
+                        "message": "Edit ready for review. Approve with code.apply."}
         except Exception:
             pass
         return {"diffs": [{"instruction": instruction, "status": "pending",
                 "message": "Edit ready for review. Apply to see changes."}]}
+
+    async def code_apply(params: dict, ws) -> dict:
+        """Apply a reviewed code edit. Requires explicit content OR a pending
+        edit id created by code.edit."""
+        from backend.code.diff_engine import apply_content
+        wp = params.get("workspaceId", "")
+        fp = params.get("filePath", "")
+        edit_id = params.get("editId") or f"{wp}::{fp}"
+
+        content = params.get("content")
+        if content is None:
+            content = _pending_edits.get(edit_id)
+        if content is None:
+            return {"success": False,
+                    "error": "No pending edit or content provided. Run code.edit first or pass 'content'."}
+
+        import os
+        full = os.path.join(wp, fp) if wp else fp
+        if not os.path.isfile(full):
+            return {"success": False, "error": f"File not found: {full}"}
+        result = apply_content(full, content, backup=params.get("backup", True))
+        if result.get("success"):
+            _pending_edits.pop(edit_id, None)
+        return result
 
     # ---- Phase 5: Swarm Orchestrator -----------------------------------------
 
@@ -589,6 +672,9 @@ def _register_default_handlers():
     # Phase 1-3 core handlers
     _server.register("chat.send", chat_send)
     _server.register("action.execute", action_execute)
+    _server.register("action.approve", action_approve)
+    _server.register("action.deny", action_deny)
+    _server.register("action.pending", action_pending)
     _server.register("voice.speak", voice_speak)
     _server.register("character.setState", character_set_state)
     _server.register("observer.status", observer_status)
@@ -607,6 +693,7 @@ def _register_default_handlers():
     _server.register("code.bind", code_bind)
     _server.register("code.read", code_read)
     _server.register("code.edit", code_edit)
+    _server.register("code.apply", code_apply)
 
     # Phase 5 Swarm orchestrator
     _server.register("swarm.spawn", swarm_spawn)
@@ -635,3 +722,7 @@ def _register_default_handlers():
     # Skill Forge
     _server.register("forge.create", forge_create)
     _server.register("forge.list", forge_list)
+
+    # Excel operations
+    _server.register("excel.read", excel_read)
+    _server.register("excel.write", excel_write)
