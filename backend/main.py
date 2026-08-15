@@ -153,11 +153,42 @@ def main():
     kill_switch.on_activated(_on_kill)
     kill_switch.start(hotkey)
 
+    # ---- voice input (wake word → command → chat → speak) --------------------
+    from backend.voice.stt import voice_listener
+    from backend.ws_server import run_chat_pipeline, get_server
+
+    async def _handle_voice_command(text: str):
+        get_server().broadcast_nowait("voice.command", {"text": text})
+        result = await run_chat_pipeline(text)
+        reply = result.get("response", "")
+        get_server().broadcast_nowait("voice.reply", {"text": reply})
+        if reply and not reply.startswith("[Not connected:"):
+            try:
+                from backend.voice.tts import speak
+                await speak(reply)
+            except Exception as e:
+                log.warning("Voice reply TTS failed: %s", e)
+
+    def _on_voice_command(text: str):
+        try:
+            asyncio.run_coroutine_threadsafe(_handle_voice_command(text), _ws_loop)
+        except Exception as e:
+            log.warning("Voice dispatch failed: %s", e)
+
+    wake_word = config.get("voice", "wake_word", default="hey addled")
+    voice_listener.on_command(_on_voice_command)
+    voice_listener.on_wake(lambda: engine.sig_agent_state.emit("listening"))
+    if config.get("voice", "mic_enabled", default=True):
+        voice_listener.start()
+        log.info("Voice input: %s (wake word '%s')",
+                 "enabled" if voice_listener.enabled else "disabled", wake_word)
+
     # ---- event loop ----------------------------------------------------------
     exit_code = app.exec()
 
     # ---- cleanup -------------------------------------------------------------
     log.info("Shutting down...")
+    voice_listener.stop()
     kill_switch.stop()
     engine.stop()
     _ws_loop.call_soon_threadsafe(_ws_loop.stop)

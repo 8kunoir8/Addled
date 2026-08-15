@@ -125,6 +125,8 @@ DEFAULT_SETTINGS: dict = {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",
         "stt_engine": "sensevoice",
+        "stt_model": "tiny",
+        "mic_enabled": True,
         "wake_word": "hey addled",
         "wake_sensitivity": 0.7,
         "auto_tts": True,

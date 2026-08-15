@@ -164,6 +164,82 @@ def get_server() -> WSServer:
     return _server
 
 
+async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
+    """Shared chat pipeline — used by chat.send and the voice listener."""
+    params = params or {}
+    from backend.config import config
+
+    # Prompt guard check
+    if config.get("safety", "prompt_guard", default=True):
+        from backend.safety.prompt_guard import sanitize
+        sanitized, blocked = sanitize(message)
+        if blocked:
+            return {"response": sanitized, "tokens": 0, "conversationId": None}
+
+    try:
+        from backend.providers.registry import get_provider
+        from backend.memory.chat_history import chat_history
+        from backend.skills.tool_loop import chat_with_tools
+        from backend.safety.egress_monitor import egress
+
+        # Egress guard: scrub secrets before anything leaves the machine
+        if config.get("safety", "egress_guard", default=True):
+            message, _hits = egress.scrub(message)
+
+        provider = get_provider()
+        egress.record("chat.send", {
+            "provider": getattr(provider, "provider_id", "?"),
+            "payload_chars": len(message),
+        })
+        sys_prompt = config.get("chat", "system_prompt",
+            default="You are Addled, a helpful AI desktop companion with access to system tools.")
+        context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
+
+        # Long-term recall: inject relevant past conversation turns
+        from backend.memory.recall import build_memory_context
+        memory_ctx = build_memory_context(message)
+        user_messages = [
+            {"role": m["role"], "content": m["content"]} for m in context
+        ]
+        if memory_ctx:
+            user_messages.insert(0, {"role": "user", "content": memory_ctx})
+        user_messages.append({"role": "user", "content": message})
+
+        # Use the provider-agnostic tool-use loop
+        result = await chat_with_tools(
+            provider=provider,
+            messages=user_messages,
+            system_prompt=sys_prompt,
+            max_tool_rounds=params.get("maxToolRounds", 5),
+        )
+
+        response_text = result.get("response", "")
+        tool_rounds = result.get("tool_rounds", 0)
+        tool_results = result.get("tool_results", [])
+
+        if response_text and not response_text.startswith("[Provider:") and not response_text.startswith("[Not connected:"):
+            chat_history.add_message("user", message)
+            chat_history.add_message("assistant", response_text,
+                tokens={"in": result.get("tokens", 0), "out": 0})
+            # Remember for the long term
+            from backend.memory.recall import remember
+            remember("user", message)
+            remember("assistant", response_text)
+            return {
+                "response": response_text,
+                "tokens": result.get("tokens", 0),
+                "conversationId": chat_history.current_conversation_id,
+                "toolRounds": tool_rounds,
+                "toolResults": len(tool_results),
+                "memoryRecall": bool(memory_ctx),
+            }
+        return {"response": response_text or "I couldn't process that request.",
+                "tokens": result.get("tokens", 0), "conversationId": None}
+    except Exception as e:
+        log.exception("Chat failed")
+        return {"response": f"[Not connected: {e}] Configure an AI provider in Settings.", "tokens": 0, "conversationId": None}
+
+
 async def start_ws_server(host: str = "127.0.0.1", port: int = 9876):
     """Start the singleton WebSocket server."""
     _register_default_handlers()
@@ -220,67 +296,7 @@ def _register_default_handlers():
         message = params.get("message", "")
         if not message:
             return {"response": "I didn't catch that.", "tokens": 0, "conversationId": None}
-
-        # Prompt guard check
-        from backend.config import config
-        if config.get("safety", "prompt_guard", default=True):
-            from backend.safety.prompt_guard import sanitize
-            sanitized, blocked = sanitize(message)
-            if blocked:
-                return {"response": sanitized, "tokens": 0, "conversationId": None}
-
-        try:
-            from backend.providers.registry import get_provider
-            from backend.memory.chat_history import chat_history
-            from backend.skills.tool_loop import chat_with_tools
-            from backend.safety.egress_monitor import egress
-
-            # Egress guard: scrub secrets before anything leaves the machine
-            if config.get("safety", "egress_guard", default=True):
-                message, hits = egress.scrub(message)
-
-            provider = get_provider()
-            egress.record("chat.send", {
-                "provider": getattr(provider, "provider_id", "?"),
-                "payload_chars": len(message),
-            })
-            sys_prompt = config.get("chat", "system_prompt",
-                default="You are Addled, a helpful AI desktop companion with access to system tools.")
-            context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
-
-            # Build user messages (without system prompt — tool_loop handles it)
-            user_messages = [
-                {"role": m["role"], "content": m["content"]} for m in context
-            ] + [{"role": "user", "content": message}]
-
-            # Use the provider-agnostic tool-use loop
-            result = await chat_with_tools(
-                provider=provider,
-                messages=user_messages,
-                system_prompt=sys_prompt,
-                max_tool_rounds=params.get("maxToolRounds", 5),
-            )
-
-            response_text = result.get("response", "")
-            tool_rounds = result.get("tool_rounds", 0)
-            tool_results = result.get("tool_results", [])
-
-            if response_text and not response_text.startswith("[Provider:") and not response_text.startswith("[Not connected:"):
-                chat_history.add_message("user", message)
-                chat_history.add_message("assistant", response_text,
-                    tokens={"in": result.get("tokens", 0), "out": 0})
-                return {
-                    "response": response_text,
-                    "tokens": result.get("tokens", 0),
-                    "conversationId": chat_history.current_conversation_id,
-                    "toolRounds": tool_rounds,
-                    "toolResults": len(tool_results),
-                }
-            return {"response": response_text or "I couldn't process that request.",
-                    "tokens": result.get("tokens", 0), "conversationId": None}
-        except Exception as e:
-            log.exception("Chat failed")
-            return {"response": f"[Not connected: {e}] Configure an AI provider in Settings.", "tokens": 0, "conversationId": None}
+        return await run_chat_pipeline(message, params)
 
     # ---- Phase 3: Action execution --------------------------------------------
 
