@@ -111,6 +111,9 @@ def main():
     def _run_ws():
         asyncio.set_event_loop(_ws_loop)
         _ws_loop.run_until_complete(start_ws_server(host="127.0.0.1", port=9876))
+        # CRITICAL: keep the loop running — without this the thread exits and
+        # the listening socket never accepts connections (handshakes hang).
+        _ws_loop.run_forever()
 
     _ws_thread = threading.Thread(target=_run_ws, daemon=True, name="ws-server")
     _ws_thread.start()
