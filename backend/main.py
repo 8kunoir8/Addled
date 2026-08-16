@@ -232,6 +232,16 @@ def main():
     voice_listener.stop()
     kill_switch.stop()
     engine.stop()
+
+    # Summarize the session into long-term memory before the loops stop
+    try:
+        from backend.memory.session_summary import summarize_session
+        fut = asyncio.run_coroutine_threadsafe(summarize_session(), _ws_loop)
+        fut.result(timeout=25)
+        log.info("Session summary saved")
+    except Exception as e:
+        log.warning("Session summary failed: %s", e)
+
     _ws_loop.call_soon_threadsafe(_ws_loop.stop)
     _ws_thread.join(timeout=3)
     config.save()

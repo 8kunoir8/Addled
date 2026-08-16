@@ -211,6 +211,12 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
         if memory_ctx:
             user_messages.insert(0, {"role": "user", "content": memory_ctx})
 
+        # Session continuity: recent session summaries (long-run memory)
+        from backend.memory.session_summary import build_session_context
+        session_ctx = build_session_context()
+        if session_ctx:
+            user_messages.insert(0, {"role": "user", "content": session_ctx})
+
         # Live screen awareness: let the model know what the observer sees
         screen_note = None
         if _engine_ref:
