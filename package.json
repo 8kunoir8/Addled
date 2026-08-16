@@ -1,6 +1,6 @@
 {
   "name": "addled",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Addled — AI Desktop Buddy with Full Dashboard",
   "author": "Kunoir",
   "main": "electron/main.js",

@@ -37,7 +37,9 @@ def draw_circle(painter: QPainter, size: float, color: QColor):
     painter.setBrush(color)
     painter.setPen(Qt.PenStyle.NoPen)
     margin = size * 0.06
-    painter.drawEllipse(margin, margin, size - 2 * margin, size - 2 * margin)
+    # PyQt6 drawEllipse requires ints (PyQt5 accepted floats)
+    painter.drawEllipse(int(margin), int(margin),
+                        int(size - 2 * margin), int(size - 2 * margin))
 
 
 def draw_diamond(painter: QPainter, size: float, color: QColor):

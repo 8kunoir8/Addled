@@ -252,6 +252,17 @@ class CharacterWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        try:
+            self._paint(painter)
+        except Exception:
+            # PyQt6 aborts the app on exceptions inside paintEvent — never
+            # let a draw bug kill the whole backend.
+            import logging
+            logging.getLogger("addled.avatar").exception("Paint error")
+        finally:
+            painter.end()
+
+    def _paint(self, painter: QPainter):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         state = self._state_machine.current
