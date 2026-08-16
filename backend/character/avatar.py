@@ -197,26 +197,37 @@ class CharacterWidget(QWidget):
         menu.exec(global_pos)
 
     def _default_ask(self):
-        """Default left-click behavior: show a simple prompt dialog."""
+        """Default left-click behavior: prompt and send through the wired
+        callback (main.py), or show a placeholder if not wired."""
         from PyQt6.QtWidgets import QInputDialog, QMessageBox
         text, ok = QInputDialog.getText(
             self, "Ask Addled", "What would you like to know?",
         )
         if ok and text.strip():
-            QMessageBox.information(
-                self, "Addled",
-                f"Addled is thinking about: {text[:100]}...\n\n"
-                "(Full chat available in the dashboard)"
-            )
+            if self._on_ask_callback:
+                self._on_ask_callback(text.strip())
+            else:
+                QMessageBox.information(
+                    self, "Addled",
+                    f"Addled is thinking about: {text[:100]}...\n\n"
+                    "(Full chat available in the dashboard)"
+                )
 
     def _default_settings_dialog(self):
-        """Default settings: open settings window."""
-        from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.information(
-            self, "Settings",
-            "Settings are available in the Addled Dashboard.\n"
-            "Right-click the tray icon or open http://localhost:3000"
-        )
+        """Open the dashboard in the default browser (correct URL for
+        dev vs packaged install)."""
+        import pathlib
+        import sys
+        import webbrowser
+        backend_dir = pathlib.Path(sys.argv[0]).resolve().parent
+        packaged = backend_dir.parent.name == "resources"
+        url = "http://127.0.0.1:3001" if packaged else "http://localhost:3000"
+        try:
+            webbrowser.open(url)
+        except Exception:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Settings",
+                                    f"Open the dashboard at {url}")
 
     # ---- internal tick --------------------------------------------------------
 

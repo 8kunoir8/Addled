@@ -51,6 +51,7 @@ class Engine(QObject):
         # Tick intervals
         self._light_interval = config.get("observation", "light_interval_s") or 5
         self._tick_count = 0
+        self._last_obs = None  # most recent ObservationResult
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -162,6 +163,8 @@ class Engine(QObject):
         if self._observer:
             try:
                 obs = await self._observer.tick()
+                if obs:
+                    self._last_obs = obs
                 if obs and obs.context != "unknown" and obs.changed:
                     log.debug("Observer: context=%s tier=%s decision=%s",
                               obs.context, obs.tier, obs.decision)
@@ -235,6 +238,29 @@ class Engine(QObject):
             log.info("Engine state: %s → %s", old.name, state.name)
 
     # ---- public API ----------------------------------------------------------
+
+    def last_screen_info(self) -> dict | None:
+        """Latest observation for chat screen-awareness."""
+        obs = self._last_obs
+        if not obs:
+            return None
+        return {
+            "context": obs.context,
+            "detail": obs.detail,
+            "tier": obs.tier,
+            "changed": obs.changed,
+        }
+
+    async def fresh_screen_detail(self) -> str | None:
+        """Run a deep vision analysis now (used when the user asks what the
+        bot can see). Returns the description or None."""
+        if not self._observer:
+            return None
+        try:
+            return await self._observer._deep_analyze()
+        except Exception as e:
+            log.warning("Fresh screen analysis failed: %s", e)
+            return None
 
     @property
     def state(self) -> EngineState:

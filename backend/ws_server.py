@@ -203,6 +203,34 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
         ]
         if memory_ctx:
             user_messages.insert(0, {"role": "user", "content": memory_ctx})
+
+        # Live screen awareness: let the model know what the observer sees
+        screen_note = None
+        if _engine_ref:
+            info = _engine_ref.last_screen_info()
+            asks_about_screen = any(
+                kw in message.lower() for kw in
+                ("what do you see", "what can you see", "screen", "desktop",
+                 "what's on my screen", "what am i looking at"))
+            detail = (info or {}).get("detail")
+            if asks_about_screen and not detail:
+                # User explicitly asks what it sees and there is no recent
+                # vision result — capture a fresh one right now.
+                detail = await _engine_ref.fresh_screen_detail()
+            ctx = (info or {}).get("context")
+            if detail or ctx not in (None, "unknown", "unchanged", "private"):
+                parts = []
+                if ctx not in (None, "unknown", "unchanged", "private"):
+                    parts.append(f"the user's current activity context: {ctx}")
+                if detail:
+                    parts.append(f"recent screen description: {detail}")
+                if parts:
+                    screen_note = ("[Live screen awareness] " + "; ".join(parts) +
+                                   ". Use this when the user asks what you can see "
+                                   "or what they are doing.")
+        if screen_note:
+            user_messages.insert(0, {"role": "user", "content": screen_note})
+
         user_messages.append({"role": "user", "content": message})
 
         # Use the provider-agnostic tool-use loop

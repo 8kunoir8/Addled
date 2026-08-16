@@ -18,7 +18,7 @@ const GREETING: Message = {
 };
 
 export default function ChatPage() {
-  const { state: wsState, send } = useWS();
+  const { state: wsState, send, onNotification } = useWS();
   // Restore the session's messages on mount so navigation doesn't wipe them
   const [messages, setMessages] = useState<Message[]>(() => {
     const cached = getChatMessages();
@@ -31,6 +31,17 @@ export default function ChatPage() {
   useEffect(() => {
     setChatMessages(messages);
   }, [messages]);
+
+  // Messages pushed by the floating character / voice listener
+  useEffect(() => onNotification('chat.push', (params: any) => {
+    if (params?.role && params?.content) {
+      setMessages(prev => [...prev, {
+        role: params.role,
+        content: params.content,
+        timestamp: Date.now(),
+      }]);
+    }
+  }), [onNotification]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });

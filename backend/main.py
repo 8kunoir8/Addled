@@ -186,6 +186,44 @@ def main():
         log.info("Voice input: %s (wake word '%s')",
                  "enabled" if voice_listener.enabled else "disabled", wake_word)
 
+    # ---- floating-character prompt (left click → ask → answer) ----------------
+    from PyQt6.QtCore import QObject, pyqtSignal
+    from PyQt6.QtWidgets import QInputDialog, QMessageBox
+
+    class _UIBridge(QObject):
+        reply = pyqtSignal(str)
+
+    bridge = _UIBridge()
+
+    def _show_reply(text: str):
+        QMessageBox.information(char_widget, "Addled", text[:1500])
+
+    bridge.reply.connect(_show_reply)  # thread-safe: emit from WS loop → Qt queue
+
+    async def _handle_prompt(text: str):
+        get_server().broadcast_nowait("chat.push", {"role": "user", "content": text})
+        result = await run_chat_pipeline(text)
+        reply = result.get("response", "")
+        get_server().broadcast_nowait("chat.push", {"role": "assistant", "content": reply})
+        bridge.reply.emit(reply)
+        if reply and not reply.startswith("[Not connected:") and not reply.startswith("[Provider"):
+            try:
+                from backend.voice.tts import speak
+                await speak(reply)
+            except Exception as e:
+                log.warning("Prompt TTS failed: %s", e)
+
+    def _on_prompt():
+        text, ok = QInputDialog.getText(char_widget, "Ask Addled",
+                                        "What would you like to know?")
+        if ok and text.strip():
+            try:
+                asyncio.run_coroutine_threadsafe(_handle_prompt(text.strip()), _ws_loop)
+            except Exception as e:
+                log.warning("Prompt dispatch failed: %s", e)
+
+    char_widget.set_interaction_callbacks(on_ask=_on_prompt)
+
     # ---- event loop ----------------------------------------------------------
     exit_code = app.exec()
 

@@ -130,7 +130,7 @@ export function useWS() {
       const timer = setTimeout(() => {
         pendingRef.current.delete(id);
         reject(new Error(`Request ${method} timed out`));
-      }, 30000);
+      }, 90000);
 
       pendingRef.current.set(id, { resolve, reject, timer });
 
