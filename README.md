@@ -1,10 +1,13 @@
 # Addled
 
 > An AI desktop companion with a floating animated character, full web dashboard,  
-> 30 built-in skills, self-extending capability forge, and 7 AI provider backends.  
+> voice interaction (wake word + speech), 30 built-in skills, self-extending  
+> capability forge, 7 AI provider backends, live screen awareness, long-term  
+> memory, and a full safety suite.  
 > Built with Python 3.14 + PyQt6 + Electron 28 + Next.js 16.
 >
-> **Repository**: [github.com/8kunoir8/Addled](https://github.com/8kunoir8/Addled)
+> **Repository**: [github.com/8kunoir8/Addled](https://github.com/8kunoir8/Addled)  
+> **Releases**: [github.com/8kunoir8/Addled/releases](https://github.com/8kunoir8/Addled/releases)
 
 ## Quick Start (Development)
 
@@ -13,6 +16,7 @@
 pip install -r requirements.txt
 
 # 2. Start the backend (Python + WebSocket server + character widget)
+cd backend
 python main.py
 
 # 3. In another terminal, start the dashboard
@@ -29,6 +33,12 @@ Or use the one-click launcher:
 ```bash
 launch.bat
 ```
+
+> **Self-contained installer**: `build.bat` bundles Python 3.14.7 + all core
+> dependencies — no Python install needed on the target PC.
+> Optional extras: local vision (`torch` + `transformers`, ~400 MB) and
+> browser automation (`pip install playwright && playwright install chromium`).
+> The voice model (faster-whisper tiny, ~75 MB) downloads on first use.
 
 ---
 
@@ -71,9 +81,9 @@ launch.bat
 | Character Engine | PyQt6 QWidget, QPainter, 30fps animation loop | ✅ Built |
 | Skill System | Provider-agnostic function calling + auto-forge | ✅ Built |
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
-| Desktop Shell | Electron 28, system tray, auto-updater | ✅ Built |
+| Desktop Shell | Electron 28, system tray, auto-updater, backend auto-respawn | ✅ Built |
 | Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
-| Communication | WebSocket JSON-RPC 2.0 (36 handlers) | ✅ Built |
+| Communication | WebSocket JSON-RPC 2.0 (48 handlers) | ✅ Built |
 
 ---
 
@@ -137,29 +147,32 @@ Local calendar with Google Calendar OAuth sync. IMAP/SMTP email — fetch unread
 Telegram (grammY with 6 commands), WhatsApp (Baileys multi-device with QR pairing), Discord (discord.js with 5 slash commands). All forward messages to Addled's chat.
 
 ### 🛡️ Safety
-Prompt guard (14 injection + 5 exfiltration patterns), presence guard (meeting/gaming/away detection), rate limiter, destruction gate with approval workflow, privacy guard, clipboard filter.
+Prompt guard (15 injection + 5 exfiltration patterns), presence guard (meeting/gaming/away auto-sleep), rate limiter, destruction gate with approval workflow (`action.approve` / `action.deny`), **global kill-switch hotkey** (Ctrl+Shift+Alt+K, configurable), **clipboard secret filter** (API keys, tokens, passwords, private keys redacted before the agent sees them), **egress monitor** (logs + scrubs every outbound payload), and **privacy zones** (screen blackout regions + excluded apps actually applied to screenshots).
 
 ### 🧠 Memory
-Chat history (JSON), session context tracking, vector store (SQLite + numpy cosine similarity) for semantic search.
+Chat history (JSON, cross-session), **long-term conversational recall** (every turn remembered; relevant past turns auto-injected into new chats), vector store (SQLite + numpy cosine similarity), and **rolling screenshot memory** (last 30 privacy-masked screenshots, 24h auto-purge — enables "what was I doing 20 minutes ago?").
 
 ### 🎤 Voice & Perception
-Edge TTS with 5 voice options, 3-tier observer (light pHash / medium window classification / deep vision model analysis). Wired into engine tick for autonomous context awareness.
+**Voice input**: "Hey Fox"-style wake word → command → chat → spoken reply (local faster-whisper, offline). Edge TTS output. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task, with dedup + 10-min nag limit and meeting/gaming/quiet-hours boundaries.
 
 ### 📦 Installer & Auto-Update
 Windows NSIS + portable installer via electron-builder. GitHub Releases auto-updater with 4-hour check interval, download progress, restart prompt. First-run PyQt6 onboarding wizard (6 steps).
 
 ---
 
-## WebSocket API (36 handlers)
+## WebSocket API (48 handlers)
 
 ### Core
-`chat.send` `action.execute` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set`
+`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set`
 
 ### Goals
 `goal.create` `goal.list` `goal.start` `goal.cancel`
 
 ### Code
-`code.bind` `code.read` `code.edit`
+`code.bind` `code.read` `code.edit` `code.apply`
+
+### Excel
+`excel.read` `excel.write`
 
 ### Swarm
 `swarm.spawn` `swarm.list` `swarm.run` `swarm.stop`
@@ -170,8 +183,14 @@ Windows NSIS + portable installer via electron-builder. GitHub Releases auto-upd
 ### Browser
 `browser.navigate` `browser.go_back` `browser.go_forward` `browser.click` `browser.type` `browser.screenshot` `browser.extract` `browser.close`
 
+### Privacy & Monitoring
+`privacy.setZones` `privacy.list` `privacy.excludeApp` `privacy.removeApp` `egress.list` `snapshot.list`
+
 ### Skill Forge
 `forge.create` `forge.list`
+
+### Server pushes
+`state.changed` (character state) · `observer.insight` (proactive suggestions) · `chat.push` (character/voice-initiated messages) · `kill.activated`
 
 ---
 
@@ -195,21 +214,22 @@ npx electron .
 ```
 Addled/
 ├── backend/
-│   ├── main.py              # Entry point + onboarding + single-instance lock
+│   ├── main.py              # Entry point + onboarding + single-instance lock + kill switch + voice
 │   ├── config.py            # Portable JSON settings
-│   ├── engine.py            # Async event loop + observer + goal tick
-│   ├── ws_server.py         # 36 JSON-RPC 2.0 handlers
-│   ├── providers/           # 7 AI providers (base + registry)
+│   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
+│   ├── ws_server.py         # 48 JSON-RPC 2.0 handlers + server pushes
+│   ├── providers/           # 7 AI providers (base + registry) + local Florence-2 vision
 │   ├── skills/              # Skill registry + tool loop + forge
 │   ├── character/           # States, shapes, movement, animation, avatar, particles
-│   ├── actions/             # 55+ action executor (input, windows, files, system, terminal)
-│   ├── safety/              # Prompt guard, presence guard, rate limiter, privacy
-│   ├── perception/          # 3-tier observer (light/medium/deep)
-│   ├── voice/               # Edge TTS
-│   ├── memory/              # Chat history, session context, vector store, forged skills
+│   ├── actions/             # 55+ action executor (input, windows, files, system, terminal, excel)
+│   ├── safety/              # Prompt guard, presence guard, destruction gate, kill switch,
+│   │                       #   clipboard filter, egress monitor, privacy zones
+│   ├── perception/          # 3-tier observer (light/medium/deep) + snapshot hook
+│   ├── voice/               # Edge TTS + wake-word STT (faster-whisper)
+│   ├── memory/              # Chat history, vector store, long-term recall, snapshot store
 │   ├── browser/             # Playwright browser automation
 │   ├── goals/               # Planner, executor, store
-│   ├── code/                # Diff engine, language detection
+│   ├── code/                # Diff engine (apply with backup), language detection
 │   ├── swarm/               # Agent orchestrator
 │   ├── integrations/        # Calendar (Google OAuth), Email (IMAP/SMTP)
 │   ├── onboarding/          # PyQt6 setup wizard (6 pages)
@@ -250,9 +270,21 @@ Manual equivalent:
 pip install -r requirements.txt
 cd dashboard && npm install && npm run build && cd ..
 npm run build:win
-# → dist/Addled-1.0.0-x64.exe (NSIS installer)
-# → dist/Addled-1.0.0-portable.exe (portable)
+# → dist/Addled-<version>-x64.exe (NSIS installer)
+# → dist/Addled-<version>-portable.exe (portable)
 ```
+
+### Publish a release
+```bash
+# after build.bat:
+git tag vX.Y.Z && git push origin vX.Y.Z
+gh release create vX.Y.Z --title "Addled X.Y.Z" --notes-file release-notes.md
+gh release upload vX.Y.Z dist\Addled-X.Y.Z-x64.exe.blockmap dist\latest.yml --clobber
+gh release upload vX.Y.Z dist\Addled-X.Y.Z-x64.exe dist\Addled-X.Y.Z-portable.exe --clobber
+gh release edit vX.Y.Z --draft=false
+```
+> Upload small assets first, then the two large exes (more reliable).
+> The auto-updater polls GitHub Releases every 4 hours.
 
 > **Self-contained**: the installer bundles Python 3.14.7 + all core
 > dependencies — no Python install needed on the target PC.
