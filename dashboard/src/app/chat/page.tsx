@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useWS } from '@/lib/useWS';
+import { getChatMessages, setChatMessages } from '@/lib/chatStore';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -10,14 +11,26 @@ interface Message {
   streaming?: boolean;
 }
 
+const GREETING: Message = {
+  role: 'assistant',
+  content: 'Hello! I\'m Addled, your AI desktop companion. How can I help you today?',
+  timestamp: Date.now(),
+};
+
 export default function ChatPage() {
   const { state: wsState, send } = useWS();
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'assistant', content: 'Hello! I\'m Addled, your AI desktop companion. How can I help you today?', timestamp: Date.now() },
-  ]);
+  // Restore the session's messages on mount so navigation doesn't wipe them
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const cached = getChatMessages();
+    return cached.length ? cached : [GREETING];
+  });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setChatMessages(messages);
+  }, [messages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });

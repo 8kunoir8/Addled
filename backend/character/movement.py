@@ -161,8 +161,19 @@ class Mover:
             self._anchor.y() + math.sin(angle) * radius,
         )
 
+    def _all_screens_bounds(self) -> QRect:
+        """Union of every connected monitor (drag target is multi-screen)."""
+        screens = QApplication.screens()
+        if not screens:
+            return QApplication.primaryScreen().geometry()
+        left = min(s.geometry().left() for s in screens)
+        top = min(s.geometry().top() for s in screens)
+        right = max(s.geometry().right() for s in screens)
+        bottom = max(s.geometry().bottom() for s in screens)
+        return QRect(left, top, right - left, bottom - top)
+
     def _clamp_to_screen(self):
-        screen = QApplication.primaryScreen().geometry()
+        bounds = self._all_screens_bounds()
         half = self._size / 2
-        self._pos.setX(max(half, min(screen.width() - half, self._pos.x())))
-        self._pos.setY(max(half, min(screen.height() - half, self._pos.y())))
+        self._pos.setX(max(bounds.left() + half, min(bounds.right() - half, self._pos.x())))
+        self._pos.setY(max(bounds.top() + half, min(bounds.bottom() - half, self._pos.y())))

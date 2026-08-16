@@ -311,10 +311,13 @@ class CharacterWidget(QWidget):
         color.setAlpha(int(255 * a.opacity))
 
         painter.save()
-        painter.translate(offset_x, 0)
-        painter.translate(center_x, center_y)
+        # Center the shape box on the widget center (widget = size + 40 glow
+        # padding) and pulse-scale about the shape's own center.
+        offset = (self.width() - self._size) / 2
+        painter.translate(offset + offset_x, offset)
+        painter.translate(self._size / 2, self._size / 2)
         painter.scale(a.pulse_scale, a.pulse_scale)
-        painter.translate(-center_x, -center_y)
+        painter.translate(-self._size / 2, -self._size / 2)
 
         draw_fn(painter, self._size, color)
 
