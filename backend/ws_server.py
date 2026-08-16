@@ -191,8 +191,15 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
             "provider": getattr(provider, "provider_id", "?"),
             "payload_chars": len(message),
         })
-        sys_prompt = config.get("chat", "system_prompt",
-            default="You are Addled, a helpful AI desktop companion with access to system tools.")
+        agent_name = config.agent_name
+        sys_prompt = config.get("chat", "system_prompt", default="") or ""
+        sys_prompt = sys_prompt.replace("{agent_name}", agent_name)
+        if agent_name != "Addled":
+            # also fix persisted prompts that hardcode the old name
+            sys_prompt = sys_prompt.replace("Addled", agent_name)
+        if not sys_prompt.strip():
+            sys_prompt = (f"You are {agent_name}, a helpful AI desktop "
+                          "companion with access to system tools.")
         context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
 
         # Long-term recall: inject relevant past conversation turns

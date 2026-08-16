@@ -13,7 +13,7 @@ interface Message {
 
 const GREETING: Message = {
   role: 'assistant',
-  content: 'Hello! I\'m Addled, your AI desktop companion. How can I help you today?',
+  content: 'Hello! I\'m your AI desktop companion. How can I help you today?',
   timestamp: Date.now(),
 };
 
