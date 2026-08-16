@@ -156,6 +156,7 @@ DEFAULT_SETTINGS: dict = {
         "snapshot_max": 30,
         "snapshot_min_interval_s": 60,
         "snapshot_max_age_h": 24,
+        "voice_insights": False,
     },
     "vision": {
         "fallback_enabled": True,

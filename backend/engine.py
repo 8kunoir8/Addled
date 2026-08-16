@@ -54,6 +54,8 @@ class Engine(QObject):
         self._last_obs = None  # most recent ObservationResult
         self._last_detail = None  # latest successful deep vision description
         self._last_context = None  # latest meaningful activity context
+        self._last_insight_text = ""  # dedup: don't repeat the same insight
+        self._last_insight_time = 0.0
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -213,6 +215,15 @@ class Engine(QObject):
         else:
             text = (f"You've been in '{obs.context}' for a while — "
                     "need a hand with anything?")
+        now = time.time()
+        # Dedup: never repeat the identical insight, and don't nag with
+        # context-level suggestions more often than every 10 minutes.
+        if text == self._last_insight_text:
+            return
+        if obs.tier != "deep" and now - self._last_insight_time < 600:
+            return
+        self._last_insight_text = text
+        self._last_insight_time = now
         try:
             from backend.ws_server import get_server
             get_server().broadcast_nowait("observer.insight", {
@@ -220,7 +231,7 @@ class Engine(QObject):
                 "context": obs.context,
                 "tier": obs.tier,
                 "text": text,
-                "timestamp": time.time(),
+                "timestamp": now,
             })
         except Exception as e:
             log.warning("Insight broadcast failed: %s", e)
