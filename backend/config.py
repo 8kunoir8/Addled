@@ -152,6 +152,10 @@ DEFAULT_SETTINGS: dict = {
         "deep_interval_s": 300,
         "monitors": "all",
         "privacy_zones": [],
+        "snapshot_store_enabled": True,
+        "snapshot_max": 30,
+        "snapshot_min_interval_s": 60,
+        "snapshot_max_age_h": 24,
     },
     "vision": {
         "fallback_enabled": True,

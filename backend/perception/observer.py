@@ -54,6 +54,9 @@ class Observer:
             sc = SystemControls()
             result = await sc.screenshot(mask_zones=zones)
             if result.get("success") and result.get("image_b64"):
+                # Rolling screenshot memory (masked, throttled, age-capped)
+                from backend.memory.snapshot_store import snapshot_store
+                snapshot_store.add(result["image_b64"], self._last_context)
                 raw = result["image_b64"][:1000]  # Hash first part for speed
                 new_hash = hashlib.md5(raw.encode()).hexdigest()
                 changed = new_hash != self._last_hash

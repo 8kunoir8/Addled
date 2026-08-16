@@ -238,6 +238,31 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
         if screen_note:
             user_messages.insert(0, {"role": "user", "content": screen_note})
 
+        # Past-screen memory: "what was I doing 20 minutes ago?"
+        import re as _re
+        ago_m = _re.search(r"(\d+)\s*(minutes?|mins?|hours?)\s*ago", message.lower())
+        asks_past = bool(ago_m) or any(
+            kw in message.lower() for kw in
+            ("what was i doing", "what was i working on", "what did i just do",
+             "earlier", "a moment ago"))
+        if asks_past:
+            ago_seconds = None
+            when = "earlier"
+            if ago_m:
+                n, unit = int(ago_m.group(1)), ago_m.group(2)
+                ago_seconds = n * (3600 if unit.startswith("hour") else 60)
+                when = ago_m.group(0)
+            try:
+                from backend.memory.snapshot_store import snapshot_store
+                past_desc = await snapshot_store.describe(ago_seconds)
+                if past_desc:
+                    past_note = (f"[Past screen memory] Around '{when}', your screen "
+                                 f"showed: {past_desc}. Use this when the user asks "
+                                 "what they were doing earlier.")
+                    user_messages.insert(0, {"role": "user", "content": past_note})
+            except Exception as e:
+                log.debug("Past-screen recall failed: %s", e)
+
         user_messages.append({"role": "user", "content": message})
 
         # Use the provider-agnostic tool-use loop
@@ -433,6 +458,11 @@ def _register_default_handlers():
         from backend.safety.egress_monitor import egress
         entries = egress.list_recent(int(params.get("limit", 50)))
         return {"entries": entries, "count": len(entries)}
+
+    async def snapshot_list(params: dict, ws) -> dict:
+        """List stored (privacy-masked) screen snapshots."""
+        from backend.memory.snapshot_store import snapshot_store
+        return {"snapshots": snapshot_store.list(), "count": snapshot_store.count()}
 
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
@@ -847,3 +877,4 @@ def _register_default_handlers():
     _server.register("privacy.excludeApp", privacy_exclude_app)
     _server.register("privacy.removeApp", privacy_remove_app)
     _server.register("egress.list", egress_list)
+    _server.register("snapshot.list", snapshot_list)
