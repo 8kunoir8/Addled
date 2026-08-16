@@ -52,6 +52,8 @@ class Engine(QObject):
         self._light_interval = config.get("observation", "light_interval_s") or 5
         self._tick_count = 0
         self._last_obs = None  # most recent ObservationResult
+        self._last_detail = None  # latest successful deep vision description
+        self._last_context = None  # latest meaningful activity context
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -165,6 +167,11 @@ class Engine(QObject):
                 obs = await self._observer.tick()
                 if obs:
                     self._last_obs = obs
+                    if obs.detail:
+                        self._last_detail = obs.detail
+                        log.info("Observer deep analysis: %s", obs.detail[:90])
+                    if obs.context not in (None, "unknown", "unchanged", "private"):
+                        self._last_context = obs.context
                 if obs and obs.context != "unknown" and obs.changed:
                     log.debug("Observer: context=%s tier=%s decision=%s",
                               obs.context, obs.tier, obs.decision)
@@ -240,15 +247,17 @@ class Engine(QObject):
     # ---- public API ----------------------------------------------------------
 
     def last_screen_info(self) -> dict | None:
-        """Latest observation for chat screen-awareness."""
+        """Latest observation for chat screen-awareness (keeps the most
+        recent deep vision detail even after later light ticks)."""
         obs = self._last_obs
-        if not obs:
-            return None
         return {
-            "context": obs.context,
-            "detail": obs.detail,
-            "tier": obs.tier,
-            "changed": obs.changed,
+            "context": self._last_context
+                or ((obs.context if obs else None)
+                    if (obs and obs.context not in ("unknown", "unchanged", "private"))
+                    else "unknown"),
+            "detail": self._last_detail or (obs.detail if obs else None),
+            "tier": obs.tier if obs else "none",
+            "changed": obs.changed if obs else False,
         }
 
     async def fresh_screen_detail(self) -> str | None:

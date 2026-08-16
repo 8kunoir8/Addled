@@ -464,6 +464,15 @@ def _register_default_handlers():
     # ---- Phase 3: Observer status ---------------------------------------------
 
     async def observer_status(params: dict, ws) -> dict:
+        if _engine_ref:
+            info = _engine_ref.last_screen_info()
+            return {
+                "tier": (info or {}).get("tier", "light"),
+                "active": _engine_ref.state.name.lower() == "running",
+                "context": (info or {}).get("context", "unknown"),
+                "detail": (info or {}).get("detail"),
+                "message": "Full 3-tier perception (light/medium/deep).",
+            }
         return {"tier": "light", "active": True, "context": "unknown",
                 "message": "Observer engine active. Full 3-tier perception (light/medium/deep)."}
 
