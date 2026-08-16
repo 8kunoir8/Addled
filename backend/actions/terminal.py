@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+import sys
 
 log = logging.getLogger("addled.terminal")
 
@@ -16,42 +17,63 @@ SAFE_COMMANDS = {
     "cd", "pwd", "date", "time", "whoami", "hostname", "ipconfig", "ping",
     "nslookup", "netstat", "tasklist", "systeminfo", "ver",
     "git status", "git log", "git diff", "git branch",
+    "git push", "git commit", "git pull", "git clone",
     "python --version", "node --version", "npm list", "pip list",
+    "pip install", "npm install", "npm i ", "winget", "choco",
+    "mkdir", "move", "copy", "xcopy", "robocopy",
+    "curl", "iwr", "invoke-webrequest", "invoke-restmethod",
+    "net start", "net stop", "schtasks", "sc", "chmod", "attrib",
 }
 
-# Commands that require user approval
-APPROVAL_COMMANDS = {
-    "git push", "git commit", "npm install", "pip install",
-    "del", "rm", "rmdir", "move", "copy", "xcopy", "robocopy",
-    "mkdir", "chmod", "attrib", "schtasks", "sc",
-    "net start", "net stop",
+# Commands that ALWAYS require user approval (never run autonomously)
+DANGEROUS_COMMANDS = {
+    "del ", "del\t", "del/", "erase ", "rm ", "rmdir", "rd ",
+    "format", "shutdown", "restart", "logoff",
+    "diskpart", "cipher", "reg delete", "reg add",
+    "net user", "net localgroup", "takeown", "icacls",
+    "rm -rf", "rmdir /s",
 }
 
 
 class TerminalExecutor:
     """Execute shell commands safely."""
 
-    async def execute(self, command: str, cwd: str | None = None, timeout: int = 30) -> dict:
+    async def execute(self, command: str, cwd: str | None = None, timeout: int = 30,
+                      allow_dangerous: bool = False) -> dict:
         """Execute a shell command and return stdout/stderr."""
         if not command.strip():
             return {"success": False, "error": "Empty command"}
 
-        # Check against approval list
+        # Check against the danger list (matches DestructionGate)
         cmd_lower = command.lower().strip()
-        requires_approval = any(cmd_lower.startswith(c) for c in APPROVAL_COMMANDS)
-        is_safe = any(cmd_lower.startswith(c) for c in SAFE_COMMANDS)
-
-        if requires_approval and not is_safe:
+        is_dangerous = any(cmd_lower.startswith(c) for c in DANGEROUS_COMMANDS)
+        if is_dangerous and not allow_dangerous:
             return {"success": False, "error": "This command requires approval. Use the dashboard to confirm.",
                     "requires_approval": True}
 
+        # Defensive translation of common bash-isms for Windows PowerShell 5.1
+        if sys.platform == "win32":
+            command = command.replace(" && ", " ; ")
+            command = command.replace("~/", "$HOME/")
+
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
+            if sys.platform == "win32":
+                # PowerShell is the natural shell for Windows desktop automation
+                # (LLMs almost always emit PowerShell syntax).
+                proc = await asyncio.create_subprocess_exec(
+                    "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-Command", command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             return {
                 "success": proc.returncode == 0,

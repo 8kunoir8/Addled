@@ -20,6 +20,7 @@ class ProviderResult:
     tokens_out: int = 0
     duration_ms: int = 0
     error: str | None = None
+    tool_calls: list | None = None  # raw API tool_calls (OpenAI format)
 
 
 class BaseProvider(ABC):

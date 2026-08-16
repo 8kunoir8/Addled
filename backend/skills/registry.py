@@ -147,9 +147,14 @@ class SkillRegistry:
                 params.get("timeout", 30),
             )
         self.register(SkillDefinition(
-            "run_command", "Run a shell/terminal command safely",
+            "run_command",
+            "Run a command in Windows PowerShell 5.1 on the user's PC. "
+            "Use PowerShell syntax: ';' to chain commands (NOT '&&'), "
+            "$env:USERPROFILE instead of '~', 'Test-Path' to check paths, "
+            "'New-Item -ItemType Directory -Path X' to create folders. "
+            "Returns stdout/stderr of the command.",
             {"type": "object", "properties": {
-                "command": {"type": "string", "description": "The command to execute"},
+                "command": {"type": "string", "description": "The PowerShell command to execute"},
                 "cwd": {"type": "string", "description": "Working directory"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30},
             }, "required": ["command"]},

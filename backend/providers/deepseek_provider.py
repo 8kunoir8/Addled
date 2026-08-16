@@ -56,27 +56,33 @@ class DeepSeekProvider(BaseProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        tools: list[dict] | None = None,
     ) -> ProviderResult:
         t0 = time.monotonic()
         model = model or self._config.get("default_model", "deepseek-v4-pro")
         try:
+            payload: dict = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if tools:
+                payload["tools"] = tools
             async with self._get_client() as client:
-                resp = await client.post("/chat/completions", json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                })
+                resp = await client.post("/chat/completions", json=payload)
                 resp.raise_for_status()
                 data = resp.json()
                 choice = data["choices"][0]
+                message = choice.get("message", {})
                 return ProviderResult(
                     ok=True,
-                    response=choice["message"]["content"],
+                    response=message.get("content") or "",
                     model=data.get("model", model),
                     tokens_in=data.get("usage", {}).get("prompt_tokens", 0),
                     tokens_out=data.get("usage", {}).get("completion_tokens", 0),
                     duration_ms=int((time.monotonic() - t0) * 1000),
+                    tool_calls=message.get("tool_calls") or None,
                 )
         except Exception as e:
             return ProviderResult(ok=False, error=str(e), duration_ms=int((time.monotonic() - t0) * 1000))

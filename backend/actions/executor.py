@@ -45,6 +45,7 @@ class ActionExecutor:
         self._system = None
         self._terminal = None
         self._cancel_flag = False
+        self._approved_run = False
         self._handlers: dict[str, callable] = {}
         self._pending_approvals: dict[str, ActionRequest] = {}
         self._approval_counter = 0
@@ -89,10 +90,12 @@ class ActionExecutor:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
         gate = self._gate
         self._gate = None  # already approved — bypass the gate for this run
+        self._approved_run = True  # let run_command execute the approved command
         try:
             return await self.execute(request)
         finally:
             self._gate = gate
+            self._approved_run = False
 
     def deny(self, approval_id: str) -> ActionResult:
         """Deny a pending destructive action."""
@@ -202,7 +205,9 @@ class ActionExecutor:
         self._handlers["screenshot"] = lambda p: s.screenshot(p.get("monitor"), p.get("region"))
 
         # Terminal actions
-        self._handlers["run_command"] = lambda p: t.execute(str(p.get("command", "")), p.get("cwd"), p.get("timeout", 30))
+        self._handlers["run_command"] = lambda p: t.execute(
+            str(p.get("command", "")), p.get("cwd"), p.get("timeout", 30),
+            allow_dangerous=bool(getattr(self, "_approved_run", False)))
 
         # Utility actions
         self._handlers["wait"] = lambda p: asyncio.sleep(p.get("ms", 1000) / 1000)

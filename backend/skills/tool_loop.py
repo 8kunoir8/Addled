@@ -114,6 +114,15 @@ async def chat_with_tools(
 
         # Execute tool calls (with auto-forge for missing skills)
         tool_results = []
+        raw_tool_calls = result.get("raw_tool_calls")
+        if raw_tool_calls:
+            # Keep the assistant tool_call message in history
+            # (required by OpenAI-compatible APIs for the follow-up request)
+            full_messages.append({
+                "role": "assistant",
+                "content": result.get("response") or None,
+                "tool_calls": raw_tool_calls,
+            })
         for tc in result["tool_calls"]:
             exec_result = await execute_skill(
                 tc["name"], tc.get("params", {}), provider)
@@ -125,7 +134,8 @@ async def chat_with_tools(
                 "forged": exec_result.get("forged", False),
             })
             # Add to message history so provider sees the result
-            full_messages.append(_tool_result_message(tc["name"], exec_result))
+            full_messages.append(
+                _tool_result_message(tc["name"], exec_result, tc.get("id")))
 
         # If all tools failed, stop looping
         if all(not tr["success"] for tr in tool_results):
@@ -149,40 +159,51 @@ async def _call_native_tools(provider, messages: list[dict]) -> dict:
     tools = skill_registry.to_openai_tools()
 
     try:
-        # DeepSeek and OpenAI support tools parameter
-        result = await provider.chat(
-            messages,
-            max_tokens=4096,
-            temperature=0.7,
-        )
+        try:
+            result = await provider.chat(
+                messages,
+                max_tokens=4096,
+                temperature=0.7,
+                tools=tools,
+            )
+        except TypeError:
+            # Provider doesn't accept a tools kwarg → prompt-injected tools
+            return await _call_prompt_tools(provider, messages)
 
         if not result.ok:
             return {"response": f"[Provider error: {result.error}]", "tokens": 0}
 
-        response_text = result.response
+        response_text = result.response or ""
         tokens = result.tokens_in + result.tokens_out
 
-        # Try parsing the response as a tool call JSON
-        # (DeepSeek/OpenAI return tool_calls in the response; we parse manually for compat)
-        tool_calls = _extract_tool_calls(response_text)
-
+        # Parse native tool calls (OpenAI format)
+        tool_calls = []
+        if result.tool_calls:
+            for tc in result.tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                if not name:
+                    continue
+                try:
+                    params = json.loads(fn.get("arguments", "{}") or "{}")
+                except json.JSONDecodeError:
+                    params = {}
+                tool_calls.append({"name": name, "params": params, "id": tc.get("id")})
         if tool_calls:
             return {
                 "response": response_text,
                 "tokens": tokens,
                 "tool_calls": tool_calls,
+                "raw_tool_calls": result.tool_calls,
             }
 
-        # If we have native tool_choice support, try a second message
-        # asking the model to use tools
-        if hasattr(result, "tool_calls") and result.tool_calls:
+        # Fallback: models that output ```tool blocks in plain text
+        text_calls = _extract_tool_calls(response_text)
+        if text_calls:
             return {
                 "response": response_text,
                 "tokens": tokens,
-                "tool_calls": [
-                    {"name": tc.function.name, "params": json.loads(tc.function.arguments)}
-                    for tc in result.tool_calls
-                ],
+                "tool_calls": text_calls,
             }
 
         return {"response": response_text, "tokens": tokens}
@@ -268,7 +289,7 @@ def _extract_tool_calls(text: str) -> list[dict]:
     return tool_calls
 
 
-def _tool_result_message(tool_name: str, result: dict) -> dict:
+def _tool_result_message(tool_name: str, result: dict, tool_call_id: str | None = None) -> dict:
     """Format a tool/forge result as a message for the provider."""
     if result.get("success"):
         summary = json.dumps(result.get("data", {}), indent=2)[:3000]
@@ -276,4 +297,7 @@ def _tool_result_message(tool_name: str, result: dict) -> dict:
         content = f"Tool '{tool_name}' succeeded{forged_note}.\nResult:\n{summary}"
     else:
         content = f"Tool '{tool_name}' failed.\nError: {result.get('error', 'unknown')}"
-    return {"role": "tool", "content": content}
+    msg: dict = {"role": "tool", "content": content}
+    if tool_call_id:
+        msg["tool_call_id"] = tool_call_id
+    return msg
