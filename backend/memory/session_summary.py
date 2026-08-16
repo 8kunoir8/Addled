@@ -108,6 +108,28 @@ def get_recent_summaries(limit: int = 3) -> list[dict]:
     return _load()[-limit:]
 
 
+def delete_summary(index: int) -> bool:
+    """Delete one summary by index (0 = oldest in the list)."""
+    entries = _load()
+    if not (0 <= index < len(entries)):
+        return False
+    entries.pop(index)
+    _save(entries)
+    return True
+
+
+def clear_summaries() -> int:
+    """Remove all summaries (file + vector rows). Returns count removed."""
+    entries = _load()
+    _save([])
+    try:
+        from backend.memory.vector_store import vector_store
+        vector_store.delete_category("session_summary")
+    except Exception:
+        pass
+    return len(entries)
+
+
 def build_session_context(limit: int = 3) -> str | None:
     """Block injected into chat for long-run continuity."""
     summaries = get_recent_summaries(limit)

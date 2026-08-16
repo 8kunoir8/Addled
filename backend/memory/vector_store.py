@@ -122,6 +122,50 @@ class VectorStore:
             return padded
         return arr.flatten()[:self._dim]
 
+    # ---- management (dashboard memory page) ----------------------------------
+
+    def list(self, category: str | None = None, limit: int = 100) -> list[dict]:
+        """Most recent stored entries with metadata."""
+        if not self.available:
+            return []
+        try:
+            if category:
+                rows = self._conn.execute(
+                    "SELECT id, category, metadata, timestamp FROM vectors "
+                    "WHERE category = ? ORDER BY timestamp DESC LIMIT ?",
+                    (category, limit)).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT id, category, metadata, timestamp FROM vectors "
+                    "ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall()
+            return [{"id": r[0], "category": r[1],
+                     "metadata": json.loads(r[2]) if r[2] else None,
+                     "timestamp": r[3]} for r in rows]
+        except Exception:
+            return []
+
+    def delete(self, row_id: int) -> bool:
+        if not self.available:
+            return False
+        try:
+            self._conn.execute("DELETE FROM vectors WHERE id = ?", (row_id,))
+            self._conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def delete_category(self, category: str) -> int:
+        """Delete every entry in a category. Returns rows removed."""
+        if not self.available:
+            return 0
+        try:
+            cur = self._conn.execute("DELETE FROM vectors WHERE category = ?",
+                                     (category,))
+            self._conn.commit()
+            return cur.rowcount
+        except Exception:
+            return 0
+
 
 # Singleton
 vector_store = VectorStore()

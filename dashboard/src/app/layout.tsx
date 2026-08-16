@@ -8,6 +8,7 @@ import "./globals.css";
 
 const NAV_ITEMS = [
   { href: '/chat', label: 'Chat', icon: '💬' },
+  { href: '/memory', label: 'Memory', icon: '🧠' },
   { href: '/goals', label: 'Goals', icon: '🎯' },
   { href: '/code', label: 'Code', icon: '💻' },
   { href: '/swarm', label: 'Swarm', icon: '🐝' },

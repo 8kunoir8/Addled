@@ -470,6 +470,36 @@ def _register_default_handlers():
         from backend.memory.snapshot_store import snapshot_store
         return {"snapshots": snapshot_store.list(), "count": snapshot_store.count()}
 
+    async def memory_list(params: dict, ws) -> dict:
+        """Everything the agent remembers: session summaries + conversation memories."""
+        from backend.memory.session_summary import get_recent_summaries
+        from backend.memory.vector_store import vector_store
+        return {
+            "summaries": get_recent_summaries(50),
+            "memories": vector_store.list("conversation", limit=100),
+        }
+
+    async def memory_delete_summary(params: dict, ws) -> dict:
+        from backend.memory.session_summary import delete_summary
+        idx = params.get("index")
+        if not isinstance(idx, int) or idx < 0:
+            return {"success": False, "error": "index is required"}
+        return {"success": delete_summary(idx)}
+
+    async def memory_delete_memory(params: dict, ws) -> dict:
+        from backend.memory.vector_store import vector_store
+        rid = params.get("id")
+        if rid is None:
+            return {"success": False, "error": "id is required"}
+        try:
+            return {"success": vector_store.delete(int(rid))}
+        except (TypeError, ValueError):
+            return {"success": False, "error": "id must be a number"}
+
+    async def memory_clear(params: dict, ws) -> dict:
+        from backend.memory.session_summary import clear_summaries
+        return {"cleared": clear_summaries()}
+
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
     async def voice_speak(params: dict, ws) -> dict:
@@ -884,3 +914,7 @@ def _register_default_handlers():
     _server.register("privacy.removeApp", privacy_remove_app)
     _server.register("egress.list", egress_list)
     _server.register("snapshot.list", snapshot_list)
+    _server.register("memory.list", memory_list)
+    _server.register("memory.deleteSummary", memory_delete_summary)
+    _server.register("memory.deleteMemory", memory_delete_memory)
+    _server.register("memory.clear", memory_clear)
