@@ -32,6 +32,7 @@ app.on('second-instance', () => {
 let mainWindow = null;
 let tray = null;
 let pythonProcess = null;
+let pythonRestarts = 0;
 let nextProcess = null;
 const isDev = !app.isPackaged;
 const DASHBOARD_PORT = 3000;
@@ -156,9 +157,21 @@ function startPythonBackend() {
     console.error(`[Python:err] ${data.toString().trim()}`);
   });
 
+  // ── Self-healing: respawn the backend if it crashes ─────────────────────
+
   pythonProcess.on('close', (code) => {
     console.log(`[Python] Process exited with code ${code}`);
     pythonProcess = null;
+    if (app.isQuitting) return;
+    pythonRestarts += 1;
+    if (pythonRestarts > 5) {
+      console.error('[Python] Backend crashed 5 times — giving up. Restart Addled.');
+      return;
+    }
+    console.log(`[Python] Respawning backend in 3s (attempt ${pythonRestarts}/5)...`);
+    setTimeout(() => {
+      if (!app.isQuitting) startPythonBackend();
+    }, 3000);
   });
 
   pythonProcess.on('error', (err) => {
