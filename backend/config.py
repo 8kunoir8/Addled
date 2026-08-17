@@ -34,6 +34,9 @@ DEFAULT_SETTINGS: dict = {
     "agent_name": "Addled",
     "version": 1,
     "first_run_complete": False,
+    "system": {
+        "onboarded": False,
+    },
     "character": {
         "shape": "triangle",
         "color": "#3380FF",
@@ -45,6 +48,7 @@ DEFAULT_SETTINGS: dict = {
         "movement_speed": "medium",
         "idle_wander_range": 300,
         "preferred_corner": "top-right",
+        "skin": "",
     },
     "providers": {
         "active": "deepseek",
@@ -172,6 +176,15 @@ DEFAULT_SETTINGS: dict = {
         "calendar_provider": None,
         "email_imap": None,
         "email_smtp": None,
+        "email_address": "",
+        "email_password": "",
+        "imap_server": "",
+        "imap_port": 993,
+        "smtp_server": "",
+        "smtp_port": 587,
+        "google_client_id": "",
+        "google_client_secret": "",
+        "google_tokens": None,
         "rss_feeds": [],
     },
 }

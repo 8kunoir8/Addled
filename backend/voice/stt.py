@@ -138,7 +138,7 @@ class VoiceListener:
             self._running = False
             self.enabled = False
 
-    def _transcribe(self, audio: "np.ndarray") -> str:
+    def _transcribe(self, audio) -> str:
         try:
             segments, _info = self._model.transcribe(
                 audio, language=None, beam_size=1, vad_filter=True)
