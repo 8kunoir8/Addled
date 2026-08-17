@@ -197,15 +197,19 @@ def main():
 
     # ---- floating-character prompt (left click → ask → answer) ----------------
     from PyQt6.QtCore import QObject, pyqtSignal
-    from PyQt6.QtWidgets import QInputDialog, QMessageBox
+    from PyQt6.QtWidgets import QInputDialog
+    from backend.character.chat_bubble import ChatBubble
 
     class _UIBridge(QObject):
         reply = pyqtSignal(str)
 
     bridge = _UIBridge()
 
+    # Chat-bubble popup anchored above the character (replaces QMessageBox)
+    bubble = ChatBubble(agent_name=config.agent_name)
+
     def _show_reply(text: str):
-        QMessageBox.information(char_widget, "Addled", text[:1500])
+        bubble.show_message(text, char_widget.frameGeometry().center())
 
     bridge.reply.connect(_show_reply)  # thread-safe: emit from WS loop → Qt queue
 
@@ -228,6 +232,8 @@ def main():
         text, ok = QInputDialog.getText(char_widget, "Ask Addled",
                                         "What would you like to know?")
         if ok and text.strip():
+            # Show a "thinking" bubble right away, anchored to the character
+            bubble.show_thinking(char_widget.frameGeometry().center())
             try:
                 asyncio.run_coroutine_threadsafe(_handle_prompt(text.strip()), _ws_loop)
             except Exception as e:
