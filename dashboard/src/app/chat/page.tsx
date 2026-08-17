@@ -65,8 +65,10 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [processingFiles, setProcessingFiles] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const dragDepth = useRef(0);
 
   useEffect(() => {
     setChatMessages(messages);
@@ -123,6 +125,33 @@ export default function ChatPage() {
     });
   };
 
+  // ---- drag & drop ----------------------------------------------------------
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    dragDepth.current += 1;
+    setDragActive(true);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragActive(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragActive(false);
+    if (isLoading || wsState !== 'connected') return;
+    handleFiles(e.dataTransfer.files);
+  };
+
   const handleSend = async () => {
     if (isLoading || wsState !== 'connected') return;
     if (!input.trim() && !attachments.length) return;
@@ -166,7 +195,21 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="relative flex flex-col h-full"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}>
+      {/* Drop overlay */}
+      {dragActive && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#0d1117]/85 border-2 border-dashed border-[#3380FF] rounded-lg pointer-events-none">
+          <div className="text-center">
+            <div className="text-3xl mb-2">⬇</div>
+            <p className="text-sm font-medium text-[#e8eaed]">Drop files to attach</p>
+            <p className="text-xs text-[#8b949e] mt-1">Images, text files, code — up to 5</p>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
         <h1 className="text-sm font-semibold">Chat</h1>
