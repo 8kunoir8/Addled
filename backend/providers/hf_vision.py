@@ -16,7 +16,17 @@ import base64
 import logging
 import tempfile
 import time
+import warnings
 from pathlib import Path
+
+# transformers 5.x prints deprecation noise from its own internals
+# (attention mask API, CLIPImageProcessor mapping). Cosmetic — silence it.
+warnings.filterwarnings(
+    "ignore", message=".*attention mask API.*", module=r"transformers.*")
+warnings.filterwarnings(
+    "ignore", message=".*AttentionMaskConverter.*", module=r"transformers.*")
+warnings.filterwarnings(
+    "ignore", message=".*image_processor_class.*", module=r"transformers.*")
 
 from backend.providers.base import ProviderResult
 
@@ -123,7 +133,11 @@ class HFVisionFallback:
             lm.model.encoder.embed_tokens.weight = torch.nn.Parameter(shared_w)
             lm.model.decoder.embed_tokens.weight = torch.nn.Parameter(shared_w)
             lm.lm_head.weight = torch.nn.Parameter(shared_w)
-            log.debug("Tied encoder/decoder/lm_head embeddings to shared.weight")
+            # NOTE: the 'MISSING' entries in transformers' LOAD REPORT above
+            # are expected on transformers 5.x — the checkpoint stores one
+            # shared weight and we re-tie it right here.
+            log.info("Re-tied encoder/decoder/lm_head embeddings to shared.weight "
+                     "(the MISSING entries in the load report are expected)")
 
             if torch.cuda.is_available():
                 self._model = self._model.cuda().eval()
