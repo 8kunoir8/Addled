@@ -537,7 +537,8 @@ class CharacterWidget(QWidget):
 
             if p.kind == "zzz":
                 painter.setPen(QPen(color, 1.5))
-                painter.setFont(QFont("Segoe UI", p.size))
+                # PyQt6 QFont is strict: pointSize must be an int
+                painter.setFont(QFont("Segoe UI", max(6, int(p.size))))
                 painter.drawText(int(p.x - 5), int(p.y + 5), "z")
             elif p.kind == "sparkle":
                 painter.setPen(Qt.PenStyle.NoPen)
