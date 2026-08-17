@@ -33,6 +33,7 @@ class Engine(QObject):
 
     sig_agent_state = pyqtSignal(str)  # "idle", "observing", "in_meeting", etc.
     sig_error = pyqtSignal(str)
+    sig_insight = pyqtSignal(str)  # proactive insight text → floating bubble
 
     def __init__(self, char_widget=None):
         super().__init__()
@@ -235,6 +236,26 @@ class Engine(QObject):
             })
         except Exception as e:
             log.warning("Insight broadcast failed: %s", e)
+        # Also push the insight as a chat message (dashboard chat page)
+        # and as a bubble on the floating character.
+        try:
+            from backend.ws_server import get_server
+            get_server().broadcast_nowait("chat.push", {
+                "role": "assistant",
+                "content": f"💡 {text}",
+                "insight": True,
+            })
+        except Exception as e:
+            log.warning("Insight chat.push failed: %s", e)
+        try:
+            self.sig_insight.emit(text)
+        except Exception as e:
+            log.warning("Insight bubble emit failed: %s", e)
+        # Briefly flip the character to 'has suggestion' (resets next tick)
+        try:
+            self.sig_agent_state.emit("has_suggestion")
+        except Exception:
+            pass
         if config.get("observation", "voice_insights", default=False):
             try:
                 from backend.voice.tts import speak

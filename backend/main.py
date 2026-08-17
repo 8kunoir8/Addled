@@ -208,6 +208,10 @@ def main():
     # Chat-bubble popup anchored above the character (replaces QMessageBox)
     bubble = ChatBubble(agent_name=config.agent_name)
 
+    # Proactive insights also pop as bubbles on the floating character
+    engine.sig_insight.connect(
+        lambda text: bubble.show_message(text, char_widget.frameGeometry().center()))
+
     def _show_reply(text: str):
         bubble.show_message(text, char_widget.frameGeometry().center())
 
