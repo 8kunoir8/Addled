@@ -432,7 +432,19 @@ def _register_default_handlers():
         message = params.get("message", "")
         if not message:
             return {"response": "I didn't catch that.", "tokens": 0, "conversationId": None}
-        return await run_chat_pipeline(message, params)
+        result = await run_chat_pipeline(message, params)
+        # Auto-speak replies when voice.auto_tts is enabled (Settings → Voice)
+        try:
+            from backend.config import config
+            if config.get("voice", "auto_tts", default=True):
+                reply = result.get("response", "")
+                if reply and not reply.startswith(("[Not connected:", "[Provider")):
+                    from backend.voice.tts import speak
+                    asyncio.create_task(speak(reply))
+                    log.info("Auto-TTS: speaking chat reply (%d chars)", len(reply))
+        except Exception:
+            log.debug("Auto-TTS dispatch failed", exc_info=True)
+        return result
 
     # ---- Phase 3: Action execution --------------------------------------------
 

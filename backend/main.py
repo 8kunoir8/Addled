@@ -216,11 +216,13 @@ def main():
         get_server().broadcast_nowait("chat.push", {"role": "assistant", "content": reply})
         bridge.reply.emit(reply)
         if reply and not reply.startswith("[Not connected:") and not reply.startswith("[Provider"):
-            try:
-                from backend.voice.tts import speak
-                await speak(reply)
-            except Exception as e:
-                log.warning("Prompt TTS failed: %s", e)
+            # Spoken replies follow the same Auto TTS toggle as the dashboard
+            if config.get("voice", "auto_tts", default=True):
+                try:
+                    from backend.voice.tts import speak
+                    await speak(reply)
+                except Exception as e:
+                    log.warning("Prompt TTS failed: %s", e)
 
     def _on_prompt():
         text, ok = QInputDialog.getText(char_widget, "Ask Addled",
