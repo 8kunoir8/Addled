@@ -847,6 +847,80 @@ def _register_default_handlers():
         skills = skill_forge.list_forged()
         return {"skills": skills, "count": len(skills)}
 
+    # ---- Sprite skins (codex-pet style character body) ----------------------
+
+    async def character_skins_list(params: dict, ws) -> dict:
+        from backend.character import sprite_skin
+        return {"skins": sprite_skin.list_skins(),
+                "active": sprite_skin.get_active_skin_id()}
+
+    async def character_upload_skin(params: dict, ws) -> dict:
+        import base64
+        from backend.character import sprite_skin
+        name = (params.get("name") or "skin").strip()
+        filename = params.get("filename", "")
+        data_b64 = params.get("data", "")
+        if not data_b64:
+            return {"success": False, "error": "No image data provided"}
+        try:
+            raw = base64.b64decode(data_b64)
+        except Exception:
+            return {"success": False, "error": "Invalid base64 data"}
+        try:
+            skin = sprite_skin.save_uploaded_skin(name, filename, raw)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        # Apply immediately so the character switches right away
+        sprite_skin.set_active_skin(skin["id"])
+        if _engine_ref is not None:
+            widget = getattr(_engine_ref, "_char_widget", None)
+            if widget is not None:
+                widget.request_apply_skin(skin["id"])  # thread-safe
+        await get_server().broadcast("character.skinChanged",
+                                     {"skinId": skin["id"], "active": skin["id"]})
+        skin["active"] = True
+        return {"success": True, "skin": skin}
+
+    async def character_set_skin(params: dict, ws) -> dict:
+        from backend.character import sprite_skin
+        skin_id = params.get("id")
+        if not skin_id or skin_id == "none":
+            sprite_skin.set_active_skin("")
+            if _engine_ref is not None:
+                widget = getattr(_engine_ref, "_char_widget", None)
+                if widget is not None:
+                    widget.request_apply_skin(None)
+            await get_server().broadcast("character.skinChanged",
+                                         {"skinId": None, "active": ""})
+            return {"success": True, "active": ""}
+        if not sprite_skin.resolve_clip_path(skin_id, "idle"):
+            return {"success": False, "error": f"Skin not found: {skin_id}"}
+        sprite_skin.set_active_skin(skin_id)
+        if _engine_ref is not None:
+            widget = getattr(_engine_ref, "_char_widget", None)
+            if widget is not None:
+                widget.request_apply_skin(skin_id)
+        await get_server().broadcast("character.skinChanged",
+                                     {"skinId": skin_id, "active": skin_id})
+        return {"success": True, "active": skin_id}
+
+    async def character_delete_skin(params: dict, ws) -> dict:
+        from backend.character import sprite_skin
+        skin_id = params.get("id", "")
+        ok = sprite_skin.delete_skin(skin_id)
+        if not ok:
+            return {"success": False, "error": f"Skin not found: {skin_id}"}
+        # If the active skin was deleted, revert the character body
+        if sprite_skin.get_active_skin_id() == "":
+            if _engine_ref is not None:
+                widget = getattr(_engine_ref, "_char_widget", None)
+                if widget is not None:
+                    widget.request_apply_skin(None)
+        await get_server().broadcast("character.skinChanged",
+                                     {"skinId": None,
+                                      "active": sprite_skin.get_active_skin_id()})
+        return {"success": True, "deleted": skin_id}
+
     # ---- Register all handlers -----------------------------------------------
 
     # Phase 1-3 core handlers
@@ -918,3 +992,9 @@ def _register_default_handlers():
     _server.register("memory.deleteSummary", memory_delete_summary)
     _server.register("memory.deleteMemory", memory_delete_memory)
     _server.register("memory.clear", memory_clear)
+
+    # Sprite skins
+    _server.register("character.skinsList", character_skins_list)
+    _server.register("character.uploadSkin", character_upload_skin)
+    _server.register("character.setSkin", character_set_skin)
+    _server.register("character.deleteSkin", character_delete_skin)

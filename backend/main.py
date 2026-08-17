@@ -140,6 +140,15 @@ def main():
     from backend.ws_server import set_engine
     set_engine(engine)
 
+    # ---- restore active sprite skin (codex-pet style) ------------------------
+    try:
+        from backend.character import sprite_skin
+        active_skin = sprite_skin.get_active_skin_id()
+        if active_skin:
+            char_widget.apply_skin(active_skin)
+    except Exception:
+        log.exception("Skin restore failed (ignored)")
+
     # ---- kill switch (global hotkey: stops everything immediately) -----------
     from backend.safety.kill_switch import kill_switch
 

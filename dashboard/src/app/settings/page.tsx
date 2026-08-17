@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useWS } from '@/lib/useWS';
 
 type SettingsData = Record<string, any>;
@@ -60,6 +60,7 @@ export default function SettingsPage() {
         <h2 className="text-lg font-semibold mb-6">{SECTION_ICONS[activeSection]} {activeSection.charAt(0).toUpperCase()+activeSection.slice(1)}</h2>
         {activeSection==='providers'&&<ProvidersSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='character'&&<CharacterSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
+        {activeSection==='character'&&<SkinsSection send={send} connected={wsState==='connected'}/>}
         {activeSection==='voice'&&<VoiceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='safety'&&<SafetySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='notifications'&&<NotificationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
@@ -88,6 +89,88 @@ function SaveIndicator({ settingKey, saving, status }: { settingKey: string; sav
   if (saving===settingKey) return <span className="text-xs text-[#d29922]">Saving...</span>;
   if (status?.key===settingKey) return <span className={`text-xs ${status.ok?'text-[#3fb950]':'text-[#f85149]'}`}>{status.ok?'✓ Saved':'✗ Failed'}</span>;
   return null;
+}
+
+function SkinsSection({ send, connected }: { send: (m: string, p?: any) => Promise<any>; connected: boolean }) {
+  const [skins, setSkins] = useState<any[]>([]);
+  const [active, setActive] = useState<string>('');
+  const [uploading, setUploading] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!connected) return;
+    try {
+      const r = await send('character.skinsList', {});
+      setSkins(r?.skins || []);
+      setActive(r?.active || '');
+    } catch { /* backend offline */ }
+  }, [send, connected]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const onFile = async (file: File) => {
+    if (!file || !connected) return;
+    if (!/gif$/i.test(file.name)) { setMsg({ ok: false, text: 'Only .gif files are supported' }); return; }
+    setUploading(true); setMsg(null);
+    try {
+      const dataUrl: string = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result as string);
+        fr.onerror = () => rej(new Error('Could not read file'));
+        fr.readAsDataURL(file);
+      });
+      const b64 = dataUrl.split(',')[1] || '';
+      const name = file.name.replace(/\.[^.]+$/, '');
+      const r = await send('character.uploadSkin', { name, filename: file.name, data: b64 });
+      if (r?.success) { setMsg({ ok: true, text: `"${name}" applied — Fox is wearing it now ✓` }); refresh(); }
+      else setMsg({ ok: false, text: r?.error || 'Upload failed' });
+    } catch (e: any) { setMsg({ ok: false, text: e?.message || 'Upload failed' }); }
+    setUploading(false);
+  };
+
+  const setSkin = async (id: string) => {
+    if (!connected) return;
+    const r = await send('character.setSkin', { id });
+    if (r?.success) { setActive(id); refresh(); }
+  };
+
+  const removeSkin = async (id: string) => {
+    if (!connected) return;
+    await send('character.deleteSkin', { id });
+    refresh();
+  };
+
+  return (
+    <div className="mt-6 pt-4 border-t border-[#21262d]">
+      <h3 className="text-sm font-semibold text-[#e8eaed] mb-1">🦊 Sprite skin <span className="text-xs font-normal text-[#8b949e]">(codex-pet style)</span></h3>
+      <p className="text-xs text-[#8b949e] mb-3">Upload an animated GIF and Fox becomes that pet — all agent states, movement and effects stay active on top.</p>
+
+      <label className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : 'border-[#3380FF] text-[#3380FF] hover:bg-[#1f6feb22]'}`}>
+        {uploading ? '⟳ Uploading...' : '⬆ Upload GIF'}
+        <input type="file" accept="image/gif,.gif" className="hidden" disabled={uploading}
+          onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
+      </label>
+      {msg && <p className={`text-xs mt-2 ${msg.ok ? 'text-[#3fb950]' : 'text-[#f85149]'}`}>{msg.text}</p>}
+
+      <div className="mt-4 space-y-1">
+        <button onClick={() => setSkin('none')}
+          className={`w-full text-left px-3 py-2 rounded-md text-sm border transition-colors ${active === '' ? 'border-[#3380FF] bg-[#1f6feb22] text-[#3380FF]' : 'border-[#30363d] text-[#8b949e] hover:border-[#484f58]'}`}>
+          🔷 Procedural shape (default)
+        </button>
+        {skins.map(s => (
+          <div key={s.id} className={`flex items-center justify-between px-3 py-2 rounded-md border ${s.active ? 'border-[#3380FF] bg-[#1f6feb22]' : 'border-[#30363d] hover:border-[#484f58]'}`}>
+            <button onClick={() => setSkin(s.id)} className="text-left flex-1 text-sm text-[#e8eaed]">
+              🎞 {s.name} <span className="text-xs text-[#8b949e]">({s.files.length} clip{s.files.length !== 1 ? 's' : ''})</span>
+              {s.active && <span className="ml-2 text-xs text-[#3fb950]">● active</span>}
+            </button>
+            <button onClick={() => removeSkin(s.id)} title="Delete skin"
+              className="text-[#8b949e] hover:text-[#f85149] text-sm px-2">✕</button>
+          </div>
+        ))}
+        {skins.length === 0 && <p className="text-xs text-[#8b949e] px-1 py-1">No skins yet — upload a GIF to get started.</p>}
+      </div>
+    </div>
+  );
 }
 
 function ProvidersSection({ settings, update, saving, status }: any) {

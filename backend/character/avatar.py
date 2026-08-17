@@ -11,10 +11,10 @@ from __future__ import annotations
 import math
 
 from PyQt6.QtWidgets import QWidget, QApplication, QMenu
-from PyQt6.QtCore import Qt, QTimer, QPointF, QPoint
+from PyQt6.QtCore import Qt, QTimer, QPointF, QPoint, QRectF, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QPainterPath, QRadialGradient, QFont,
-    QCursor,
+    QCursor, QMovie, QPixmap,
 )
 
 from backend.character.shapes import SHAPE_REGISTRY, DEFAULT_SHAPE
@@ -22,6 +22,7 @@ from backend.character.movement import Mover
 from backend.character.animation import Animator
 from backend.character.states import StateMachine, CharacterState
 from backend.character.particles import ParticleSystem, Particle
+from backend.character import sprite_skin
 
 
 # Addled blue as fallback
@@ -42,11 +43,23 @@ def _default_settings() -> dict:
 
 
 class CharacterWidget(QWidget):
-    """Free-floating geometric character. Draggable, clickable, always-on-top."""
+    """Free-floating character. Procedural shapes by default; sprite-skin
+    (codex-pet style GIF) when one is active. Draggable, clickable, top-most."""
+
+    # Emitted from any thread → queued to the GUI thread (thread-safe skin swap)
+    skin_apply_requested = pyqtSignal(object)
 
     def __init__(self, settings: dict | None = None, parent=None):
         super().__init__(parent)
         self._settings = settings or _default_settings()
+
+        # Sprite skin state
+        self._skin_id: str | None = None
+        self._skin_meta: dict | None = None
+        self._movie: QMovie | None = None
+        self._movie_file: str | None = None
+        self._movie_state: CharacterState | None = None
+        self.skin_apply_requested.connect(self.apply_skin)
 
         # Frameless, transparent, always on top — accepts mouse for drag/click
         self.setWindowFlags(
@@ -101,6 +114,7 @@ class CharacterWidget(QWidget):
     def set_agent_state(self, agent_state: str):
         """Called by engine: 'idle', 'observing', 'in_meeting', etc."""
         self._state_machine.transition(agent_state)
+        self._maybe_reload_skin()
         self.update()
 
     def point_at(self, x: float, y: float):
@@ -123,6 +137,82 @@ class CharacterWidget(QWidget):
         """Set callbacks for click and right-click."""
         self._on_ask_callback = on_ask
         self._on_menu_callback = on_menu
+
+    # ---- sprite skin (codex-pet style) ---------------------------------------
+
+    def request_apply_skin(self, skin_id: str | None):
+        """Thread-safe skin swap — call from the WS thread."""
+        self.skin_apply_requested.emit(skin_id)
+
+    def apply_skin(self, skin_id: str | None):
+        """Activate a skin (GUI thread). None/'' → procedural shapes."""
+        self._skin_id = (skin_id or "") or None
+        self._skin_meta = None
+        self._movie_state = None
+        if not self._skin_id:
+            self._stop_movie()
+            self.update()
+            return
+        path = sprite_skin.resolve_clip_path(self._skin_id, "idle")
+        if not path:
+            # Skin folder vanished — revert to procedural body
+            self._skin_id = None
+            self._stop_movie()
+            self.update()
+            return
+        try:
+            with open(sprite_skin.SKINS_DIR / self._skin_id / "skin.json",
+                      "r", encoding="utf-8") as f:
+                import json
+                self._skin_meta = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            self._skin_meta = {}
+        self._maybe_reload_skin()
+        self.update()
+
+    def _stop_movie(self):
+        if self._movie is not None:
+            try:
+                self._movie.stop()
+                self._movie.deleteLater()
+            except Exception:
+                pass
+            self._movie = None
+            self._movie_file = None
+
+    def _clip_for(self, state_key: str) -> str | None:
+        """Resolve the GIF path for a state from the cached skin meta."""
+        if not self._skin_id:
+            return None
+        states = (self._skin_meta or {}).get("states", {})
+        clip = states.get(state_key) or states.get("idle")
+        if clip:
+            path = sprite_skin.SKINS_DIR / self._skin_id / clip
+            if path.is_file():
+                return str(path)
+        gifs = sorted(sprite_skin.SKINS_DIR.joinpath(self._skin_id).glob("*.gif"))
+        return str(gifs[0]) if gifs else None
+
+    def _maybe_reload_skin(self):
+        """Swap the movie when the agent state's clip changes."""
+        if not self._skin_id:
+            return
+        state = self._state_machine.current
+        if state == self._movie_state and self._movie is not None:
+            return
+        path = self._clip_for(state.name.lower())
+        if not path:
+            return
+        self._movie_state = state
+        if path == self._movie_file and self._movie is not None:
+            return
+        self._stop_movie()
+        movie = QMovie(path, parent=self)
+        movie.setCacheMode(QMovie.CacheMode.CacheAll)
+        movie.frameChanged.connect(lambda _i: self.update())
+        movie.start()
+        self._movie = movie
+        self._movie_file = path
 
     # ---- mouse interaction ----------------------------------------------------
 
@@ -275,6 +365,7 @@ class CharacterWidget(QWidget):
 
     def _paint(self, painter: QPainter):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
         state = self._state_machine.current
         a = self._animator
@@ -307,36 +398,41 @@ class CharacterWidget(QWidget):
                 int(self._size * 2.4),
             )
 
-        # Main shape
-        shape_name = self._settings.get("shape", DEFAULT_SHAPE)
-        draw_fn = SHAPE_REGISTRY.get(shape_name, SHAPE_REGISTRY[DEFAULT_SHAPE])
+        # ---- sprite body (codex-pet skin) or procedural shape ----------------
+        if self._movie is not None:
+            self._draw_sprite(painter, center_x, center_y, draw_size,
+                              offset_x, state, a)
+        else:
+            # Main shape
+            shape_name = self._settings.get("shape", DEFAULT_SHAPE)
+            draw_fn = SHAPE_REGISTRY.get(shape_name, SHAPE_REGISTRY[DEFAULT_SHAPE])
 
-        # Color with mood tint
-        color = QColor(self._color)
-        if a.mood_warmth > 0.01:
-            warm = QColor(0xFF, 0xD7, 0x00)
-            color = self._blend_color(color, warm, a.mood_warmth)
-        if a.mood_brightness > 0.01:
-            color = color.lighter(int(100 + a.mood_brightness * 60))
+            # Color with mood tint
+            color = QColor(self._color)
+            if a.mood_warmth > 0.01:
+                warm = QColor(0xFF, 0xD7, 0x00)
+                color = self._blend_color(color, warm, a.mood_warmth)
+            if a.mood_brightness > 0.01:
+                color = color.lighter(int(100 + a.mood_brightness * 60))
 
-        color.setAlpha(int(255 * a.opacity))
+            color.setAlpha(int(255 * a.opacity))
 
-        painter.save()
-        # Center the shape box on the widget center (widget = size + 40 glow
-        # padding) and pulse-scale about the shape's own center.
-        offset = (self.width() - self._size) / 2
-        painter.translate(offset + offset_x, offset)
-        painter.translate(self._size / 2, self._size / 2)
-        painter.scale(a.pulse_scale, a.pulse_scale)
-        painter.translate(-self._size / 2, -self._size / 2)
+            painter.save()
+            # Center the shape box on the widget center (widget = size + 40 glow
+            # padding) and pulse-scale about the shape's own center.
+            offset = (self.width() - self._size) / 2
+            painter.translate(offset + offset_x, offset)
+            painter.translate(self._size / 2, self._size / 2)
+            painter.scale(a.pulse_scale, a.pulse_scale)
+            painter.translate(-self._size / 2, -self._size / 2)
 
-        draw_fn(painter, self._size, color)
+            draw_fn(painter, self._size, color)
 
-        painter.restore()
+            painter.restore()
 
-        # Eyes
-        if self._show_eyes and a.eye_state != "closed":
-            self._draw_eyes(painter, center_x + offset_x, center_y, a)
+            # Eyes
+            if self._show_eyes and a.eye_state != "closed":
+                self._draw_eyes(painter, center_x + offset_x, center_y, a)
 
         # Progress ring (THINKING or WORKING)
         if state in (CharacterState.THINKING, CharacterState.WORKING):
@@ -345,6 +441,42 @@ class CharacterWidget(QWidget):
         # Particles
         self._draw_particles(painter, center_x + offset_x, center_y, state)
 
+        painter.restore()
+
+    def _draw_sprite(self, painter: QPainter, cx: float, cy: float,
+                     draw_size: float, offset_x: float, state: CharacterState,
+                     a: Animator):
+        """Draw the current GIF frame with state overlays.
+        Keeps agent-state cues on top of the sprite: pulse, shake, tint,
+        dim, progress ring and particles all still apply."""
+        movie = self._movie
+        if movie is None:
+            return
+        pixmap: QPixmap = movie.currentPixmap()
+        if pixmap.isNull():
+            return
+
+        scale = (self._skin_meta or {}).get("scale", 1.0)
+        side = draw_size * 1.4 * float(scale)  # sprite box (square)
+        target = QRectF(cx + offset_x - side / 2, cy - side / 2, side, side)
+
+        painter.save()
+        painter.setOpacity(a.opacity)
+        painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
+
+        # State overlays (tint/dim on top of the sprite body)
+        if state == CharacterState.ERROR:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 40, 40, 45))
+            painter.drawRoundedRect(target, 12, 12)
+        elif state == CharacterState.BLOCKED:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 90))
+            painter.drawRoundedRect(target, 12, 12)
+        elif state == CharacterState.SLEEPING:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(20, 30, 60, 40))
+            painter.drawRoundedRect(target, 12, 12)
         painter.restore()
 
     def _draw_eyes(self, painter: QPainter, cx: float, cy: float, a: Animator):
