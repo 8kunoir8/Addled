@@ -4,11 +4,48 @@ import { useState, useRef, useEffect } from 'react';
 import { useWS } from '@/lib/useWS';
 import { getChatMessages, setChatMessages } from '@/lib/chatStore';
 
+interface Attachment { name: string; kind: 'image' | 'text' | 'file'; data?: string; preview?: string; size?: number; }
+
 interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
   streaming?: boolean;
+  attachments?: { name: string; kind: string; preview?: string }[];
+}
+
+const TEXT_EXTS = /\.(txt|md|json|csv|log|py|js|ts|tsx|jsx|html|css|xml|yaml|yml|ini|cfg|sh|bat|ps1|toml|sql)$/i;
+const MAX_ATTACHMENTS = 5;
+
+async function downscaleImage(file: File, maxSide = 1024): Promise<string> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error('Could not read image'));
+      i.src = url;
+    });
+    let { width, height } = img;
+    const scale = Math.min(1, maxSide / Math.max(width, height));
+    width = Math.round(width * scale);
+    height = Math.round(height * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d')!.drawImage(img, 0, 0, width, height);
+    return canvas.toDataURL('image/jpeg', 0.85).split(',')[1] || '';
+  } catch {
+    // Canvas failed (rare) — send the raw file instead
+    return await new Promise<string>((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res((fr.result as string).split(',')[1] || '');
+      fr.onerror = () => rej(new Error('Could not read image'));
+      fr.readAsDataURL(file);
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 const GREETING: Message = {
@@ -26,6 +63,9 @@ export default function ChatPage() {
   });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [processingFiles, setProcessingFiles] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -47,12 +87,57 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSend = async () => {
-    if (!input.trim() || isLoading || wsState !== 'connected') return;
+  const handleFiles = async (files: FileList | null) => {
+    if (!files || !files.length) return;
+    setProcessingFiles(true);
+    try {
+      const next: Attachment[] = [];
+      for (const f of Array.from(files).slice(0, MAX_ATTACHMENTS)) {
+        if (f.type.startsWith('image/')) {
+          const preview = URL.createObjectURL(f);
+          const data = await downscaleImage(f);
+          next.push({ name: f.name, kind: 'image', data, preview });
+        } else if (TEXT_EXTS.test(f.name) || f.type.startsWith('text/')) {
+          if (f.size <= 1024 * 1024) {
+            const text = await f.text();
+            next.push({ name: f.name, kind: 'text', data: text.slice(0, 100000) });
+          } else {
+            next.push({ name: f.name, kind: 'file', size: f.size });
+          }
+        } else {
+          next.push({ name: f.name, kind: 'file', size: f.size });
+        }
+      }
+      setAttachments(prev => [...prev, ...next].slice(0, MAX_ATTACHMENTS));
+    } catch {
+      /* unreadable file — ignore */
+    }
+    setProcessingFiles(false);
+  };
 
-    const userMsg: Message = { role: 'user', content: input, timestamp: Date.now() };
+  const removeAttachment = (idx: number) => {
+    setAttachments(prev => {
+      const a = prev[idx];
+      if (a?.preview) URL.revokeObjectURL(a.preview);
+      return prev.filter((_, i) => i !== idx);
+    });
+  };
+
+  const handleSend = async () => {
+    if (isLoading || wsState !== 'connected') return;
+    if (!input.trim() && !attachments.length) return;
+
+    const text = input.trim() || 'Please analyze my attachment.';
+    const sentAtts = attachments.map(a => ({ name: a.name, kind: a.kind, data: a.data }));
+    const userMsg: Message = {
+      role: 'user',
+      content: text,
+      timestamp: Date.now(),
+      attachments: attachments.map(a => ({ name: a.name, kind: a.kind, preview: a.preview })),
+    };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
+    setAttachments([]);
     setIsLoading(true);
 
     // Add streaming placeholder
@@ -60,7 +145,7 @@ export default function ChatPage() {
     setMessages(prev => [...prev, assistantMsg]);
 
     try {
-      const result = await send('chat.send', { message: userMsg.content });
+      const result = await send('chat.send', { message: text, attachments: sentAtts });
       setMessages(prev => prev.map((m, i) =>
         i === prev.length - 1 ? { ...m, content: result?.response || 'No response', streaming: false } : m
       ));
@@ -97,6 +182,19 @@ export default function ChatPage() {
             <div className={`max-w-[75%] rounded-2xl px-4 py-3 text-sm ${
               msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-assistant'
             }`}>
+              {msg.attachments && msg.attachments.length > 0 && (
+                <div className="mb-2 space-y-1.5">
+                  {msg.attachments.map((a, ai) => a.kind === 'image' && a.preview ? (
+                    <img key={ai} src={a.preview} alt={a.name}
+                      className="max-h-32 rounded-lg border border-black/20" />
+                  ) : (
+                    <div key={ai} className="flex items-center gap-1.5 text-xs opacity-90">
+                      <span>{a.kind === 'text' ? '📄' : '📎'}</span>
+                      <span className="truncate max-w-[200px]">{a.name}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="whitespace-pre-wrap break-words">
                 {msg.content}
                 {msg.streaming && <span className="typing-cursor" />}
@@ -112,7 +210,34 @@ export default function ChatPage() {
 
       {/* Input */}
       <div className="border-t border-[#30363d] p-4">
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-2">
+            {attachments.map((a, i) => (
+              <div key={i} className="flex items-center gap-1.5 bg-[#21262d] border border-[#30363d] rounded-md pl-2 pr-1 py-1 text-xs text-[#e8eaed]">
+                {a.kind === 'image' && a.preview ? (
+                  <img src={a.preview} alt={a.name} className="h-8 w-8 object-cover rounded" />
+                ) : (
+                  <span>{a.kind === 'text' ? '📄' : '📎'}</span>
+                )}
+                <span className="max-w-[140px] truncate">{a.name}</span>
+                <button onClick={() => removeAttachment(i)} title="Remove"
+                  className="text-[#8b949e] hover:text-[#f85149] px-1">✕</button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="flex gap-2">
+          <input ref={fileInputRef} type="file" multiple className="hidden"
+            accept="image/*,.txt,.md,.json,.csv,.log,.py,.js,.ts,.tsx,.jsx,.html,.css,.xml,.yaml,.yml,.ini,.cfg,.sh,.bat,.ps1,.toml,.sql"
+            onChange={e => { handleFiles(e.target.files); e.target.value = ''; }} />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isLoading || wsState !== 'connected' || processingFiles}
+            title="Attach image or file"
+            className="bg-[#161b22] border border-[#30363d] hover:border-[#484f58] disabled:opacity-50 rounded-lg px-3 py-2 text-sm text-[#8b949e] transition-colors"
+          >
+            {processingFiles ? '⟳' : '📎'}
+          </button>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -124,12 +249,13 @@ export default function ChatPage() {
           />
           <button
             onClick={handleSend}
-            disabled={!input.trim() || isLoading || wsState !== 'connected'}
+            disabled={(!input.trim() && !attachments.length) || isLoading || wsState !== 'connected'}
             className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
           >
             {isLoading ? '...' : 'Send'}
           </button>
         </div>
+        <p className="text-[10px] text-[#484f58] mt-1.5">Images are analyzed by the visual model and described to the main model. Text files are sent as content.</p>
       </div>
     </div>
   );

@@ -51,7 +51,7 @@ class WSServer:
         self._loop = asyncio.get_running_loop()
         self._server = await websockets.serve(
             self._handle_connection, host, port,
-            max_size=10 * 1024 * 1024,  # 10MB max message
+            max_size=64 * 1024 * 1024,  # 64MB — room for base64 image attachments
         )
         log.info("WebSocket server listening on ws://%s:%d", host, port)
 
@@ -164,6 +164,60 @@ def get_server() -> WSServer:
     return _server
 
 
+async def _analyze_attachments(provider, attachments: list[dict]) -> list[str]:
+    """Route attachments to the right model:
+    - images → visual model (provider vision or local Florence-2) → text description
+    - text files → inline content
+    - others → filename/size note only
+
+    Returns context notes injected into the chat for the main model.
+    """
+    notes: list[str] = []
+    for att in (attachments or [])[:5]:
+        name = str(att.get("name") or "file")[:120]
+        kind = att.get("kind", "file")
+        data = att.get("data", "")
+
+        if kind == "image" and data:
+            prompt = ("Describe this image in detail: what is shown, "
+                      "any visible text, and the overall context.")
+            desc = None
+            try:
+                if getattr(provider, "supports_vision", False):
+                    res = await provider.vision(data, prompt)
+                    if res.ok:
+                        desc = res.response
+            except Exception:
+                desc = None
+            if not desc:
+                # Fallback: local Florence-2 visual model
+                try:
+                    from backend.providers.hf_vision import hf_vision
+                    res = await hf_vision.analyze(data, prompt)
+                    if res.ok:
+                        desc = res.response
+                except Exception:
+                    desc = None
+            if desc:
+                notes.append(
+                    f'[Attached image "{name}" — visual model analysis: '
+                    f'{str(desc)[:1500]}]')
+            else:
+                notes.append(
+                    f'[Attached image "{name}" — the visual model could '
+                    f'not analyze it.]')
+        elif kind == "text" and data:
+            text = str(data)[:8000]
+            notes.append(
+                f'[Attached file "{name}" — content:\n{text}\n'
+                f'--- end of file ---]')
+        else:
+            notes.append(
+                f'[Attached file "{name}" — binary or unreadable content, '
+                f'not analyzed.]')
+    return notes
+
+
 async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
     """Shared chat pipeline — used by chat.send and the voice listener."""
     params = params or {}
@@ -268,6 +322,22 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
                     user_messages.insert(0, {"role": "user", "content": past_note})
             except Exception as e:
                 log.debug("Past-screen recall failed: %s", e)
+
+        # Attachments: images go through the visual model, files get
+        # inlined as text — the main model sees the results as context.
+        attachments = params.get("attachments") or []
+        if attachments:
+            try:
+                att_notes = await _analyze_attachments(provider, attachments)
+                if att_notes:
+                    user_messages.insert(0, {
+                        "role": "user",
+                        "content": "\n".join(att_notes) + "\n\n"
+                        "Use the attachment information above when answering "
+                        "the user's message.",
+                    })
+            except Exception as e:
+                log.debug("Attachment analysis failed: %s", e)
 
         user_messages.append({"role": "user", "content": message})
 
