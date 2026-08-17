@@ -17,3 +17,6 @@ __pycache__/
 *.spec
 build/
 backend/memory/*.jsonl
+
+backend/memory/skins/
+
