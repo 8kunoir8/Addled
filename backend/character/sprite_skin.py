@@ -13,10 +13,12 @@ GUI thread.
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import shutil
 import time
+import zipfile
 from pathlib import Path
 
 from backend.config import SETTINGS_PATH, config
@@ -25,6 +27,9 @@ SKINS_DIR = SETTINGS_PATH.parent / "skins"
 SKINS_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_GIF_BYTES = 8 * 1024 * 1024  # 8 MB
+MAX_ZIP_BYTES = 25 * 1024 * 1024  # 25 MB archive
+MAX_ZIP_TOTAL = 20 * 1024 * 1024  # 20 MB of extracted GIFs
+MAX_ZIP_ENTRY = 5 * 1024 * 1024  # 5 MB per GIF inside the ZIP
 
 # CharacterState.name.lower() → clip key used in skin.json
 STATE_KEYS = [
@@ -101,6 +106,7 @@ def list_skins() -> list[dict]:
             "name": meta.get("name", d.name),
             "files": files,
             "states": list(meta.get("states", {}).keys()),
+            "mapped": meta.get("mapped", []),
             "active": d.name == active,
         })
     return skins
@@ -129,6 +135,7 @@ def save_uploaded_skin(name: str, filename: str, data: bytes) -> dict:
         "scale": 1.0,
         "created": int(time.time()),
         "source_file": filename,
+        "mapped": [],  # single GIF covers everything
     }
     _save_meta(skin_dir, meta)
     return {
@@ -136,6 +143,91 @@ def save_uploaded_skin(name: str, filename: str, data: bytes) -> dict:
         "name": meta["name"],
         "files": [clip_name],
         "states": STATE_KEYS,
+        "mapped": [],
+        "active": False,
+    }
+
+
+def save_uploaded_zip(name: str, filename: str, data: bytes) -> dict:
+    """Save a ZIP of per-state GIFs as a new skin.
+
+    GIFs are matched to states by file name: idle.gif, thinking.gif,
+    speaking.gif, ... Unmatched GIFs are kept as extra clips; unmapped
+    states fall back to idle.gif (or any available clip).
+    """
+    if not data:
+        raise ValueError("No data provided")
+    if len(data) > MAX_ZIP_BYTES:
+        raise ValueError("ZIP too large (max 25 MB)")
+    if data[:2] != b"PK":
+        raise ValueError("Not a ZIP file")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise ValueError("Invalid ZIP file")
+
+    slug = _sanitize_id(name)
+    skin_dir = _unique_skin_dir(slug)
+    skin_dir.mkdir(parents=True, exist_ok=True)
+
+    clips: dict[str, str] = {}   # state_key -> saved filename
+    extras: list[str] = []
+    total = 0
+    try:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            fname = Path(info.filename).name
+            if not fname.lower().endswith(".gif"):
+                continue
+            if info.file_size > MAX_ZIP_ENTRY:
+                continue
+            raw = zf.read(info)
+            if not raw or raw[:6] not in GIF_MAGIC:
+                continue
+            total += len(raw)
+            if total > MAX_ZIP_TOTAL:
+                raise ValueError("ZIP contents too large (max 20 MB of GIFs)")
+            key = fname.lower()[:-4]
+            # avoid overwriting an already-mapped state
+            out_name = fname
+            if (skin_dir / out_name).exists():
+                out_name = f"{key}_{len(total)}_{fname}"
+            (skin_dir / out_name).write_bytes(raw)
+            if key in STATE_KEYS and key not in clips:
+                clips[key] = out_name
+            else:
+                extras.append(out_name)
+    finally:
+        zf.close()
+
+    if not clips and not extras:
+        shutil.rmtree(skin_dir, ignore_errors=True)
+        raise ValueError("No GIF files found in the ZIP")
+
+    # Fallback clip for unmapped states: idle → first mapped → first extra
+    fallback = clips.get("idle") or (
+        next(iter(clips.values())) if clips else None) or (
+        extras[0] if extras else None)
+    states_map = {key: clips.get(key) or fallback for key in STATE_KEYS}
+
+    meta = {
+        "name": name.strip() or skin_dir.name,
+        "states": states_map,
+        "scale": 1.0,
+        "created": int(time.time()),
+        "source_file": filename,
+        "mapped": sorted(clips.keys()),
+        "extra": extras,
+    }
+    _save_meta(skin_dir, meta)
+    return {
+        "id": skin_dir.name,
+        "name": meta["name"],
+        "files": sorted(p.name for p in skin_dir.glob("*.gif")),
+        "states": STATE_KEYS,
+        "mapped": meta["mapped"],
+        "extra": extras,
         "active": False,
     }
 

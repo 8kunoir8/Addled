@@ -112,7 +112,9 @@ function SkinsSection({ send, connected }: { send: (m: string, p?: any) => Promi
 
   const onFile = async (file: File) => {
     if (!file || !connected) return;
-    if (!/gif$/i.test(file.name)) { setMsg({ ok: false, text: 'Only .gif files are supported' }); return; }
+    const isZip = /\.zip$/i.test(file.name);
+    const isGif = /\.gif$/i.test(file.name);
+    if (!isZip && !isGif) { setMsg({ ok: false, text: 'Only .gif or .zip files are supported' }); return; }
     setUploading(true); setMsg(null);
     try {
       const dataUrl: string = await new Promise((res, rej) => {
@@ -124,8 +126,18 @@ function SkinsSection({ send, connected }: { send: (m: string, p?: any) => Promi
       const b64 = dataUrl.split(',')[1] || '';
       const name = file.name.replace(/\.[^.]+$/, '');
       const r = await send('character.uploadSkin', { name, filename: file.name, data: b64 });
-      if (r?.success) { setMsg({ ok: true, text: `"${name}" applied — Fox is wearing it now ✓` }); refresh(); }
-      else setMsg({ ok: false, text: r?.error || 'Upload failed' });
+      if (r?.success) {
+        const skin = r.skin || {};
+        const mapped = skin.mapped || [];
+        if (isZip && mapped.length) {
+          setMsg({ ok: true, text: `"${name}" applied — ${mapped.length} states mapped (${mapped.slice(0, 6).join(', ')}${mapped.length > 6 ? '…' : ''}) ✓` });
+        } else if (isZip) {
+          setMsg({ ok: true, text: `"${name}" applied — no state-named GIFs found, using the first clip for all states ✓` });
+        } else {
+          setMsg({ ok: true, text: `"${name}" applied — Fox is wearing it now ✓` });
+        }
+        refresh();
+      } else setMsg({ ok: false, text: r?.error || 'Upload failed' });
     } catch (e: any) { setMsg({ ok: false, text: e?.message || 'Upload failed' }); }
     setUploading(false);
   };
@@ -147,11 +159,34 @@ function SkinsSection({ send, connected }: { send: (m: string, p?: any) => Promi
       <h3 className="text-sm font-semibold text-[#e8eaed] mb-1">🦊 Sprite skin <span className="text-xs font-normal text-[#8b949e]">(codex-pet style)</span></h3>
       <p className="text-xs text-[#8b949e] mb-3">Upload an animated GIF and Fox becomes that pet — all agent states, movement and effects stay active on top.</p>
 
-      <label className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : 'border-[#3380FF] text-[#3380FF] hover:bg-[#1f6feb22]'}`}>
-        {uploading ? '⟳ Uploading...' : '⬆ Upload GIF'}
-        <input type="file" accept="image/gif,.gif" className="hidden" disabled={uploading}
-          onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
-      </label>
+      {/* Upload options */}
+      <div className="flex items-center gap-2 mb-3">
+        <label className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : 'border-[#3380FF] text-[#3380FF] hover:bg-[#1f6feb22]'}`}>
+          {uploading ? '⟳ Uploading...' : '⬆ Upload GIF'}
+          <input type="file" accept="image/gif,.gif" className="hidden" disabled={uploading}
+            onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
+        </label>
+        <span className="text-xs text-[#484f58]">or</span>
+        <label className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : 'border-[#3380FF] text-[#3380FF] hover:bg-[#1f6feb22]'}`}>
+          {uploading ? '⟳ Uploading...' : '📦 Upload ZIP (multi-state)'}
+          <input type="file" accept=".zip,application/zip" className="hidden" disabled={uploading}
+            onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
+        </label>
+      </div>
+
+      {/* What's needed for multi-state ZIPs */}
+      <div className="bg-[#0d1117] border border-[#21262d] rounded-lg p-3 mb-3">
+        <p className="text-xs font-semibold text-[#e8eaed] mb-1.5">📦 ZIP with one GIF per agent state</p>
+        <p className="text-[11px] leading-relaxed text-[#8b949e]">
+          Name each GIF after the state it should play. Any GIFs you skip fall back to <span className="text-[#e8eaed] font-mono">idle.gif</span>.
+        </p>
+        <p className="text-[11px] leading-relaxed text-[#8b949e] mt-1.5 font-mono break-all">
+          idle.gif · listening.gif · observing.gif · thinking.gif<br/>
+          has_suggestion.gif · acting.gif · speaking.gif · sleeping.gif<br/>
+          blocked.gif · error.gif · working.gif · dreaming.gif
+        </p>
+      </div>
+
       {msg && <p className={`text-xs mt-2 ${msg.ok ? 'text-[#3fb950]' : 'text-[#f85149]'}`}>{msg.text}</p>}
 
       <div className="mt-4 space-y-1">
@@ -162,14 +197,14 @@ function SkinsSection({ send, connected }: { send: (m: string, p?: any) => Promi
         {skins.map(s => (
           <div key={s.id} className={`flex items-center justify-between px-3 py-2 rounded-md border ${s.active ? 'border-[#3380FF] bg-[#1f6feb22]' : 'border-[#30363d] hover:border-[#484f58]'}`}>
             <button onClick={() => setSkin(s.id)} className="text-left flex-1 text-sm text-[#e8eaed]">
-              🎞 {s.name} <span className="text-xs text-[#8b949e]">({s.files.length} clip{s.files.length !== 1 ? 's' : ''})</span>
+              🎞 {s.name} <span className="text-xs text-[#8b949e]">({s.files.length} clip{s.files.length !== 1 ? 's' : ''}{s.mapped && s.mapped.length ? ` · ${s.mapped.length} states mapped` : ''})</span>
               {s.active && <span className="ml-2 text-xs text-[#3fb950]">● active</span>}
             </button>
             <button onClick={() => removeSkin(s.id)} title="Delete skin"
               className="text-[#8b949e] hover:text-[#f85149] text-sm px-2">✕</button>
           </div>
         ))}
-        {skins.length === 0 && <p className="text-xs text-[#8b949e] px-1 py-1">No skins yet — upload a GIF to get started.</p>}
+        {skins.length === 0 && <p className="text-xs text-[#8b949e] px-1 py-1">No skins yet — upload a GIF or ZIP to get started.</p>}
       </div>
     </div>
   );

@@ -943,13 +943,21 @@ def _register_default_handlers():
         filename = params.get("filename", "")
         data_b64 = params.get("data", "")
         if not data_b64:
-            return {"success": False, "error": "No image data provided"}
+            return {"success": False, "error": "No file data provided"}
         try:
             raw = base64.b64decode(data_b64)
         except Exception:
             return {"success": False, "error": "Invalid base64 data"}
+        # Branch on file type: ZIP of per-state GIFs, or a single GIF
+        if raw[:2] == b"PK":
+            save_fn = sprite_skin.save_uploaded_zip
+        elif raw[:6] in sprite_skin.GIF_MAGIC:
+            save_fn = sprite_skin.save_uploaded_skin
+        else:
+            return {"success": False,
+                    "error": "Only .gif or .zip files are supported"}
         try:
-            skin = sprite_skin.save_uploaded_skin(name, filename, raw)
+            skin = save_fn(name, filename, raw)
         except ValueError as e:
             return {"success": False, "error": str(e)}
         # Apply immediately so the character switches right away
