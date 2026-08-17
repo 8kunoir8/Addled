@@ -90,8 +90,12 @@ class Observer:
                                      context=context, decision=decision)
 
         # ---- DEEP TIER (every deep_interval_s) -------------------------------
+        # Gated by observation.deep_vision — the dashboard toggle for
+        # "periodic screenshots routed to the visual model".
         now = time.time()
-        if now - self._last_deep_time >= self._deep_interval_s:
+        from backend.config import config
+        if (config.get("observation", "deep_vision", default=True)
+                and now - self._last_deep_time >= self._deep_interval_s):
             self._last_deep_time = now
             detail = await self._deep_analyze()
             decision = "stay_quiet"

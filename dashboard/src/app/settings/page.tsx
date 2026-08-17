@@ -7,7 +7,8 @@ type SettingsData = Record<string, any>;
 
 const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
-  notifications: '🔔', memory: '🧠', integrations: '🔗', appearance: '🎨', about: 'ℹ️',
+  notifications: '🔔', memory: '🧠', integrations: '🔗', appearance: '🎨',
+  observation: '👁', about: 'ℹ️',
 };
 
 export default function SettingsPage() {
@@ -38,7 +39,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['providers','character','voice','safety','notifications','memory','integrations','appearance','about'];
+  const sections = ['providers','character','voice','safety','notifications','observation','memory','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -64,6 +65,7 @@ export default function SettingsPage() {
         {activeSection==='voice'&&<VoiceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='safety'&&<SafetySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='notifications'&&<NotificationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
+        {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='memory'&&<MemorySection/>}
         {activeSection==='integrations'&&<IntegrationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='appearance'&&<AppearanceSection/>}
@@ -218,15 +220,15 @@ function VoiceSection({ settings, update, saving, status }: any) {
 
 function SafetySection({ settings, update, saving, status }: any) {
   const s=settings?.safety||{};
-  const Toggle=({label,desc,key}:{label:string;desc?:string;key:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('safety',key,s[key]===false)} className={`w-10 h-5 rounded-full transition-colors ${s[key]!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${s[key]!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('safety',skey,!s[skey])} className={`w-10 h-5 rounded-full transition-colors ${s[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${s[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   return <div className="space-y-1">
     <SettingRow label="File Access"><select value={s.file_access_mode||'workspace_only'} onChange={e=>update('safety','file_access_mode',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="workspace_only">Workspace Only</option><option value="custom">Custom</option><option value="unrestricted">Full</option></select></SettingRow>
     <SettingRow label="Kill Switch"><input type="text" value={s.kill_switch_hotkey||'ctrl+shift+alt+k'} onChange={e=>update('safety','kill_switch_hotkey',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-44 font-mono"/></SettingRow>
-    <Toggle label="Clipboard Filter" desc="Redact secrets from clipboard" key="clipboard_filter"/>
-    <Toggle label="Prompt Guard" desc="Block injection attempts" key="prompt_guard"/>
+    <Toggle label="Clipboard Filter" desc="Redact secrets from clipboard" skey="clipboard_filter"/>
+    <Toggle label="Prompt Guard" desc="Block injection attempts" skey="prompt_guard"/>
     <SettingRow label="Quiet Hours"><div className="flex items-center gap-2 text-sm text-[#e8eaed]"><input type="time" value={s.quiet_hours_start||'22:00'} onChange={e=>update('safety','quiet_hours_start',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed]"/><span className="text-[#8b949e]">to</span><input type="time" value={s.quiet_hours_end||'07:00'} onChange={e=>update('safety','quiet_hours_end',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed]"/></div></SettingRow>
-    <Toggle label="Meeting Auto-Sleep" key="meeting_auto_sleep"/>
-    <Toggle label="Gaming Auto-Sleep" key="gaming_auto_sleep"/>
+    <Toggle label="Meeting Auto-Sleep" skey="meeting_auto_sleep"/>
+    <Toggle label="Gaming Auto-Sleep" skey="gaming_auto_sleep"/>
   </div>;
 }
 
@@ -236,6 +238,17 @@ function NotificationsSection({ settings, update, saving, status }: any) {
     <SettingRow label="Bubble Duration" description={`${n.bubble_duration_s||8}s`}><input type="range" min={3} max={30} value={n.bubble_duration_s||8} onChange={e=>update('notifications','bubble_duration_s',parseInt(e.target.value))} className="w-32"/></SettingRow>
     <SettingRow label="Max Bubbles"><input type="number" min={1} max={10} value={n.max_bubbles||3} onChange={e=>update('notifications','max_bubbles',parseInt(e.target.value))} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-20"/></SettingRow>
     <SettingRow label="Show State"><button onClick={()=>update('notifications','show_character_state',n.show_character_state===false)} className={`w-10 h-5 rounded-full transition-colors ${n.show_character_state!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${n.show_character_state!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
+  </div>;
+}
+
+function ObservationSection({ settings, update, saving, status }: any) {
+  const o=settings?.observation||{};
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('observation',skey,!o[skey])} className={`w-10 h-5 rounded-full transition-colors ${o[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${o[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  return <div className="space-y-1">
+    <Toggle label="Deep vision" desc="Periodically screenshot your screen and analyze it with the visual model (respects privacy zones)" skey="deep_vision"/>
+    <SettingRow label="Deep vision interval" description={`Every ${o.deep_interval_s||300}s`}><select value={o.deep_interval_s||300} onChange={e=>update('observation','deep_interval_s',parseInt(e.target.value))} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value={60}>1 min</option><option value={120}>2 min</option><option value={300}>5 min</option><option value={600}>10 min</option><option value={1800}>30 min</option></select></SettingRow>
+    <Toggle label="Speak insights" desc="Read proactive insights out loud (Auto TTS must be on)" skey="voice_insights"/>
+    <SettingRow label="Snapshot memory"><span className="text-xs text-[#8b949e]">{o.snapshot_store_enabled===false?'Disabled':'Enabled'} · max {o.snapshot_max||30} · every {o.snapshot_min_interval_s||60}s</span></SettingRow>
   </div>;
 }
 

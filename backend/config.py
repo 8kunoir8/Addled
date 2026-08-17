@@ -149,6 +149,7 @@ DEFAULT_SETTINGS: dict = {
     "observation": {
         "light_interval_s": 5,
         "medium_cycles": 3,
+        "deep_vision": True,
         "deep_interval_s": 300,
         "monitors": "all",
         "privacy_zones": [],
@@ -266,11 +267,17 @@ class _Config:
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge override into base. Returns new dict."""
+    """Recursively merge override into base. Returns new dict.
+
+    Corruption guard: if a saved section is not a dict (e.g. a boolean
+    written by an old bug) but the default is, keep the defaults.
+    """
     result = dict(base)
     for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
+        if key in result and isinstance(result[key], dict):
+            if isinstance(value, dict):
+                result[key] = _deep_merge(result[key], value)
+            # else: non-dict override for a dict section → ignore, keep defaults
         else:
             result[key] = value
     return result
