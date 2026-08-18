@@ -417,7 +417,7 @@ app.whenReady().then(async () => {
     console.log('[Addled] Backend already running on port', WS_PORT);
   }
 
-  // Start auto-updater checks (every 4 hours)
+  // Start auto-updater (weekly checks against the latest GitHub release)
   if (updater) updater.startUpdateChecks();
 
   // Wait briefly for backend to start, then create window
