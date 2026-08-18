@@ -1,0 +1,35 @@
+{
+  "name": "neon_panda",
+  "states": {
+    "idle": "idle.gif",
+    "listening": "listening.gif",
+    "observing": "observing.gif",
+    "thinking": "thinking.gif",
+    "has_suggestion": "has_suggestion.gif",
+    "acting": "acting.gif",
+    "speaking": "speaking.gif",
+    "sleeping": "sleeping.gif",
+    "blocked": "blocked.gif",
+    "error": "error.gif",
+    "working": "working.gif",
+    "dreaming": "dreaming.gif"
+  },
+  "scale": 1.0,
+  "created": 1786979474,
+  "source_file": "neon_panda.zip",
+  "mapped": [
+    "acting",
+    "blocked",
+    "dreaming",
+    "error",
+    "has_suggestion",
+    "idle",
+    "listening",
+    "observing",
+    "sleeping",
+    "speaking",
+    "thinking",
+    "working"
+  ],
+  "extra": []
+}

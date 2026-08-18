@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 import shutil
 import time
@@ -23,8 +24,13 @@ from pathlib import Path
 
 from backend.config import SETTINGS_PATH, config
 
+log = logging.getLogger("addled.skin")
+
 SKINS_DIR = SETTINGS_PATH.parent / "skins"
 SKINS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Starter skins shipped with the app (copied into SKINS_DIR on first run)
+DEFAULT_SKINS_DIR = Path(__file__).parent / "default_skins"
 
 MAX_GIF_BYTES = 8 * 1024 * 1024  # 8 MB
 MAX_ZIP_BYTES = 25 * 1024 * 1024  # 25 MB archive
@@ -110,6 +116,26 @@ def list_skins() -> list[dict]:
             "active": d.name == active,
         })
     return skins
+
+
+def install_default_skins() -> list[str]:
+    """Copy bundled starter skins into the runtime skins folder.
+    Skips skins that already exist (never overwrites user data).
+    Returns the ids of newly installed skins."""
+    installed = []
+    if not DEFAULT_SKINS_DIR.is_dir():
+        return installed
+    for d in DEFAULT_SKINS_DIR.iterdir():
+        if not d.is_dir() or not any(d.glob("*.gif")):
+            continue
+        target = SKINS_DIR / d.name
+        if target.exists():
+            continue
+        shutil.copytree(d, target)
+        installed.append(d.name)
+    if installed:
+        log.debug("Installed default skins: %s", installed)
+    return installed
 
 
 def save_uploaded_skin(name: str, filename: str, data: bytes) -> dict:

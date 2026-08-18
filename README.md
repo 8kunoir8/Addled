@@ -90,10 +90,13 @@ launch.bat
 ## Features
 
 ### 🎭 Floating Character
-12 animation states (idle, listening, observing, thinking, has_suggestion, acting, speaking, sleeping, blocked, error, working, dreaming), 6 vector shapes (triangle, circle, diamond, hexagon, star, square), cursor gaze tracking, breathing/stretch animations, glow effects, mood tinting, progress ring, 7 particle types (zzz, sparkle, gear, glow_burst, trail, lightbulb).
+12 animation states (idle, listening, observing, thinking, has_suggestion, acting, speaking, sleeping, blocked, error, working, dreaming) — all fully wired to real agent activity (thinking while the LLM works, speaking during TTS, acting during action execution, error on failures, blocked under privacy guard). 6 vector shapes, cursor gaze tracking, breathing/stretch animations, glow effects, mood tinting, progress ring, 7 particle types. **Chat-bubble replies** pop above the character when you click it.
+
+### 🦊 Sprite Skins (codex-pet style)
+Upload any animated GIF or a ZIP of per-state GIFs in Settings → Character and the floating character becomes that pet — all 12 agent states keep working on top (thinking/error/sleeping effects included). State clips map by file name (`idle.gif`, `thinking.gif`, …); skipped states fall back to `idle.gif`. Ships with the **Neon Panda** starter skin out of the box.
 
 ### 💬 AI Chat
-Full chat UI with streaming responses, markdown rendering, conversation history. Works with any configured AI provider. Supports skill-based tool calling across all providers.
+Full chat UI with streaming responses, markdown rendering, conversation history. **Attachments**: images are analyzed by the visual model (local Florence-2 or provider vision) and described to the main model; text files are inlined; drag & drop supported. Proactive insights arrive as 💡 messages in chat and bubbles on the character. Works with any configured AI provider. Supports skill-based tool calling across all providers.
 
 ### 🔌 7 AI Providers
 | Provider | Type | Vision | Streaming |
@@ -117,7 +120,7 @@ All 7 AI providers can invoke any skill — no provider lock-in.
 | **Browser** | `browser_navigate`, `browser_extract`, `browser_click`, `browser_type` |
 | **Code** | `code_read`, `code_edit` |
 | **Calendar** | `calendar_add`, `calendar_list` |
-| **Web** | `web_search` |
+| **Web** | `web_search`, `web_fetch` (auto-falls back to search discovery when sites block bots) |
 | **Meta** | `forge_skill`, `list_forged` |
 
 ### 🔨 Skill Forge — Self-Extending Agent
@@ -138,7 +141,7 @@ Workspace folder binding with file tree, language detection (40+ languages), uni
 7 agent types (coder, writer, analyst, planner, researcher, devops, general) with unique system prompts and tool access. Parallel execution via asyncio. Dashboard spawn/stop/task controls.
 
 ### 🌐 Browser Automation
-Playwright-powered Chromium browser — navigate, click, type, extract text, screenshot, history navigation. 8 WS handlers for full web automation.
+Playwright-powered Chromium browser when installed — navigate, click, type, extract text, screenshot, history navigation. **Without Playwright, navigation automatically falls back to a lightweight HTTP fetch** (browser-like headers, HTML→text), and blocked sites are re-discovered through search results. Web search uses DuckDuckGo with automatic Bing fallback (some networks block DDG) and snippet extraction.
 
 ### 📅 Calendar & Email
 Local calendar with Google Calendar OAuth sync. IMAP/SMTP email — fetch unread, send, search. Dashboard integration for both.
@@ -153,14 +156,14 @@ Prompt guard (15 injection + 5 exfiltration patterns), presence guard (meeting/g
 Chat history (JSON, cross-session), **long-term conversational recall** (every turn remembered; relevant past turns auto-injected into new chats), vector store (SQLite + numpy cosine similarity), and **rolling screenshot memory** (last 30 privacy-masked screenshots, 24h auto-purge — enables "what was I doing 20 minutes ago?").
 
 ### 🎤 Voice & Perception
-**Voice input**: "Hey Fox"-style wake word → command → chat → spoken reply (local faster-whisper, offline). Edge TTS output. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task, with dedup + 10-min nag limit and meeting/gaming/quiet-hours boundaries.
+**Voice input**: wake word → command → chat → spoken reply (local faster-whisper, offline). Edge TTS output. **Auto TTS toggle** (Settings → Voice): dashboard chat and character prompts speak replies out loud. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
 
 ### 📦 Installer & Auto-Update
-Windows NSIS + portable installer via electron-builder. GitHub Releases auto-updater with 4-hour check interval, download progress, restart prompt. First-run PyQt6 onboarding wizard (6 steps).
+Windows NSIS + portable installer via electron-builder. **Weekly auto-update** against the latest GitHub release (version discovery via the GitHub API; delta updates via latest.yml + blockmap). If the repo is private, the check degrades gracefully and resumes automatically once it's public. Manual "Check for Updates" in the tray. First-run PyQt6 onboarding wizard (6 steps).
 
 ---
 
-## WebSocket API (48 handlers)
+## WebSocket API (58 handlers)
 
 ### Core
 `chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set`

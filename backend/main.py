@@ -156,6 +156,7 @@ def main():
     # ---- restore active sprite skin (codex-pet style) ------------------------
     try:
         from backend.character import sprite_skin
+        sprite_skin.install_default_skins()  # starter skins on first run
         active_skin = sprite_skin.get_active_skin_id()
         if active_skin:
             char_widget.apply_skin(active_skin)
