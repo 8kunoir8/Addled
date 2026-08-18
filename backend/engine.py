@@ -58,6 +58,7 @@ class Engine(QObject):
         self._last_insight_text = ""  # dedup: don't repeat the same insight
         self._last_insight_time = 0.0
         self._chat_busy = False  # a chat is in flight — don't force 'idle'
+        self._voice_busy = False  # TTS is speaking — don't force 'idle'
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -179,15 +180,16 @@ class Engine(QObject):
                 if obs and obs.context != "unknown" and obs.changed:
                     log.debug("Observer: context=%s tier=%s decision=%s",
                               obs.context, obs.tier, obs.decision)
-                    if obs.tier == "light":
+                    if obs.context == "private":
+                        # Privacy guard active (excluded app / zone)
+                        self.sig_agent_state.emit("privacy_guard")
+                    elif obs.tier == "light":
                         self.sig_agent_state.emit("observing")
-                    elif obs.tier == "deep" and obs.decision:
-                        self.sig_agent_state.emit(obs.decision)
-                        if obs.decision in ("nudge", "suggest", "offer_action"):
-                            self._push_insight(obs)
                     elif obs.decision in ("nudge", "suggest", "offer_action"):
-                        self.sig_agent_state.emit(obs.decision)
+                        self.sig_agent_state.emit("has_suggestion")
                         self._push_insight(obs)
+                    elif obs.decision:
+                        self.sig_agent_state.emit(obs.decision)
             except Exception as e:
                 log.warning("Observer tick failed: %s", e)
 
@@ -205,9 +207,10 @@ class Engine(QObject):
             except Exception as e:
                 log.warning("Goal tick failed: %s", e)
 
-        # 4. Idle state if no activity detected (unless a chat is running —
-        #    the character should keep showing THINKING while the LLM works)
-        if self._state == EngineState.RUNNING and not self._chat_busy:
+        # 4. Idle state if no activity detected (unless a chat or TTS is
+        #    in flight — keep THINKING/SPEAKING animations visible)
+        if (self._state == EngineState.RUNNING
+                and not self._chat_busy and not self._voice_busy):
             self.sig_agent_state.emit("idle")
 
     def _push_insight(self, obs):

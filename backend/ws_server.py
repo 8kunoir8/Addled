@@ -231,14 +231,41 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
         except Exception:
             pass
     try:
-        return await _run_chat_pipeline_inner(message, params)
+        response = await _run_chat_pipeline_inner(message, params)
+        # Surface provider/connection failures as the ERROR character state
+        text = response.get("response", "") if isinstance(response, dict) else ""
+        if text.startswith(("[Not connected:", "[Provider")) and _engine_ref is not None:
+            try:
+                _engine_ref.sig_agent_state.emit("error")
+            except Exception:
+                pass
+        return response
     finally:
         if _engine_ref is not None:
             _engine_ref._chat_busy = False
 
 
+async def _speak_reply(text: str, voice: str = "en-US-JennyNeural") -> dict:
+    """Speak text with the SPEAKING character animation, then reset."""
+    if _engine_ref is not None:
+        _engine_ref._voice_busy = True
+        try:
+            _engine_ref.sig_agent_state.emit("speaking")
+        except Exception:
+            pass
+    try:
+        from backend.voice.tts import speak
+        return await speak(text, voice)
+    finally:
+        if _engine_ref is not None:
+            _engine_ref._voice_busy = False
+            try:
+                _engine_ref.sig_agent_state.emit("idle")
+            except Exception:
+                pass
+
+
 async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> dict:
-    params = params or {}
     from backend.config import config
 
     # Prompt guard check
@@ -457,8 +484,7 @@ def _register_default_handlers():
             if config.get("voice", "auto_tts", default=True):
                 reply = result.get("response", "")
                 if reply and not reply.startswith(("[Not connected:", "[Provider")):
-                    from backend.voice.tts import speak
-                    asyncio.create_task(speak(reply))
+                    asyncio.create_task(_speak_reply(reply))
                     log.info("Auto-TTS: speaking chat reply (%d chars)", len(reply))
         except Exception:
             log.debug("Auto-TTS dispatch failed", exc_info=True)
@@ -472,7 +498,17 @@ def _register_default_handlers():
         action_params = params.get("params", {})
         if not action_type:
             return {"success": False, "error": "No action type specified"}
+        if _engine_ref is not None:
+            try:
+                _engine_ref.sig_agent_state.emit("executing_action")
+            except Exception:
+                pass
         result = await executor.execute(ActionRequest(action_type=action_type, params=action_params))
+        if _engine_ref is not None:
+            try:
+                _engine_ref.sig_agent_state.emit("error" if not result.success else "idle")
+            except Exception:
+                pass
         return {"success": result.success, "action_type": result.action_type,
                 "summary": result.summary, "duration_ms": result.duration_ms,
                 "error": result.error, "data": result.data}
@@ -603,13 +639,11 @@ def _register_default_handlers():
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
     async def voice_speak(params: dict, ws) -> dict:
-        from backend.voice.tts import speak
         text = params.get("text", "")
         voice = params.get("voice", "en-US-JennyNeural")
         if not text:
             return {"success": False, "error": "No text to speak"}
-        result = await speak(text, voice)
-        return result
+        return await _speak_reply(text, voice)
 
     # ---- Phase 3: Character state control (used by bots) --------------------
 

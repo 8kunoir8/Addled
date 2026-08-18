@@ -189,10 +189,15 @@ def main():
         get_server().broadcast_nowait("voice.reply", {"text": reply})
         if reply and not reply.startswith("[Not connected:"):
             try:
+                engine.sig_agent_state.emit("speaking")
+                engine._voice_busy = True
                 from backend.voice.tts import speak
                 await speak(reply)
             except Exception as e:
                 log.warning("Voice reply TTS failed: %s", e)
+            finally:
+                engine._voice_busy = False
+                engine.sig_agent_state.emit("idle")
 
     def _on_voice_command(text: str):
         try:
@@ -240,10 +245,15 @@ def main():
             # Spoken replies follow the same Auto TTS toggle as the dashboard
             if config.get("voice", "auto_tts", default=True):
                 try:
+                    engine.sig_agent_state.emit("speaking")
+                    engine._voice_busy = True
                     from backend.voice.tts import speak
                     await speak(reply)
                 except Exception as e:
                     log.warning("Prompt TTS failed: %s", e)
+                finally:
+                    engine._voice_busy = False
+                    engine.sig_agent_state.emit("idle")
 
     def _on_prompt():
         text, ok = QInputDialog.getText(char_widget, "Ask Addled",
