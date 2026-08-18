@@ -17,7 +17,7 @@ from backend.skills.registry import skill_registry, SkillResult
 log = logging.getLogger("addled.tool_loop")
 
 NATIVE_TOOL_PROVIDERS = {"openai", "deepseek", "gemini"}
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 8
 
 
 async def execute_skill(name: str, params: dict, provider=None) -> dict:
@@ -94,6 +94,31 @@ async def chat_with_tools(
         full_messages.append({"role": "system", "content": system_prompt})
     full_messages.extend(messages)
 
+    async def _final_answer(tool_results):
+        """One more LLM call forced to plain text, using gathered results."""
+        full_messages.append({
+            "role": "user",
+            "content": ("Answer the user's question now, based on the "
+                        "information gathered above. Do not call any more "
+                        "tools — respond with plain text."),
+        })
+        try:
+            if uses_native:
+                final = await _call_native_tools(provider, full_messages)
+            else:
+                final = await _call_prompt_tools(provider, full_messages)
+            final_text = (final.get("response") or "").strip()
+            if final_text and not final.get("tool_calls"):
+                return {
+                    "response": final_text,
+                    "tokens": final.get("tokens", 0),
+                    "tool_rounds": rounds,
+                    "tool_results": tool_results if tool_results else [],
+                }
+        except Exception as e:
+            log.warning("Final summarization call failed: %s", e)
+        return None
+
     rounds = 0
     while rounds < max_tool_rounds:
         rounds += 1
@@ -126,6 +151,9 @@ async def chat_with_tools(
         for tc in result["tool_calls"]:
             exec_result = await execute_skill(
                 tc["name"], tc.get("params", {}), provider)
+            log.info("Tool call: %s(%s) -> success=%s error=%s",
+                     tc["name"], json.dumps(tc.get("params", {}))[:200],
+                     exec_result["success"], str(exec_result.get("error"))[:200])
             tool_results.append({
                 "tool": tc["name"],
                 "success": exec_result["success"],
@@ -137,14 +165,22 @@ async def chat_with_tools(
             full_messages.append(
                 _tool_result_message(tc["name"], exec_result, tc.get("id")))
 
-        # If all tools failed, stop looping
+        # If all tools failed, try a forced plain-text answer before giving up
         if all(not tr["success"] for tr in tool_results):
+            final = await _final_answer(tool_results)
+            if final is not None:
+                return final
             return {
                 "response": "I tried to use some tools but they didn't work.",
                 "tokens": 0,
                 "tool_rounds": rounds,
                 "tool_results": tool_results,
             }
+
+    # Round cap reached: force one final answer from the gathered results.
+    final = await _final_answer(tool_results if tool_results else [])
+    if final is not None:
+        return final
 
     return {
         "response": "I've completed the requested actions.",

@@ -68,6 +68,124 @@ class SkillResult:
     summary: str = ""
 
 
+async def _search_ddg_html(query: str) -> dict:
+    """Scrape DuckDuckGo's HTML endpoint with stdlib only (no Playwright)."""
+    import asyncio
+    import html as _html
+    import re
+    import urllib.parse
+    import urllib.request
+
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+
+    def _fetch() -> str:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/125.0.0.0 Safari/537.36"),
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.read().decode("utf-8", errors="ignore")
+
+    try:
+        loop = asyncio.get_running_loop()
+        page = await loop.run_in_executor(None, _fetch)
+    except Exception as e:
+        return {"success": False, "error": f"Search request failed: {e}"}
+
+    titles = []
+    for m in re.finditer(
+            r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            page, re.S):
+        title = _html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip()
+        if title:
+            titles.append({"title": title, "url": _html.unescape(m.group(1))})
+
+    snippets = [
+        _html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
+        for s in re.findall(r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>', page, re.S)
+    ]
+
+    if not titles:
+        return {"success": False, "error": "Search returned no results"}
+
+    lines = []
+    for i, t in enumerate(titles[:5]):
+        lines.append(f"{i + 1}. {t['title']} — {t['url']}")
+        if i < len(snippets) and snippets[i]:
+            lines.append(f"   {snippets[i]}")
+    return {
+        "success": True,
+        "query": query,
+        "engine": "ddg-html",
+        "snippet": "\n".join(lines)[:2000],
+        "results": titles[:5],
+    }
+
+
+def _decode_bing_url(href: str) -> str:
+    """Bing wraps result links in /ck/a redirects — decode to the real URL."""
+    import base64
+    import urllib.parse
+    try:
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+        u = q.get("u", [""])[0]
+        if u.startswith("a1"):
+            decoded = base64.urlsafe_b64decode(u[2:] + "==")
+            return decoded.decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+    return href
+
+
+async def _search_bing(query: str) -> dict:
+    """Scrape Bing's HTML results (fallback for networks that block DDG)."""
+    import asyncio
+    import html as _html
+    import re
+    import urllib.parse
+    import urllib.request
+
+    url = "https://www.bing.com/search?q=" + urllib.parse.quote(query)
+
+    def _fetch() -> str:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/125.0.0.0 Safari/537.36"),
+        })
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            return resp.read().decode("utf-8", errors="ignore")
+
+    try:
+        loop = asyncio.get_running_loop()
+        page = await loop.run_in_executor(None, _fetch)
+    except Exception as e:
+        return {"success": False, "error": f"Bing request failed: {e}"}
+
+    results = []
+    for m in re.finditer(
+            r'<li class="b_algo".*?<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            page, re.S):
+        title = _html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip()
+        if title:
+            results.append({"title": title,
+                            "url": _decode_bing_url(_html.unescape(m.group(1)))})
+    if not results:
+        return {"success": False, "error": "Bing returned no results"}
+
+    lines = []
+    for i, r in enumerate(results[:5]):
+        lines.append(f"{i + 1}. {r['title']} — {r['url']}")
+    return {
+        "success": True,
+        "query": query,
+        "engine": "bing",
+        "snippet": "\n".join(lines)[:2000],
+        "results": results[:5],
+    }
+
+
 class SkillRegistry:
     """Central registry for all agent skills — callable by any provider."""
 
@@ -530,24 +648,36 @@ class SkillRegistry:
 
     def _register_web_skills(self):
         async def web_search(params: dict) -> dict:
-            query = str(params.get("query", ""))
+            query = str(params.get("query", "")).strip()
             if not query:
                 return {"success": False, "error": "No search query"}
-            # Use the browser to search DuckDuckGo
-            from backend.browser.browser_engine import browser
-            nav = await browser.navigate(
-                f"https://duckduckgo.com/?q={__import__('urllib.parse').quote(query)}")
-            if nav.get("success"):
-                extract = await browser.extract()
-                return {
-                    "success": True,
-                    "query": query,
-                    "url": nav.get("url"),
-                    "snippet": extract.get("text", "")[:2000],
-                }
-            return {"success": False, "error": "Browser search failed"}
+            # Primary: DuckDuckGo HTML endpoint (stdlib only, no Playwright)
+            result = await _search_ddg_html(query)
+            if result.get("success"):
+                return result
+            # Fallback 1: Bing (DuckDuckGo is blocked on some networks)
+            result = await _search_bing(query)
+            if result.get("success"):
+                return result
+            # Fallback 2: Playwright browser (if installed)
+            try:
+                from urllib.parse import quote
+                from backend.browser.browser_engine import browser
+                nav = await browser.navigate(
+                    f"https://www.bing.com/search?q={quote(query)}")
+                if nav.get("success"):
+                    extract = await browser.extract()
+                    text = (extract or {}).get("text", "") if isinstance(extract, dict) else str(extract or "")
+                    if text:
+                        return {"success": True, "query": query,
+                                "engine": "browser", "url": nav.get("url"),
+                                "snippet": text[:2000]}
+            except Exception as e:
+                log.debug("Browser search fallback failed: %s", e)
+            return result
+
         self.register(SkillDefinition(
-            "web_search", "Search the web using DuckDuckGo in the browser",
+            "web_search", "Search the web (DuckDuckGo) and return result titles, URLs and snippets",
             {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search query"},
             }, "required": ["query"]},

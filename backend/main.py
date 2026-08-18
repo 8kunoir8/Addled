@@ -47,13 +47,17 @@ if getattr(sys, "frozen", False):
 
 def _setup_logging():
     import logging
+    from logging.handlers import RotatingFileHandler
     log_dir = _BACKEND_ROOT / "memory"
     log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(log_dir / "addled.log", encoding="utf-8"),
+            # Rotating handler — keeps the log from growing unbounded
+            # (e.g. repeated paint errors once filled a 167 MB file).
+            RotatingFileHandler(log_dir / "addled.log", encoding="utf-8",
+                                maxBytes=5 * 1024 * 1024, backupCount=2),
             logging.StreamHandler(sys.stderr),
         ],
     )

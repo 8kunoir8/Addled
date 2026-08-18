@@ -35,6 +35,10 @@ class PlaywrightBrowser:
         self._page = None
         self._playwright = None
         self._state = BrowserState()
+        # Lightweight HTTP fallback (used when Playwright isn't installed)
+        self._http_text = ""
+        self._http_title = ""
+        self._using_http = False
 
     async def _ensure_browser(self) -> bool:
         """Lazy-init Playwright browser. Returns True if ready."""
@@ -59,19 +63,62 @@ class PlaywrightBrowser:
             log.info("Playwright browser launched")
             return True
         except ImportError:
-            log.error("Playwright not installed. Run: pip install playwright && playwright install chromium")
+            log.info("Playwright not installed — using HTTP fallback for navigation")
             return False
         except Exception as e:
             log.error("Browser launch failed: %s", e)
             return False
 
+    async def _fetch_http(self, url: str) -> dict:
+        """Fetch a page with stdlib urllib and reduce it to readable text.
+        Used when Playwright is unavailable — covers navigate/extract for
+        most agent needs (search results, articles, docs)."""
+        import html as _html
+        import re
+        import urllib.request
+
+        def _fetch() -> str:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/125.0.0.0 Safari/537.36"),
+            })
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+
+        loop = asyncio.get_running_loop()
+        page = await loop.run_in_executor(None, _fetch)
+        title_m = re.search(r"<title[^>]*>(.*?)</title>", page, re.S | re.I)
+        title = _html.unescape(re.sub(r"<[^>]+>", "", title_m.group(1))).strip() if title_m else url
+        # Crude but effective HTML→text: drop scripts/styles, then tags
+        page = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", page, flags=re.S | re.I)
+        text = re.sub(r"<[^>]+>", " ", page)
+        text = _html.unescape(text)
+        text = re.sub(r"[ \t\r\f\v]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n", text)
+        self._http_text = text.strip()[:50000]
+        self._http_title = title
+        self._using_http = True
+        self._state.url = url
+        self._state.title = title
+        self._state.history.append(url)
+        self._state.history_index = len(self._state.history) - 1
+        return {"success": True, "url": url, "title": title, "engine": "http"}
+
     async def navigate(self, url: str) -> dict:
         """Navigate to a URL. Returns page info."""
+        if not url:
+            return {"success": False, "error": "No URL provided"}
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
         if not await self._ensure_browser():
-            return {"success": False, "error": "Playwright not available"}
+            # Playwright unavailable — fall back to plain HTTP fetch
+            log.info("Playwright unavailable — using lightweight HTTP fetch")
+            try:
+                return await self._fetch_http(url)
+            except Exception as e:
+                return {"success": False, "error": str(e)}
         try:
-            if not url.startswith(("http://", "https://")):
-                url = "https://" + url
             await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             self._state.url = self._page.url
             self._state.title = await self._page.title()
@@ -88,7 +135,11 @@ class PlaywrightBrowser:
                 "screenshot": self._state.screenshot_b64,
             }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            log.warning("Playwright navigate failed (%s) — falling back to HTTP", e)
+            try:
+                return await self._fetch_http(url)
+            except Exception as e2:
+                return {"success": False, "error": str(e2)}
 
     async def go_back(self) -> dict:
         """Go back in browser history."""
@@ -167,6 +218,11 @@ class PlaywrightBrowser:
 
     async def extract(self, selector: str | None = None) -> dict:
         """Extract page content: text, all text, or specific element."""
+        if self._page is None and self._using_http:
+            # HTTP fallback: return the page text captured at navigate time
+            return {"success": True, "url": self._state.url,
+                    "title": self._http_title,
+                    "text": self._http_text[:10000], "engine": "http"}
         if not self._page:
             return {"success": False, "error": "No page loaded"}
         try:
@@ -192,6 +248,9 @@ class PlaywrightBrowser:
             self._page = None
             self._playwright = None
             self._state = BrowserState()
+            self._http_text = ""
+            self._http_title = ""
+            self._using_http = False
             log.info("Browser closed")
             return {"success": True}
         except Exception as e:
