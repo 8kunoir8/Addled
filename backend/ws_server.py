@@ -223,6 +223,24 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
     params = params or {}
     from backend.config import config
 
+    # Character shows the THINKING animation while the LLM works
+    if _engine_ref is not None:
+        _engine_ref._chat_busy = True
+        try:
+            _engine_ref.sig_agent_state.emit("thinking")
+        except Exception:
+            pass
+    try:
+        return await _run_chat_pipeline_inner(message, params)
+    finally:
+        if _engine_ref is not None:
+            _engine_ref._chat_busy = False
+
+
+async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> dict:
+    params = params or {}
+    from backend.config import config
+
     # Prompt guard check
     if config.get("safety", "prompt_guard", default=True):
         from backend.safety.prompt_guard import sanitize

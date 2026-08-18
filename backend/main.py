@@ -106,7 +106,7 @@ def main():
         log.info("Already onboarded — skipping wizard")
 
     # ---- start WebSocket server (runs in background) --------------------------
-    from backend.ws_server import start_ws_server
+    from backend.ws_server import start_ws_server, get_server
     import asyncio
     import threading
 
@@ -137,6 +137,15 @@ def main():
 
     engine = Engine(char_widget=char_widget)
     engine.sig_agent_state.connect(char_widget.set_agent_state)
+
+    # Mirror every engine state change to dashboard clients
+    def _broadcast_agent_state(state: str):
+        try:
+            get_server().broadcast_nowait("state.changed", {"state": state})
+        except Exception:
+            pass
+
+    engine.sig_agent_state.connect(_broadcast_agent_state)
     engine.start()
     log.info("Engine started")
 

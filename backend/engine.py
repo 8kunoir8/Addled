@@ -57,6 +57,7 @@ class Engine(QObject):
         self._last_context = None  # latest meaningful activity context
         self._last_insight_text = ""  # dedup: don't repeat the same insight
         self._last_insight_time = 0.0
+        self._chat_busy = False  # a chat is in flight — don't force 'idle'
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -204,8 +205,9 @@ class Engine(QObject):
             except Exception as e:
                 log.warning("Goal tick failed: %s", e)
 
-        # 4. Idle state if no activity detected
-        if self._state == EngineState.RUNNING:
+        # 4. Idle state if no activity detected (unless a chat is running —
+        #    the character should keep showing THINKING while the LLM works)
+        if self._state == EngineState.RUNNING and not self._chat_busy:
             self.sig_agent_state.emit("idle")
 
     def _push_insight(self, obs):
