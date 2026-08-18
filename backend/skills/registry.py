@@ -174,9 +174,18 @@ async def _search_bing(query: str) -> dict:
     if not results:
         return {"success": False, "error": "Bing returned no results"}
 
+    # Capture result snippets (shown under each title) for context
+    caps = [
+        _html.unescape(re.sub(r"<[^>]+>", "", c)).strip()
+        for c in re.findall(
+            r'<div class="b_caption".*?<p[^>]*>(.*?)</p>', page, re.S)
+    ]
+
     lines = []
     for i, r in enumerate(results[:5]):
         lines.append(f"{i + 1}. {r['title']} — {r['url']}")
+        if i < len(caps) and caps[i]:
+            lines.append(f"   {caps[i]}")
     return {
         "success": True,
         "query": query,
@@ -677,11 +686,67 @@ class SkillRegistry:
             return result
 
         self.register(SkillDefinition(
-            "web_search", "Search the web (DuckDuckGo) and return result titles, URLs and snippets",
+            "web_search",
+            "Search the web (DuckDuckGo, falls back to Bing) and return "
+            "result titles, URLs and snippets. If one query gives nothing "
+            "useful, try again with different keywords (add site:, wiki, "
+            "chapter number, or the site name).",
             {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search query"},
             }, "required": ["query"]},
             web_search, "web",
+        ))
+
+        async def web_fetch(params: dict) -> dict:
+            """Fetch a URL. If the site blocks automated access, fall back
+            to searching for that page's content instead."""
+            url = str(params.get("url", "")).strip()
+            if not url:
+                return {"success": False, "error": "No URL provided"}
+            # 1) Direct fetch (browser or HTTP fallback)
+            try:
+                from backend.browser.browser_engine import browser
+                nav = await browser.navigate(url)
+                if nav.get("success"):
+                    ex = await browser.extract()
+                    text = (ex or {}).get("text", "") if isinstance(ex, dict) else ""
+                    if text:
+                        return {"success": True, "url": url,
+                                "title": nav.get("title", ""),
+                                "via": "direct", "text": text[:6000]}
+            except Exception as e:
+                log.debug("web_fetch direct fetch failed: %s", e)
+            # 2) Search fallback: find the page's content via search results
+            try:
+                from urllib.parse import urlparse, unquote
+                p = urlparse(url)
+                domain = (p.netloc or "").replace("www.", "")
+                slug = unquote(p.path).strip("/").split("/")[-1]
+                slug = slug.replace("-", " ").replace("_", " ")
+                query = f"{domain} {slug}".strip()
+                res = await _search_bing(query)
+                if not res.get("success"):
+                    res = await _search_bing(f"{domain} {slug} latest")
+                if res.get("success"):
+                    return {"success": True, "url": url, "via": "search-fallback",
+                            "snippet": res.get("snippet"),
+                            "results": res.get("results"),
+                            "note": ("Direct fetch was blocked; these are search "
+                                     "results about the page.")}
+            except Exception as e:
+                log.debug("web_fetch search fallback failed: %s", e)
+            return {"success": False,
+                    "error": "Direct fetch blocked and search fallback failed"}
+
+        self.register(SkillDefinition(
+            "web_fetch",
+            "Fetch a web page's text content. If the site blocks automated "
+            "access, it automatically falls back to search results about "
+            "the page (e.g. from a wiki or aggregator).",
+            {"type": "object", "properties": {
+                "url": {"type": "string", "description": "URL to fetch"},
+            }, "required": ["url"]},
+            web_fetch, "web",
         ))
 
     # ── Meta: Self-extending skills ──────────────────────────────────────

@@ -82,9 +82,18 @@ class PlaywrightBrowser:
                 "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) "
                                "Chrome/125.0.0.0 Safari/537.36"),
+                "Accept": ("text/html,application/xhtml+xml,"
+                           "application/xml;q=0.9,image/avif,image/webp,"
+                           "*/*;q=0.8"),
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.google.com/",
+                "Cache-Control": "no-cache",
             })
             with urllib.request.urlopen(req, timeout=20) as resp:
-                return resp.read().decode("utf-8", errors="ignore")
+                body = resp.read()
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                return body.decode("utf-8", errors="ignore")
 
         loop = asyncio.get_running_loop()
         page = await loop.run_in_executor(None, _fetch)
@@ -106,18 +115,27 @@ class PlaywrightBrowser:
         return {"success": True, "url": url, "title": title, "engine": "http"}
 
     async def navigate(self, url: str) -> dict:
-        """Navigate to a URL. Returns page info."""
+        """Navigate to a URL. Returns page info.
+
+        Falls back from Playwright → plain HTTP fetch, so navigation works
+        even without a browser installed. Bot-guarded sites that refuse
+        automated access come back with a hint to use web_fetch/web_search.
+        """
         if not url:
             return {"success": False, "error": "No URL provided"}
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+
         if not await self._ensure_browser():
             # Playwright unavailable — fall back to plain HTTP fetch
             log.info("Playwright unavailable — using lightweight HTTP fetch")
             try:
                 return await self._fetch_http(url)
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                hint = ("Automated access may be blocked. Try the web_fetch "
+                        "or web_search tool instead.")
+                return {"success": False, "error": f"{e} — {hint}"}
+
         try:
             await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             self._state.url = self._page.url
@@ -139,7 +157,9 @@ class PlaywrightBrowser:
             try:
                 return await self._fetch_http(url)
             except Exception as e2:
-                return {"success": False, "error": str(e2)}
+                hint = ("Automated access may be blocked. Try the web_fetch "
+                        "or web_search tool instead.")
+                return {"success": False, "error": f"{e2} — {hint}"}
 
     async def go_back(self) -> dict:
         """Go back in browser history."""
