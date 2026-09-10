@@ -16,9 +16,15 @@ import sqlite3
 import time
 from pathlib import Path
 
+import numpy as np
+
 log = logging.getLogger("addled.knowledge_graph")
 
 DB_PATH = Path(__file__).parent / "triples.db"
+
+
+def _triple_text(sub: str, rel: str, obj: str) -> str:
+    return f"{sub} {rel} {obj}"
 
 
 class KnowledgeGraph:
@@ -40,13 +46,36 @@ class KnowledgeGraph:
                 CREATE INDEX IF NOT EXISTS idx_triples_ts ON triples(ts);
             """)
             self._conn.commit()
+            self._ensure_embedding_column()
         except Exception as e:
             log.warning("Knowledge graph unavailable: %s", e)
             self._conn = None
 
+    def _ensure_embedding_column(self):
+        """Lazily add the embedding column (older DBs lack it)."""
+        try:
+            cols = [r[1] for r in self._conn.execute(
+                "PRAGMA table_info(triples)").fetchall()]
+            if "embedding" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE triples ADD COLUMN embedding BLOB")
+                self._conn.commit()
+        except Exception as e:
+            log.debug("embedding column migration failed: %s", e)
+
     @property
     def available(self) -> bool:
         return self._conn is not None
+
+    @staticmethod
+    def _embed(text: str) -> bytes | None:
+        """384-dim vector for a triple (hash fallback when model missing)."""
+        try:
+            from backend.memory.embedding import embed_text
+            return embed_text(text).astype(np.float32).tobytes()
+        except Exception as e:
+            log.debug("triple embed failed: %s", e)
+            return None
 
     def add_triples(self, triples: list[dict], source: str = "agent") -> int:
         """Add [{subject, relation, object}] rows. Returns count added."""
@@ -66,10 +95,11 @@ class KnowledgeGraph:
                     "AND object = ? LIMIT 1", (sub, rel, obj)).fetchone()
                 if exists:
                     continue
+                blob = self._embed(_triple_text(sub, rel, obj))
                 self._conn.execute(
-                    "INSERT INTO triples (subject, relation, object, ts, source) "
-                    "VALUES (?,?,?,?,?)",
-                    (sub, rel, obj, time.time(), source))
+                    "INSERT INTO triples (subject, relation, object, ts, "
+                    "source, embedding) VALUES (?,?,?,?,?,?)",
+                    (sub, rel, obj, time.time(), source, blob))
                 added += 1
             self._conn.commit()
         except Exception as e:
@@ -79,7 +109,8 @@ class KnowledgeGraph:
     def lookup(self, subject: str | None = None, relation: str | None = None,
                since: float | None = None, until: float | None = None,
                limit: int = 20) -> list[dict]:
-        """Time-bounded graph lookup. Returns [{subject, relation, object, ts}]."""
+        """Time-bounded graph lookup.
+        Returns [{id, subject, relation, object, ts}] newest first."""
         if not self.available:
             return []
         conds, args = [], []
@@ -98,13 +129,83 @@ class KnowledgeGraph:
         where = ("WHERE " + " AND ".join(conds)) if conds else ""
         try:
             rows = self._conn.execute(
-                "SELECT subject, relation, object, ts FROM triples " + where +
-                " ORDER BY ts DESC LIMIT ?", (*args, limit)).fetchall()
-            return [{"subject": r[0], "relation": r[1], "object": r[2],
-                     "ts": r[3]} for r in rows]
+                "SELECT id, subject, relation, object, ts FROM triples " +
+                where + " ORDER BY ts DESC LIMIT ?", (*args, limit)).fetchall()
+            return [{"id": r[0], "subject": r[1], "relation": r[2],
+                     "object": r[3], "ts": r[4]} for r in rows]
         except Exception as e:
             log.debug("lookup failed: %s", e)
             return []
+
+    def semantic_search(self, query: str, top_k: int = 8,
+                        since: float | None = None,
+                        until: float | None = None) -> list[dict]:
+        """Cosine-similarity search over embedded triple texts.
+        Falls back to lexical lookup when no embeddings exist yet."""
+        if not self.available:
+            return []
+        from backend.memory.embedding import embed_text
+        try:
+            qvec = embed_text(query)
+            qnorm = float(np.linalg.norm(qvec))
+            if qnorm == 0:
+                return self.lookup(limit=top_k, since=since, until=until)
+            conds, args = [], []
+            if since is not None:
+                conds.append("ts >= ?")
+                args.append(float(since))
+            if until is not None:
+                conds.append("ts <= ?")
+                args.append(float(until))
+            where = ("WHERE " + " AND ".join(conds)) if conds else ""
+            rows = self._conn.execute(
+                "SELECT id, subject, relation, object, ts, embedding "
+                "FROM triples " + where +
+                " ORDER BY ts DESC LIMIT 1000", tuple(args)).fetchall()
+        except Exception as e:
+            log.debug("semantic_search failed (%s) — lexical fallback", e)
+            return self.lookup(limit=top_k, since=since, until=until)
+
+        scored: list[tuple[float, dict]] = []
+        for rid, sub, rel, obj, ts, blob in rows:
+            if not blob:
+                continue
+            try:
+                vec = np.frombuffer(blob, dtype=np.float32)
+                vn = float(np.linalg.norm(vec))
+                if vn == 0:
+                    continue
+                sim = float(np.dot(qvec, vec) / (qnorm * vn))
+                scored.append((sim, {"id": rid, "subject": sub,
+                                   "relation": rel, "object": obj, "ts": ts,
+                                   "similarity": sim}))
+            except Exception:
+                continue
+        scored.sort(key=lambda x: -x[0])
+        top = [t for _, t in scored[:top_k]]
+        if top:
+            return top
+        return self.lookup(limit=top_k, since=since, until=until)
+
+    def delete(self, triple_id: int) -> bool:
+        if not self.available:
+            return False
+        try:
+            cur = self._conn.execute("DELETE FROM triples WHERE id = ?",
+                                     (int(triple_id),))
+            self._conn.commit()
+            return cur.rowcount > 0
+        except Exception:
+            return False
+
+    def count(self) -> int:
+        if not self.available:
+            return 0
+        try:
+            return int(self._conn.execute(
+                "SELECT COUNT(*) FROM triples").fetchone()[0])
+        except Exception:
+            return 0
 
     def list_recent(self, limit: int = 50) -> list[dict]:
         return self.lookup(limit=limit)

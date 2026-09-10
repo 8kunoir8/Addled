@@ -29,6 +29,7 @@ export default function MemoryPage() {
   const [memories, setMemories] = useState<MemoryEntry[]>([]);
   const [facts, setFacts] = useState<Fact[]>([]);
   const [newFact, setNewFact] = useState('');
+  const [triples, setTriples] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -42,6 +43,10 @@ export default function MemoryPage() {
       try {
         const f = await send('memory.getFacts', {});
         setFacts(f?.facts || []);
+      } catch { /* older backend */ }
+      try {
+        const t = await send('memory.listTriples', {});
+        setTriples(t?.triples || []);
       } catch { /* older backend */ }
       setError('');
     } catch (e: any) {
@@ -86,6 +91,16 @@ export default function MemoryPage() {
       if (r?.success) {
         const f = await send('memory.getFacts', {});
         setFacts(f?.facts || []);
+      }
+    } catch { /* ignore */ }
+  };
+
+  const deleteTriple = async (id: number) => {
+    try {
+      const r = await send('memory.deleteTriple', { id });
+      if (r?.success) {
+        const t = await send('memory.listTriples', {});
+        setTriples(t?.triples || []);
       }
     } catch { /* ignore */ }
   };
@@ -194,6 +209,35 @@ export default function MemoryPage() {
                   onClick={() => deleteFact(f.id)}
                   className="text-xs text-[#8b949e] hover:text-[#f85149] px-1"
                   title="Delete fact"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Knowledge graph triples */}
+        <section>
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-[#8b949e] mb-2">
+            Knowledge graph ({triples.length})
+          </h2>
+          {triples.length === 0 && !loading && (
+            <p className="text-sm text-[#8b949e]">No fact triples yet — enable Knowledge graph extraction in Settings → Memory (uses provider credits).</p>
+          )}
+          <div className="space-y-2">
+            {triples.map((t) => (
+              <div key={t.id} className="rounded-lg border border-[#30363d] bg-[#161b22] p-3 flex items-start gap-3">
+                <span className="text-[10px] font-semibold uppercase mt-0.5 px-1.5 py-0.5 rounded bg-[#1f2937] text-[#58a6ff]">triple</span>
+                <p className="flex-1 text-sm text-[#e8eaed] break-words min-w-0">
+                  <span className="text-[#f0883e]">{t.subject}</span>
+                  <span className="text-[#8b949e]"> {t.relation} </span>
+                  <span className="text-[#58a6ff]">{t.object}</span>
+                </p>
+                <button
+                  onClick={() => deleteTriple(t.id)}
+                  className="text-xs text-[#8b949e] hover:text-[#f85149] px-1"
+                  title="Delete triple"
                 >
                   ✕
                 </button>

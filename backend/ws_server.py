@@ -338,7 +338,7 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         if any(k in message.lower() for k in rel_kw):
             try:
                 from backend.memory.knowledge_graph import kg
-                triples = kg.lookup(limit=10)
+                triples = kg.semantic_search(message, top_k=8)
                 if triples:
                     lines = "\n".join(
                         f"- {t['subject']} {t['relation']} {t['object']}"
@@ -694,6 +694,19 @@ def _register_default_handlers():
         from backend.memory.facts import delete_fact
         try:
             ok = delete_fact(int(params.get("id")))
+        except (TypeError, ValueError):
+            return {"success": False, "error": "id must be a number"}
+        return {"success": ok}
+
+    async def memory_list_triples(params: dict, ws) -> dict:
+        from backend.memory.knowledge_graph import kg
+        return {"triples": kg.list_recent(int(params.get("limit", 50))),
+                "count": kg.count()}
+
+    async def memory_delete_triple(params: dict, ws) -> dict:
+        from backend.memory.knowledge_graph import kg
+        try:
+            ok = kg.delete(int(params.get("id")))
         except (TypeError, ValueError):
             return {"success": False, "error": "id must be a number"}
         return {"success": ok}
@@ -1207,6 +1220,8 @@ def _register_default_handlers():
     _server.register("memory.getFacts", memory_get_facts)
     _server.register("memory.setFact", memory_set_fact)
     _server.register("memory.deleteFact", memory_delete_fact)
+    _server.register("memory.listTriples", memory_list_triples)
+    _server.register("memory.deleteTriple", memory_delete_triple)
 
     # Sprite skins
     _server.register("character.skinsList", character_skins_list)
