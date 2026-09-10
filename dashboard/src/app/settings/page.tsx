@@ -66,7 +66,7 @@ export default function SettingsPage() {
         {activeSection==='safety'&&<SafetySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='notifications'&&<NotificationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
-        {activeSection==='memory'&&<MemorySection/>}
+        {activeSection==='memory'&&<MemorySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='integrations'&&<IntegrationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='appearance'&&<AppearanceSection/>}
         {activeSection==='about'&&<AboutSection/>}
@@ -287,13 +287,14 @@ function ObservationSection({ settings, update, saving, status }: any) {
   </div>;
 }
 
-function MemorySection() {
-  const [msg,setMsg]=useState('');
+function MemorySection({ settings, update, saving, status }: any) {
+  const m=settings?.memory||{};
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('memory',skey,!m[skey])} className={`w-10 h-5 rounded-full transition-colors ${m[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${m[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   return <div className="space-y-1">
-    <SettingRow label="Chat History"><button onClick={()=>setMsg('History would be cleared (Phase 5)')} className="px-3 py-1.5 text-sm bg-[#21262d] hover:bg-[#30363d] text-[#e8eaed] rounded">Clear History</button></SettingRow>
+    <Toggle label="Semantic recall" desc="Local MiniLM embeddings for meaning-based memory search (falls back to hashed keywords when the model is missing)" skey="semantic_embeddings"/>
+    <Toggle label="Hybrid search" desc="Fuse semantic + exact-keyword matching for stronger recall" skey="hybrid_search"/>
+    <Toggle label="Auto memory notes" desc="Let the agent occasionally write durable facts about you in the background (uses provider credits)" skey="auto_facts"/>
     <SettingRow label="Vector Store"><span className="text-xs text-[#8b949e]">SQLite + numpy (384-dim)</span></SettingRow>
-    <SettingRow label="Export Data"><button onClick={()=>setMsg('Export coming in Phase 5')} className="px-3 py-1.5 text-sm bg-[#21262d] hover:bg-[#30363d] text-[#e8eaed] rounded">Export All</button></SettingRow>
-    {msg&&<p className="text-xs text-[#d29922] mt-2">{msg}</p>}
   </div>;
 }
 

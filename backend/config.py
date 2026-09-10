@@ -125,6 +125,16 @@ DEFAULT_SETTINGS: dict = {
         ),
         "context_messages": 20,
     },
+    "memory": {
+        "semantic_embeddings": True,
+        "hybrid_search": True,
+        "recall_top_k": 3,
+        "min_similarity": 0.05,
+        "compaction_threshold": 40,
+        "auto_facts": False,
+        "facts_max": 200,
+        "maintenance_interval_min": 30,
+    },
     "voice": {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",

@@ -99,7 +99,7 @@ def main() -> int:
 
     # ── 5. Verify critical imports ───────────────────────────────────────
     check = (
-        "import sys, websockets, httpx, mss, numpy, PIL, pyautogui, pyperclip, edge_tts; "
+        "import sys, websockets, httpx, mss, numpy, PIL, pyautogui, pyperclip, edge_tts, onnxruntime; "
         "import PyQt6.QtCore; "
         "import win32api, win32event; "
         "assert 'site-packages' in PyQt6.__file__ and 'python-bundle' in PyQt6.__file__, PyQt6.__file__; "

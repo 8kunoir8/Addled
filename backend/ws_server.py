@@ -302,8 +302,13 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
 
         # Long-term recall: inject relevant past conversation turns
-        from backend.memory.recall import build_memory_context
-        memory_ctx = build_memory_context(message)
+        # (semantic + hybrid when enabled; legacy hash path otherwise)
+        from backend.memory.recall import (build_memory_context,
+                                           build_memory_context_hybrid)
+        if config.get("memory", "semantic_embeddings", default=True):
+            memory_ctx = await build_memory_context_hybrid(message)
+        else:
+            memory_ctx = build_memory_context(message)
         user_messages = [
             {"role": m["role"], "content": m["content"]} for m in context
         ]
@@ -403,9 +408,9 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
             chat_history.add_message("assistant", response_text,
                 tokens={"in": result.get("tokens", 0), "out": 0})
             # Remember for the long term
-            from backend.memory.recall import remember
-            remember("user", message)
-            remember("assistant", response_text)
+            from backend.memory.recall import remember_async
+            await remember_async("user", message)
+            await remember_async("assistant", response_text)
             return {
                 "response": response_text,
                 "tokens": result.get("tokens", 0),

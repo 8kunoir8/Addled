@@ -73,8 +73,11 @@ class VectorStore:
             return None
 
     def search(self, query: np.ndarray, category: str | None = None,
-               top_k: int = 5, min_similarity: float = 0.0) -> list[dict]:
-        """Find top-k most similar entries. Returns [{id, similarity, category, metadata, timestamp}, ...]"""
+               top_k: int = 5, min_similarity: float = 0.0,
+               since: float | None = None,
+               until: float | None = None) -> list[dict]:
+        """Find top-k most similar entries, optionally time-bounded.
+        Returns [{id, similarity, category, metadata, timestamp}, ...]"""
         if not self.available:
             return []
         try:
@@ -85,11 +88,21 @@ class VectorStore:
             if query_norm == 0:
                 return []
 
+            conds, args = [], []
+            if category:
+                conds.append("category = ?")
+                args.append(category)
+            if since is not None:
+                conds.append("timestamp >= ?")
+                args.append(float(since))
+            if until is not None:
+                conds.append("timestamp <= ?")
+                args.append(float(until))
+            where = ("WHERE " + " AND ".join(conds)) if conds else ""
             rows = self._conn.execute(
                 "SELECT id, embedding, category, metadata, timestamp FROM vectors "
-                + ("WHERE category = ? " if category else "")
-                + "ORDER BY timestamp DESC LIMIT 5000",
-                (category,) if category else (),
+                + where + " ORDER BY timestamp DESC LIMIT 5000",
+                tuple(args),
             ).fetchall()
 
             results = []
@@ -165,6 +178,24 @@ class VectorStore:
             return cur.rowcount
         except Exception:
             return 0
+
+    def find_near(self, embedding: np.ndarray, category: str | None = None,
+                  min_sim: float = 0.95) -> dict | None:
+        """Closest existing row within min_sim (dedup helper), or None."""
+        hits = self.search(embedding, category=category, top_k=1,
+                           min_similarity=min_sim)
+        return hits[0] if hits else None
+
+    def stamp(self) -> tuple:
+        """(max_row_id, row_count) — cheap change-detection for caches."""
+        if not self.available:
+            return (-1, -1)
+        try:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(id),0), COUNT(*) FROM vectors").fetchone()
+            return (int(row[0]), int(row[1]))
+        except Exception:
+            return (-1, -1)
 
 
 # Singleton
