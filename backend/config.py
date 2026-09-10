@@ -164,6 +164,14 @@ DEFAULT_SETTINGS: dict = {
         "max_type_chars": 500,
         "allow_extended_hotkeys": False,
     },
+    "scheduling": {
+        "enabled": True,
+        "poll_s": 5,
+        "max_scheduled": 20,
+        "reminder_lead_min": 10,
+        "missed_policy": "catchup_once",
+        "llm_actions": ["notify", "chat"],
+    },
     "voice": {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",

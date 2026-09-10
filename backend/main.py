@@ -157,6 +157,42 @@ def main():
     from backend.ws_server import set_engine
     set_engine(engine)
 
+    # ---- scheduler (tasks, calendar reminders, housekeeping) ------------------
+    try:
+        from backend.tasks.scheduler import scheduler
+        scheduler.set_engine_emit(engine.sig_insight.emit)
+
+        def _calendar_reminders():
+            from backend.integrations.calendar_integration import calendar
+            for ev in calendar.due_reminders():
+                try:
+                    import asyncio
+                    from backend.tasks.actions import ACTION_REGISTRY
+                    from backend.tasks.store import ScheduledTask
+                    notify = ACTION_REGISTRY["notify"]
+                    task = ScheduledTask(
+                        id=f"cal_{ev.get('id', '')}",
+                        title=ev.get("title", "Reminder"),
+                        kind="reminder",
+                        payload=f"{ev.get('title', 'Reminder')} at "
+                                f"{ev.get('start', '')}",
+                        time=ev.get("start", "09:00")[-5:] or "09:00",
+                        source="calendar",
+                    )
+                    asyncio.create_task(notify(task))
+                    calendar.mark_reminded(ev.get("id", ""))
+                except Exception as e:
+                    log.warning("calendar reminder failed: %s", e)
+
+        scheduler.register_housekeeping("calendar_reminders",
+                                        _calendar_reminders, interval_s=30)
+        from backend.memory.maintenance import run_maintenance
+        scheduler.register_housekeeping("memory_maintenance",
+                                        run_maintenance, interval_s=60)
+        log.info("Scheduler wired (calendar reminders + memory maintenance)")
+    except Exception as e:
+        log.warning("Scheduler wiring failed: %s", e)
+
     # ---- restore active sprite skin (codex-pet style) ------------------------
     try:
         from backend.character import sprite_skin
@@ -192,12 +228,42 @@ def main():
         result = await run_chat_pipeline(text)
         reply = result.get("response", "")
         get_server().broadcast_nowait("voice.reply", {"text": reply})
-        if reply and not reply.startswith("[Not connected:"):
+
+        # Heuristic scheduling fallback: provider down (e.g. 402) but the
+        # command reads like "remind me to X at 3pm" → schedule it anyway.
+        scheduled_reply = ""
+        if reply.startswith("[Not connected:") or reply.startswith("[Provider"):
+            try:
+                from backend.tasks.parse import parse_natural_task
+                from backend.tasks.recurrence import next_run
+                from backend.tasks.store import ScheduledTask, task_store
+                parsed = parse_natural_task(text)
+                if parsed:
+                    task = ScheduledTask(
+                        id="", title=parsed["title"],
+                        action="notify", payload=parsed["payload"],
+                        time=parsed["time"], date=parsed["date"],
+                        recurrence=parsed["recurrence"], source="voice",
+                    )
+                    task.next_run = next_run(task)
+                    added, err = task_store.add(task)
+                    if added is not None:
+                        scheduled_reply = (
+                            f"Scheduled: remind you to {added.payload} "
+                            f"at {added.time}"
+                            + ("" if added.recurrence["type"] == "none"
+                               else " (recurring)"))
+            except Exception as e:
+                log.warning("voice task parse failed: %s", e)
+
+        spoken = scheduled_reply or reply
+        if spoken and not spoken.startswith("[Not connected:") \
+                and not spoken.startswith("[Provider"):
             try:
                 engine.sig_agent_state.emit("speaking")
                 engine._voice_busy = True
                 from backend.voice.tts import speak
-                await speak(reply)
+                await speak(spoken)
             except Exception as e:
                 log.warning("Voice reply TTS failed: %s", e)
             finally:

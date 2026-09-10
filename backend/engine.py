@@ -58,6 +58,7 @@ class Engine(QObject):
         self._last_insight_text = ""  # dedup: don't repeat the same insight
         self._last_insight_time = 0.0
         self._last_maintenance = 0.0  # last memory-maintenance dispatch
+        self._last_sched = 0.0        # last scheduler poll
         self._chat_busy = False  # a chat is in flight — don't force 'idle'
         self._voice_busy = False  # TTS is speaking — don't force 'idle'
 
@@ -215,14 +216,31 @@ class Engine(QObject):
             self.sig_agent_state.emit("idle")
 
         # 5. Memory maintenance (re-embed, compaction, facts, triples,
-        #    dedup) — fire-and-forget; each job throttles itself internally
+        #    dedup) — fire-and-forget; each job throttles itself internally.
+        #    When the scheduler is enabled it owns this job (unified poll).
         try:
-            if time.time() - self._last_maintenance >= 60.0:
-                self._last_maintenance = time.time()
-                from backend.memory.maintenance import run_maintenance
-                asyncio.ensure_future(run_maintenance())
+            from backend.tasks.scheduler import scheduler
+            sched_owns = scheduler.enabled()
+        except Exception:
+            sched_owns = False
+        if not sched_owns:
+            try:
+                if time.time() - self._last_maintenance >= 60.0:
+                    self._last_maintenance = time.time()
+                    from backend.memory.maintenance import run_maintenance
+                    asyncio.ensure_future(run_maintenance())
+            except Exception as e:
+                log.debug("maintenance dispatch failed: %s", e)
+
+        # 6. Scheduler — user tasks, calendar reminders, housekeeping
+        try:
+            poll_s = config.get("scheduling", "poll_s", default=5) or 5
+            if time.time() - self._last_sched >= poll_s:
+                self._last_sched = time.time()
+                from backend.tasks.scheduler import scheduler
+                asyncio.ensure_future(scheduler.poll())
         except Exception as e:
-            log.debug("maintenance dispatch failed: %s", e)
+            log.debug("scheduler dispatch failed: %s", e)
 
     def _push_insight(self, obs):
         """Deliver a proactive insight to dashboards/bots, and optionally

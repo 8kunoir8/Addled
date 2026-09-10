@@ -17,6 +17,77 @@ DATA_DIR = Path(__file__).parent.parent / "memory" / "integrations"
 CALENDAR_FILE = DATA_DIR / "calendar_events.json"
 
 
+def _normalize_dt(text: str) -> str:
+    """Normalize 'tomorrow 3pm' / 'friday 4pm' / ISO timestamps to an ISO
+    datetime string.
+
+    dateutil in this bundle doesn't extract bare '3 pm' times, so the time
+    component is parsed explicitly and dateutil only resolves explicit
+    calendar dates. Relative day words / weekdays shift the base date.
+
+    Falls back to the raw string when parsing fails.
+    """
+    if not text:
+        return ""
+    try:
+        import re as _re
+        from datetime import time as _time
+        from dateutil import parser as date_parser
+
+        now = datetime.now()
+        base_date = now.date()
+        lower = text.lower()
+
+        # relative day words / weekdays shift the base date
+        if "day after tomorrow" in lower:
+            base_date = now.date() + timedelta(days=2)
+        elif "tomorrow" in lower:
+            base_date = now.date() + timedelta(days=1)
+        elif "yesterday" in lower:
+            base_date = now.date() - timedelta(days=1)
+        for i, name in enumerate(["monday", "tuesday", "wednesday",
+                                  "thursday", "friday", "saturday",
+                                  "sunday"]):
+            if name in lower:
+                delta = (i - now.weekday()) % 7 or 7
+                base_date = now.date() + timedelta(days=delta)
+                break
+
+        # explicit calendar date in the text overrides the shifted base
+        try:
+            probe = date_parser.parse(
+                text, fuzzy=True,
+                default=datetime.combine(base_date, _time(9, 0)))
+            base_date = probe.date()
+        except Exception:
+            pass
+
+        # time component: "3pm", "3:30 pm", "15:00", noon, midnight
+        h, m = 9, 0
+        match = _re.search(r"(?i)\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text)
+        if match:
+            h = int(match.group(1)) % 24
+            m = int(match.group(2) or 0)
+            mer = (match.group(3) or "").lower()
+            if mer == "pm" and h < 12:
+                h += 12
+            elif mer == "am" and h == 12:
+                h = 0
+        else:
+            match = _re.search(r"\b(\d{1,2}):(\d{2})\b", text)
+            if match:
+                h, m = int(match.group(1)) % 24, int(match.group(2))
+            elif "noon" in lower:
+                h, m = 12, 0
+            elif "midnight" in lower:
+                h, m = 0, 0
+
+        return datetime.combine(base_date, _time(h, m)).strftime(
+            "%Y-%m-%d %H:%M")
+    except Exception:
+        return text
+
+
 class CalendarIntegration:
     """Local calendar with Google sync capability."""
 
@@ -38,22 +109,70 @@ class CalendarIntegration:
             json.dump(self._events, f, indent=2, ensure_ascii=False)
 
     def add_event(self, title: str, start: str, end: str | None = None,
-                  description: str = "", location: str = "", source: str = "local") -> dict:
-        """Add a calendar event. start/end can be ISO timestamps or relative like 'tomorrow 3pm'."""
+                  description: str = "", location: str = "",
+                  source: str = "local", reminder_minutes: int | None = None) -> dict:
+        """Add a calendar event. start/end can be ISO timestamps or relative
+        like 'tomorrow 3pm' (normalized on add so range queries work)."""
         import uuid
+        if reminder_minutes is None:
+            try:
+                from backend.config import config
+                reminder_minutes = int(config.get(
+                    "scheduling", "reminder_lead_min", default=10))
+            except Exception:
+                reminder_minutes = 10
         event = {
             "id": f"evt_{int(time.time())}_{uuid.uuid4().hex[:6]}",
             "title": title,
-            "start": start,
-            "end": end or "",
+            "start": _normalize_dt(start),
+            "raw_start": start,
+            "end": _normalize_dt(end) if end else "",
             "description": description,
             "location": location,
             "source": source,
+            "reminder_minutes": reminder_minutes,
+            "reminded": False,
             "created_at": time.time(),
         }
         self._events.append(event)
         self._save()
         return event
+
+    def update_event(self, event_id: str, fields: dict) -> dict | None:
+        """Partial update (UI edits). start/end re-normalized when present."""
+        for i, ev in enumerate(self._events):
+            if ev.get("id") == event_id:
+                for key, value in fields.items():
+                    if key in ("start", "end"):
+                        ev[key] = _normalize_dt(value) if value else ""
+                    else:
+                        ev[key] = value
+                self._save()
+                return ev
+        return None
+
+    def due_reminders(self) -> list[dict]:
+        """Events starting within their reminder lead window, not yet fired."""
+        now = datetime.now()
+        due = []
+        for ev in self._events:
+            if ev.get("reminded") or not ev.get("start"):
+                continue
+            try:
+                start = datetime.strptime(ev["start"][:16], "%Y-%m-%d %H:%M")
+            except (ValueError, KeyError):
+                continue
+            lead = int(ev.get("reminder_minutes", 10))
+            if now <= start < now + timedelta(minutes=lead):
+                due.append(ev)
+        return due
+
+    def mark_reminded(self, event_id: str) -> None:
+        for ev in self._events:
+            if ev.get("id") == event_id:
+                ev["reminded"] = True
+                self._save()
+                return
 
     def get_events(self, start: str | None = None, end: str | None = None) -> list[dict]:
         """Get events, optionally filtered by date range (YYYY-MM-DD)."""

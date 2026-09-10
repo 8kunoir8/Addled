@@ -1017,6 +1017,112 @@ def _register_default_handlers():
         ok = calendar.delete_event(params.get("eventId", ""))
         return {"success": ok}
 
+    async def calendar_update(params: dict, ws) -> dict:
+        from backend.integrations.calendar_integration import calendar
+        fields = {k: v for k, v in params.get("fields", {}).items()
+                  if k in ("title", "start", "end", "description",
+                           "location", "reminder_minutes")}
+        if not fields:
+            return {"error": "no editable fields"}
+        event = calendar.update_event(params.get("eventId", ""), fields)
+        return {"event": event} if event else {"error": "not found"}
+
+    # ---- Tasks scheduler -------------------------------------------------------
+
+    async def tasks_schedule(params: dict, ws) -> dict:
+        from backend.tasks.recurrence import next_run
+        from backend.tasks.store import ScheduledTask, task_store
+        title = (params.get("title") or "").strip()
+        if not title:
+            return {"error": "title is required"}
+        action = params.get("action", "notify")
+        from backend.config import config
+        allowed = config.get("scheduling", "llm_actions",
+                             default=["notify", "chat"])
+        if action not in ("notify", "chat") and action not in allowed:
+            return {"error": f"action '{action}' not schedulable"}
+        recurrence = params.get("recurrence") or {"type": "none"}
+        recurrence.setdefault("weekdays", [])
+        task = ScheduledTask(
+            id="",
+            title=title,
+            kind=params.get("kind", "task"),
+            action=action,
+            payload=params.get("payload", ""),
+            time=params.get("time", "09:00"),
+            date=params.get("date", ""),
+            recurrence=recurrence,
+            source=params.get("source", "ui"),
+        )
+        task.next_run = next_run(task)
+        # one-shot with no date and a time already past → roll to tomorrow
+        if (task.recurrence or {}).get("type") == "none" and not task.date \
+                and task.next_run <= __import__("time").time():
+            from datetime import datetime, timedelta
+            task.date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            task.next_run = next_run(task)
+        added, err = task_store.add(task)
+        if added is None:
+            return {"error": err}
+        from backend.tasks.recurrence import humanize
+        return {"task": added.to_dict(), "rule": humanize(added)}
+
+    async def tasks_list(params: dict, ws) -> dict:
+        from backend.tasks.scheduler import scheduler
+        status = scheduler.status()
+        return {"tasks": status["tasks"], "housekeeping": status["housekeeping"],
+                "enabled": status["enabled"]}
+
+    async def tasks_update(params: dict, ws) -> dict:
+        from backend.tasks.recurrence import next_run
+        from backend.tasks.store import task_store
+        task = task_store.get(params.get("taskId", ""))
+        if task is None:
+            return {"error": "not found"}
+        fields = {k: v for k, v in params.get("fields", {}).items()
+                  if k in ("title", "time", "date", "payload", "action",
+                           "recurrence", "enabled")}
+        if not fields:
+            return {"error": "no editable fields"}
+        if "recurrence" in fields:
+            fields["recurrence"].setdefault("weekdays", [])
+        updated = task_store.update(task.id, fields)
+        if any(k in fields for k in ("time", "date", "recurrence")) \
+                and updated.enabled:
+            task_store.update(task.id, {"next_run": next_run(updated)})
+        return {"task": task_store.get(task.id).to_dict()}
+
+    async def tasks_pause(params: dict, ws) -> dict:
+        from backend.tasks.store import task_store
+        return {"task": task_store.update(params.get("taskId", ""),
+                                          {"enabled": False}).to_dict()}
+
+    async def tasks_resume(params: dict, ws) -> dict:
+        from backend.tasks.recurrence import next_run
+        from backend.tasks.store import task_store
+        task = task_store.update(params.get("taskId", ""), {"enabled": True})
+        if task is not None and task.next_run <= 0:
+            task_store.update(task.id, {"next_run": next_run(task)})
+        return {"task": task.to_dict()} if task else {"error": "not found"}
+
+    async def tasks_cancel(params: dict, ws) -> dict:
+        from backend.tasks.store import task_store
+        return {"success": task_store.delete(params.get("taskId", ""))}
+
+    async def tasks_month(params: dict, ws) -> dict:
+        from backend.tasks.recurrence import expand_month, humanize
+        from backend.tasks.store import task_store
+        year = int(params.get("year", 2026))
+        month = int(params.get("month", 1))
+        rows = []
+        for task in task_store.list_all(enabled=True):
+            for day in expand_month(task, year, month):
+                rows.append({"date": day, "task_id": task.id,
+                             "title": task.title, "action": task.action,
+                             "time": task.time, "kind": task.kind,
+                             "rule": humanize(task)})
+        return {"rows": rows}
+
     async def email_fetch(params: dict, ws) -> dict:
         from backend.integrations.email_integration import email_client
         unread = email_client.fetch_unread(limit=params.get("limit", 10))
@@ -1321,9 +1427,19 @@ def _register_default_handlers():
     _server.register("calendar.add", calendar_add)
     _server.register("calendar.list", calendar_list)
     _server.register("calendar.delete", calendar_delete)
+    _server.register("calendar.update", calendar_update)
     _server.register("email.fetch", email_fetch)
     _server.register("email.send", email_send)
     _server.register("email.search", email_search)
+
+    # Tasks scheduler
+    _server.register("tasks.schedule", tasks_schedule)
+    _server.register("tasks.list", tasks_list)
+    _server.register("tasks.update", tasks_update)
+    _server.register("tasks.pause", tasks_pause)
+    _server.register("tasks.resume", tasks_resume)
+    _server.register("tasks.cancel", tasks_cancel)
+    _server.register("tasks.month", tasks_month)
 
     # Browser (Playwright)
     _server.register("browser.navigate", browser_navigate)

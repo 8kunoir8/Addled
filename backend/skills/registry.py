@@ -390,8 +390,8 @@ class SkillRegistry:
             return await desktop_control.hotkey(str(params.get("combo", "")))
         self.register(SkillDefinition(
             "desktop_hotkey",
-            "Press a keyboard shortcut like ctrl+c (whitelisted combos only;
-            needs Desktop Control permission)",
+            "Press a keyboard shortcut like ctrl+c (whitelisted combos only; "
+            "needs Desktop Control permission)",
             {"type": "object", "properties": {
                 "combo": {"type": "string", "description": "e.g. ctrl+c"},
             }, "required": ["combo"]},
@@ -968,6 +968,120 @@ class SkillRegistry:
                          "description": "One short fact about the user"}},
              "required": ["fact"]},
             memory_set, "memory",
+        ))
+
+        # ── Scheduled tasks ────────────────────────────────────────────────
+
+        async def task_schedule(params: dict) -> dict:
+            """Schedule a task or reminder for later execution."""
+            from backend.tasks.recurrence import next_run
+            from backend.tasks.store import ScheduledTask, task_store
+            from backend.config import config
+
+            title = str(params.get("title", "")).strip()
+            if not title:
+                return {"success": False,
+                        "error": "title is required"}
+            action = str(params.get("action", "notify"))
+            allowed = config.get("scheduling", "llm_actions",
+                                 default=["notify", "chat"])
+            if action not in allowed or action not in ("notify", "chat"):
+                return {"success": False,
+                        "error": f"action '{action}' not schedulable"}
+            recurrence = params.get("recurrence") or {"type": "none"}
+            recurrence.setdefault("weekdays", [])
+            if recurrence.get("type") not in ("none", "daily", "weekly",
+                                              "monthly"):
+                recurrence = {"type": "none", "weekdays": []}
+            task = ScheduledTask(
+                id="", title=title,
+                kind=params.get("kind", "task"),
+                action=action,
+                payload=str(params.get("payload", title)),
+                time=params.get("time", "09:00"),
+                date=params.get("date", ""),
+                recurrence=recurrence,
+                source="llm",
+            )
+            if not task.date and recurrence["type"] == "none":
+                # no date given: assume today (or tomorrow if time passed)
+                from datetime import datetime, timedelta
+                now = datetime.now()
+                day = now.strftime("%Y-%m-%d")
+                if task.time <= now.strftime("%H:%M"):
+                    day = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+                task.date = day
+            task.next_run = next_run(task)
+            added, err = task_store.add(task)
+            if added is None:
+                return {"success": False, "error": err}
+            from backend.tasks.recurrence import humanize
+            return {"success": True, "task_id": added.id,
+                    "message": f"Scheduled '{added.title}' — "
+                               f"{humanize(added)}"}
+
+        self.register(SkillDefinition(
+            "task_schedule",
+            "Schedule a task or reminder to run later. Use when the user "
+            "says 'remind me to X at 3pm', 'every friday at 9am do Y', or "
+            "asks you to schedule something for the future. time is HH:MM; "
+            "date is optional YYYY-MM-DD; recurrence: none|daily|weekly|"
+            "monthly with weekdays 0-6 (0=Monday).",
+            {"type": "object", "properties": {
+                "title": {"type": "string",
+                          "description": "Short task/reminder title"},
+                "time": {"type": "string",
+                         "description": "HH:MM local time, default 09:00"},
+                "date": {"type": "string",
+                         "description": "YYYY-MM-DD for one-shot tasks"},
+                "action": {"type": "string",
+                           "description": "notify (reminder) or chat "
+                                          "(run a prompt later)"},
+                "payload": {"type": "string",
+                            "description": "Reminder text or chat prompt"},
+                "recurrence": {"type": "object",
+                               "description": "{type, weekdays}"},
+            }, "required": ["title"]},
+            task_schedule, "meta",
+        ))
+
+        async def task_list(params: dict) -> dict:
+            from backend.tasks.scheduler import scheduler
+            tasks = scheduler.status()["tasks"]
+            lines = [f"{t['title']} — {t['rule']}"
+                     + ("" if t["enabled"] else " (paused)")
+                     for t in tasks]
+            return {"success": True, "tasks": lines,
+                    "count": len(lines)}
+
+        self.register(SkillDefinition(
+            "task_list",
+            "List currently scheduled tasks and reminders.",
+            {"type": "object", "properties": {}},
+            task_list, "meta",
+        ))
+
+        async def task_cancel(params: dict) -> dict:
+            from backend.tasks.store import task_store
+            target = str(params.get("title", "")).strip().lower()
+            if not target:
+                return {"success": False, "error": "title is required"}
+            for t in task_store.list_all():
+                if t.title.strip().lower() == target:
+                    task_store.delete(t.id)
+                    return {"success": True,
+                            "message": f"Cancelled '{t.title}'"}
+            return {"success": False,
+                    "error": f"no scheduled task named '{target}'"}
+
+        self.register(SkillDefinition(
+            "task_cancel",
+            "Cancel a scheduled task by its exact title.",
+            {"type": "object", "properties": {
+                "title": {"type": "string",
+                          "description": "Exact task title to cancel"}},
+             "required": ["title"]},
+            task_cancel, "meta",
         ))
 
 
