@@ -148,6 +148,18 @@ DEFAULT_SETTINGS: dict = {
         "market_sim_threshold": 0.45,
         "allow_script_skills": False,
     },
+    "browser": {
+        "user_browser": False,
+        "cdp_port": 9222,
+        "readonly": True,
+    },
+    "desktop": {
+        "allow_input": False,
+        "require_session_approval": True,
+        "session_timeout_min": 15,
+        "max_type_chars": 500,
+        "allow_extended_hotkeys": False,
+    },
     "voice": {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",

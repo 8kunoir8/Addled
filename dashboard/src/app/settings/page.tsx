@@ -8,7 +8,7 @@ type SettingsData = Record<string, any>;
 const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
   notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',
-  observation: '👁', about: 'ℹ️',
+  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️',
 };
 
 export default function SettingsPage() {
@@ -39,7 +39,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['providers','character','voice','safety','notifications','observation','memory','tools','integrations','appearance','about'];
+  const sections = ['providers','character','voice','safety','notifications','observation','memory','tools','browser','desktop','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -68,6 +68,8 @@ export default function SettingsPage() {
         {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='memory'&&<MemorySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='tools'&&<ToolsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
+        {activeSection==='browser'&&<BrowserSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
+        {activeSection==='desktop'&&<DesktopSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='integrations'&&<IntegrationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='appearance'&&<AppearanceSection/>}
         {activeSection==='about'&&<AboutSection/>}
@@ -313,6 +315,40 @@ function ToolsSection({ settings, update, saving, status, send, connected }: any
       <span className={`text-xs ${rtk?.available ? 'text-[#3fb950]' : 'text-[#d29922]'}`}>
         {rtk ? (rtk.available ? '✓ bundled — compression active' : 'Not bundled — commands run uncompressed') : 'Checking…'}
       </span>
+    </SettingRow>
+  </div>;
+}
+
+function BrowserSection({ settings, update, saving, status }: any) {
+  const b=settings?.browser||{};
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('browser',skey,!b[skey])} className={`w-10 h-5 rounded-full transition-colors ${b[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${b[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  return <div className="space-y-1">
+    <Toggle label="Attach to my browser" desc="Use your running Chrome/Edge via its debug port instead of Addled's own browser. Requires launching the browser with --remote-debugging-port." skey="user_browser"/>
+    <Toggle label="Read-only" desc="Only read pages and take screenshots — block clicking, typing and navigation in your browser" skey="readonly"/>
+    <SettingRow label="Debug port"><input type="number" value={b.cdp_port||9222} onChange={e=>update('browser','cdp_port',parseInt(e.target.value)||9222)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-24"/></SettingRow>
+    <SettingRow label="How to enable" description="Close the browser, then launch it with the flag (e.g. chrome.exe --remote-debugging-port=9222), then revisit."><span className="text-xs text-[#8b949e]">See README</span></SettingRow>
+  </div>;
+}
+
+function DesktopSection({ settings, update, saving, status, send, connected }: any) {
+  const d=settings?.desktop||{};
+  const [state, setState] = useState<any>(null);
+  useEffect(() => {
+    if (connected) send('desktop.status', {}).then((r: any) => setState(r || null)).catch(() => {});
+  }, [connected, send]);
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('desktop',skey,!d[skey])} className={`w-10 h-5 rounded-full transition-colors ${d[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${d[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  return <div className="space-y-1">
+    <Toggle label="Desktop control" desc="Let the agent move the mouse, click, type and scroll on your desktop (OFF by default — the safest choice)" skey="allow_input"/>
+    <Toggle label="Ask before each session" desc="Require a dashboard approval once per session (expires after the timeout)" skey="require_session_approval"/>
+    <Toggle label="Extended hotkeys" desc="Also allow alt+tab, win+d, alt+f4 (riskier — keep off unless you need it)" skey="allow_extended_hotkeys"/>
+    <SettingRow label="Max typed characters"><input type="number" min={50} max={5000} value={d.max_type_chars||500} onChange={e=>update('desktop','max_type_chars',parseInt(e.target.value)||500)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-24"/></SettingRow>
+    <SettingRow label="Permission status">
+      <span className={`text-xs ${state?.granted ? 'text-[#3fb950]' : 'text-[#8b949e]'}`}>
+        {state?.granted ? '✓ granted this session' : 'not granted'}
+      </span>
+    </SettingRow>
+    <SettingRow label="Emergency stop">
+      <span className="text-xs text-[#8b949e]">Mouse to the top-left screen corner aborts input (pyautogui FAILSAFE) · Kill switch: Ctrl+Shift+Alt+K</span>
     </SettingRow>
   </div>;
 }

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -39,6 +40,8 @@ class PlaywrightBrowser:
         self._http_text = ""
         self._http_title = ""
         self._using_http = False
+        # CDP attach to the USER'S browser (opt-in, read-only by default)
+        self._cdp = None
 
     async def _ensure_browser(self) -> bool:
         """Lazy-init Playwright browser. Returns True if ready."""
@@ -68,6 +71,41 @@ class PlaywrightBrowser:
         except Exception as e:
             log.error("Browser launch failed: %s", e)
             return False
+
+    # ---- CDP (user's own browser) -------------------------------------------
+
+    async def _ensure_cdp(self) -> bool:
+        """Attach to the user's running Chrome/Edge when enabled."""
+        from backend.config import config
+        if not config.get("browser", "user_browser", default=False):
+            return False
+        if self._cdp is None:
+            from backend.browser.cdp_client import CDPClient
+            self._cdp = CDPClient(int(config.get("browser", "cdp_port",
+                                                  default=9222)))
+        if self._cdp.connected:
+            return True
+        return await self._cdp.connect()
+
+    @property
+    def mode(self) -> str:
+        if self._cdp is not None and self._cdp.connected:
+            return "cdp"
+        if self._page and not self._page.is_closed():
+            return "playwright"
+        if self._using_http:
+            return "http"
+        return "off"
+
+    def _cdp_guard(self, action: str) -> dict | None:
+        """Block mutating actions when the user-browser is read-only."""
+        from backend.config import config
+        if (config.get("browser", "readonly", default=True)
+                and action in ("click", "type", "navigate")):
+            return {"success": False,
+                    "error": "User-browser is in read-only mode "
+                             "(Settings → Browser)"}
+        return None
 
     async def _fetch_http(self, url: str) -> dict:
         """Fetch a page with stdlib urllib and reduce it to readable text.
@@ -125,6 +163,25 @@ class PlaywrightBrowser:
             return {"success": False, "error": "No URL provided"}
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+
+        # 1) User's own browser via CDP (opt-in)
+        if await self._ensure_cdp():
+            err = self._cdp_guard("navigate")
+            if err:
+                return err
+            try:
+                await self._cdp.navigate(url)
+                self._state.url = await self._cdp.url()
+                self._state.title = await self._cdp.title()
+                self._state.history.append(self._state.url)
+                self._state.history_index = len(self._state.history) - 1
+                shot = await self._cdp.screenshot_b64()
+                self._state.screenshot_b64 = shot
+                return {"success": True, "url": self._state.url,
+                        "title": self._state.title, "screenshot": shot,
+                        "engine": "cdp"}
+            except Exception as e:
+                return {"success": False, "error": f"CDP navigate failed: {e}"}
 
         if not await self._ensure_browser():
             # Playwright unavailable — fall back to plain HTTP fetch
@@ -194,6 +251,25 @@ class PlaywrightBrowser:
     async def click(self, selector: str | None = None, x: int | None = None,
                     y: int | None = None) -> dict:
         """Click on an element by CSS selector or coordinates."""
+        if await self._ensure_cdp():
+            err = self._cdp_guard("click")
+            if err:
+                return err
+            try:
+                if selector:
+                    await self._cdp.click_selector(selector)
+                elif x is not None and y is not None:
+                    await self._cdp.click_xy(int(x), int(y))
+                else:
+                    return {"success": False,
+                            "error": "Provide selector or x,y coordinates"}
+                await asyncio.sleep(0.5)
+                shot = await self._cdp.screenshot_b64()
+                self._state.screenshot_b64 = shot
+                return {"success": True, "url": await self._cdp.url(),
+                        "screenshot": shot, "engine": "cdp"}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
         if not self._page:
             return {"success": False, "error": "No page loaded"}
         try:
@@ -214,6 +290,17 @@ class PlaywrightBrowser:
 
     async def type_text(self, selector: str, text: str) -> dict:
         """Type text into an input element."""
+        if await self._ensure_cdp():
+            err = self._cdp_guard("type")
+            if err:
+                return err
+            try:
+                await self._cdp.type_text(selector, str(text))
+                shot = await self._cdp.screenshot_b64()
+                self._state.screenshot_b64 = shot
+                return {"success": True, "screenshot": shot, "engine": "cdp"}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
         if not self._page:
             return {"success": False, "error": "No page loaded"}
         try:
@@ -226,6 +313,15 @@ class PlaywrightBrowser:
 
     async def screenshot(self, full_page: bool = False) -> dict:
         """Take a screenshot of the current page."""
+        if await self._ensure_cdp():
+            try:
+                shot = await self._cdp.screenshot_b64()
+                self._state.screenshot_b64 = shot
+                return {"success": True, "url": await self._cdp.url(),
+                        "title": await self._cdp.title(),
+                        "screenshot": shot, "engine": "cdp"}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
         if not self._page:
             return {"success": False, "error": "No page loaded"}
         try:
@@ -238,6 +334,20 @@ class PlaywrightBrowser:
 
     async def extract(self, selector: str | None = None) -> dict:
         """Extract page content: text, all text, or specific element."""
+        if await self._ensure_cdp():
+            try:
+                if selector:
+                    text = await self._cdp.evaluate(
+                        "(() => { const el = document.querySelector(%s); "
+                        "return el ? el.innerText : ''; })()"
+                        % json.dumps(selector))
+                else:
+                    text = await self._cdp.text()
+                return {"success": True, "url": await self._cdp.url(),
+                        "title": await self._cdp.title(),
+                        "text": str(text or "")[:10000], "engine": "cdp"}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
         if self._page is None and self._using_http:
             # HTTP fallback: return the page text captured at navigate time
             return {"success": True, "url": self._state.url,
@@ -257,8 +367,12 @@ class PlaywrightBrowser:
             return {"success": False, "error": str(e)}
 
     async def close(self) -> dict:
-        """Close the browser."""
+        """Close the browser (own instance or CDP connection — never the
+        user's browser itself, just the debug attachment)."""
         try:
+            if self._cdp is not None:
+                await self._cdp.close()
+                self._cdp = None
             if self._browser:
                 await self._browser.close()
             if self._playwright:
@@ -281,6 +395,7 @@ class PlaywrightBrowser:
         return {
             "url": self._state.url,
             "title": self._state.title,
+            "mode": self.mode,
             "hasScreenshot": bool(self._state.screenshot_b64),
             "screenshot": self._state.screenshot_b64[:200] + "..." if self._state.screenshot_b64 else "",
             "historyLength": len(self._state.history),

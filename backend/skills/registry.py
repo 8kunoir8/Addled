@@ -353,6 +353,95 @@ class SkillRegistry:
             clipboard_write, "system",
         ))
 
+        # ---- Gated desktop input (mouse/keyboard) ---------------------------
+
+        async def desktop_click(params: dict) -> dict:
+            from backend.actions.desktop_control import desktop_control
+            return await desktop_control.click(
+                int(params.get("x", 0)), int(params.get("y", 0)),
+                params.get("button", "left"))
+        self.register(SkillDefinition(
+            "desktop_click",
+            "Click at screen coordinates (needs Desktop Control permission — "
+            "disabled by default)",
+            {"type": "object", "properties": {
+                "x": {"type": "integer", "description": "Screen X coordinate"},
+                "y": {"type": "integer", "description": "Screen Y coordinate"},
+                "button": {"type": "string", "default": "left"},
+            }, "required": ["x", "y"]},
+            desktop_click, "system", True,
+        ))
+
+        async def desktop_type(params: dict) -> dict:
+            from backend.actions.desktop_control import desktop_control
+            return await desktop_control.type_text(str(params.get("text", "")))
+        self.register(SkillDefinition(
+            "desktop_type",
+            "Type text via the keyboard at the current focus (needs Desktop "
+            "Control permission — disabled by default)",
+            {"type": "object", "properties": {
+                "text": {"type": "string", "description": "Text to type"},
+            }, "required": ["text"]},
+            desktop_type, "system", True,
+        ))
+
+        async def desktop_hotkey(params: dict) -> dict:
+            from backend.actions.desktop_control import desktop_control
+            return await desktop_control.hotkey(str(params.get("combo", "")))
+        self.register(SkillDefinition(
+            "desktop_hotkey",
+            "Press a keyboard shortcut like ctrl+c (whitelisted combos only;
+            needs Desktop Control permission)",
+            {"type": "object", "properties": {
+                "combo": {"type": "string", "description": "e.g. ctrl+c"},
+            }, "required": ["combo"]},
+            desktop_hotkey, "system", True,
+        ))
+
+        async def desktop_scroll(params: dict) -> dict:
+            from backend.actions.desktop_control import desktop_control
+            return await desktop_control.scroll(
+                str(params.get("direction", "down")),
+                int(params.get("amount", 3)))
+        self.register(SkillDefinition(
+            "desktop_scroll",
+            "Scroll the mouse wheel (needs Desktop Control permission)",
+            {"type": "object", "properties": {
+                "direction": {"type": "string", "enum": ["up", "down"]},
+                "amount": {"type": "integer", "default": 3},
+            }},
+            desktop_scroll, "system", True,
+        ))
+
+        async def desktop_move_mouse(params: dict) -> dict:
+            from backend.actions.desktop_control import desktop_control
+            return await desktop_control.move_mouse(
+                int(params.get("x", 0)), int(params.get("y", 0)))
+        self.register(SkillDefinition(
+            "desktop_move_mouse",
+            "Move the mouse cursor (needs Desktop Control permission)",
+            {"type": "object", "properties": {
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+            }, "required": ["x", "y"]},
+            desktop_move_mouse, "system", True,
+        ))
+
+        async def desktop_drag(params: dict) -> dict:
+            from backend.actions.desktop_control import desktop_control
+            return await desktop_control.drag(
+                int(params.get("x1", 0)), int(params.get("y1", 0)),
+                int(params.get("x2", 0)), int(params.get("y2", 0)))
+        self.register(SkillDefinition(
+            "desktop_drag",
+            "Drag from (x1,y1) to (x2,y2) (needs Desktop Control permission)",
+            {"type": "object", "properties": {
+                "x1": {"type": "integer"}, "y1": {"type": "integer"},
+                "x2": {"type": "integer"}, "y2": {"type": "integer"},
+            }, "required": ["x1", "y1", "x2", "y2"]},
+            desktop_drag, "system", True,
+        ))
+
         async def volume(params: dict) -> dict:
             from backend.actions.system_controls import SystemControls
             return await SystemControls().set_volume(params.get("level", 50))

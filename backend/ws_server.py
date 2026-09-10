@@ -492,6 +492,27 @@ def _register_default_handlers():
                 "enabled": bool(config.get("tools", "rtk_enabled",
                                             default=True))}
 
+    async def desktop_status(params: dict, ws) -> dict:
+        from backend.actions.desktop_control import desktop_control
+        from backend.config import config
+        return {
+            "allow_input": bool(config.get("desktop", "allow_input",
+                                           default=False)),
+            "require_session_approval": bool(config.get(
+                "desktop", "require_session_approval", default=True)),
+            "granted": desktop_control.granted(),
+        }
+
+    async def desktop_grant(params: dict, ws) -> dict:
+        from backend.actions.desktop_control import desktop_control
+        desktop_control.grant()
+        return {"success": True, "granted": True}
+
+    async def desktop_revoke(params: dict, ws) -> dict:
+        from backend.actions.desktop_control import desktop_control
+        desktop_control.revoke()
+        return {"success": True, "granted": False}
+
     async def settings_get(params: dict, ws) -> dict:
         from backend.config import config
         section = params.get("section")
@@ -1246,6 +1267,9 @@ def _register_default_handlers():
     _server.register("system.status", system_status)
     _server.register("system.getProviders", system_get_providers)
     _server.register("system.rtkStatus", system_rtk_status)
+    _server.register("desktop.status", desktop_status)
+    _server.register("desktop.grant", desktop_grant)
+    _server.register("desktop.revoke", desktop_revoke)
     _server.register("settings.get", settings_get)
     _server.register("settings.set", settings_set)
 

@@ -12,6 +12,12 @@ import logging
 import random
 import time
 
+try:
+    import pyautogui
+    pyautogui.FAILSAFE = True  # mouse to top-left corner aborts synthetic input
+except ImportError:
+    pass
+
 log = logging.getLogger("addled.input")
 
 

@@ -3,7 +3,7 @@
 import { useWS } from '@/lib/useWS';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import "./globals.css";
 
 const NAV_ITEMS = [
@@ -36,8 +36,14 @@ const STATE_LABELS: Record<string, string> = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { state: wsState, characterState } = useWS();
+  const { state: wsState, characterState, send, onNotification } = useWS();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [desktopPrompt, setDesktopPrompt] = useState(false);
+
+  // Desktop-control permission request from the backend
+  useEffect(() => onNotification('desktop.permissionRequest', () => {
+    setDesktopPrompt(true);
+  }), [onNotification]);
 
   const wsStatusColor =
     wsState === 'connected' ? 'bg-green-500' :
@@ -89,6 +95,29 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <main className="flex-1 overflow-hidden flex flex-col">
           {children}
         </main>
+
+        {/* Desktop-control permission prompt */}
+        {desktopPrompt && (
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[#d29922] bg-[#161b22] p-4 shadow-xl">
+            <p className="text-sm font-semibold text-[#e8eaed]">🖱 Desktop control requested</p>
+            <p className="text-xs text-[#8b949e] mt-1">
+              The agent wants to move the mouse / type on your desktop. Grant access for this session only?
+              <br /><span className="text-[#484f58]">Emergency stop: mouse to top-left corner, or Ctrl+Shift+Alt+K.</span>
+            </p>
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={() => { send('desktop.grant', {}).catch(() => {}); setDesktopPrompt(false); }}
+                className="flex-1 bg-[#3380FF] hover:bg-[#4d94ff] text-white rounded-md py-1.5 text-sm font-medium">
+                Allow this session
+              </button>
+              <button
+                onClick={() => { send('desktop.revoke', {}).catch(() => {}); setDesktopPrompt(false); }}
+                className="flex-1 bg-[#3d1f1f] hover:bg-[#5a2a2a] text-[#f85149] rounded-md py-1.5 text-sm font-medium">
+                Deny
+              </button>
+            </div>
+          </div>
+        )}
       </body>
     </html>
   );
