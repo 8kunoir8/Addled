@@ -163,7 +163,7 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 
 ---
 
-## WebSocket API (58 handlers)
+## WebSocket API (59 handlers)
 
 ### Core
 `chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set`

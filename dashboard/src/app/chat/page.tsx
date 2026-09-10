@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useWS } from '@/lib/useWS';
-import { getChatMessages, setChatMessages } from '@/lib/chatStore';
+import { getChatMessages, setChatMessages, subscribeChatMessages } from '@/lib/chatStore';
 
 interface Attachment { name: string; kind: 'image' | 'text' | 'file'; data?: string; preview?: string; size?: number; }
 
@@ -54,6 +54,23 @@ const GREETING: Message = {
   timestamp: Date.now(),
 };
 
+// Fill an in-flight "thinking" placeholder with the reply (or append if none).
+function fillReply(messages: Message[], reply: string): Message[] {
+  const idx = messages.findIndex(
+    (m) => m.role === 'assistant' && m.streaming && !m.content
+  );
+  if (idx >= 0) {
+    return messages.map((m, i) =>
+      i === idx ? { ...m, content: reply, streaming: false } : m
+    );
+  }
+  const last = messages[messages.length - 1];
+  if (last && last.role === 'assistant' && last.content === reply) {
+    return messages;
+  }
+  return [...messages, { role: 'assistant', content: reply, timestamp: Date.now() }];
+}
+
 export default function ChatPage() {
   const { state: wsState, send, onNotification } = useWS();
   // Restore the session's messages on mount so navigation doesn't wipe them
@@ -73,6 +90,48 @@ export default function ChatPage() {
   useEffect(() => {
     setChatMessages(messages);
   }, [messages]);
+
+  // Apply replies that landed in the store after this component (re)mounted —
+  // e.g. the user switched to another tab mid-request and came back.
+  useEffect(() => subscribeChatMessages((msgs) => {
+    setMessages((prev) => (prev === msgs ? prev : msgs));
+  }), []);
+
+  // If a previous session left a stuck "thinking" placeholder behind
+  // (connection dropped mid-reply), recover the real answer from the backend.
+  useEffect(() => {
+    if (wsState !== 'connected') return;
+    const cached = getChatMessages();
+    const stuck = cached[cached.length - 1];
+    if (!stuck || stuck.role !== 'assistant' || !stuck.streaming || stuck.content) {
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await send('chat.history', { max: 60 });
+        const backendMsgs: any[] = r?.messages || [];
+        const lastB = backendMsgs[backendMsgs.length - 1];
+        if (cancelled) return;
+        const placeholderAt = stuck.timestamp;
+        if (lastB && lastB.role === 'assistant' && lastB.content &&
+            (lastB.timestamp || 0) * 1000 >= placeholderAt - 5000) {
+          setMessages((prev) => fillReply(prev, lastB.content));
+        } else if (lastB && lastB.role === 'user' &&
+                   (lastB.timestamp || 0) * 1000 >= placeholderAt - 5000) {
+          // Backend is still processing this prompt — keep the placeholder.
+        } else {
+          // No matching turn in history — the placeholder is orphaned.
+          setMessages((prev) => prev.filter(
+            (m) => !(m.role === 'assistant' && m.streaming && !m.content)
+          ));
+        }
+      } catch {
+        /* keep the placeholder */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [wsState, send]);
 
   // Messages pushed by the floating character / voice listener
   useEffect(() => onNotification('chat.push', (params: any) => {
@@ -173,15 +232,19 @@ export default function ChatPage() {
     const assistantMsg: Message = { role: 'assistant', content: '', timestamp: Date.now(), streaming: true };
     setMessages(prev => [...prev, assistantMsg]);
 
+    const applyReply = (reply: string) => {
+      // Write through the store so the reply survives tab switches —
+      // even if this component unmounted while the request was in flight.
+      const next = fillReply(getChatMessages(), reply);
+      setChatMessages(next);
+      setMessages(next);
+    };
+
     try {
       const result = await send('chat.send', { message: text, attachments: sentAtts });
-      setMessages(prev => prev.map((m, i) =>
-        i === prev.length - 1 ? { ...m, content: result?.response || 'No response', streaming: false } : m
-      ));
+      applyReply(result?.response || 'No response');
     } catch (err: any) {
-      setMessages(prev => prev.map((m, i) =>
-        i === prev.length - 1 ? { ...m, content: `Error: ${err.message}`, streaming: false } : m
-      ));
+      applyReply(`Error: ${err.message}`);
     } finally {
       setIsLoading(false);
     }

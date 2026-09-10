@@ -636,6 +636,13 @@ def _register_default_handlers():
         from backend.memory.session_summary import clear_summaries
         return {"cleared": clear_summaries()}
 
+    async def chat_get_history(params: dict, ws) -> dict:
+        """Recent conversation turns — used by the chat page to recover a
+        reply that was generated while the dashboard was on another tab."""
+        from backend.memory.chat_history import chat_history
+        max_messages = int(params.get("max", 60))
+        return {"messages": chat_history.get_context(max_messages=max_messages)}
+
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
     async def voice_speak(params: dict, ws) -> dict:
@@ -1067,6 +1074,7 @@ def _register_default_handlers():
 
     # Phase 1-3 core handlers
     _server.register("chat.send", chat_send)
+    _server.register("chat.history", chat_get_history)
     _server.register("action.execute", action_execute)
     _server.register("action.approve", action_approve)
     _server.register("action.deny", action_deny)

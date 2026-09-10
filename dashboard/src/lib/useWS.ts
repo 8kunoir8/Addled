@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
 type WSMessage = {
   jsonrpc: string;
@@ -27,114 +27,172 @@ export type Insight = {
   timestamp: number;
 };
 
-export function useWS() {
-  const [state, setState] = useState<WSState>('disconnected');
-  const [characterState, setCharacterState] = useState<string>('idle');
-  const [insight, setInsight] = useState<Insight | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const pendingRef = useRef<Map<string, PendingRequest>>(new Map());
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const idCounterRef = useRef(0);
-  const handlersRef = useRef<Map<string, (params: any) => void>>(new Map());
+// ---------------------------------------------------------------------------
+// Shared singleton connection — lives at module level so navigating between
+// dashboard pages does NOT close the socket. In-flight requests (e.g. a slow
+// chat.send) keep their response even if the page that sent them unmounts.
+// ---------------------------------------------------------------------------
 
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+let sharedSocket: WebSocket | null = null;
+let sharedState: WSState = 'disconnected';
+let sharedCharacter: string = 'idle';
+let sharedInsight: Insight | null = null;
+let idCounter = 0;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-    setState('connecting');
-    const ws = new WebSocket('ws://127.0.0.1:9876');
+const pending = new Map<string, PendingRequest>();
+const notificationHandlers = new Map<string, (params: any) => void>();
+const stateListeners = new Set<(s: WSState) => void>();
+const characterListeners = new Set<(s: string) => void>();
+const insightListeners = new Set<(i: Insight | null) => void>();
 
-    ws.onopen = () => {
-      setState('connected');
-      wsRef.current = ws;
-    };
+function setSharedState(next: WSState) {
+  sharedState = next;
+  stateListeners.forEach((l) => l(next));
+}
 
-    ws.onclose = () => {
-      setState('disconnected');
-      wsRef.current = null;
-      // Reconnect after 2s
-      reconnectTimerRef.current = setTimeout(connect, 2000);
-    };
+function rejectAllPending(reason: string) {
+  pending.forEach((p) => {
+    clearTimeout(p.timer);
+    p.reject(new Error(reason));
+  });
+  pending.clear();
+}
 
-    ws.onerror = () => {
+function connect() {
+  if (
+    sharedSocket &&
+    (sharedSocket.readyState === WebSocket.OPEN ||
+      sharedSocket.readyState === WebSocket.CONNECTING)
+  ) {
+    return;
+  }
+
+  setSharedState('connecting');
+  const ws = new WebSocket('ws://127.0.0.1:9876');
+  sharedSocket = ws;
+
+  ws.onopen = () => {
+    setSharedState('connected');
+  };
+
+  ws.onclose = () => {
+    sharedSocket = null;
+    // Never leave callers hanging — reject all pending requests on drop.
+    rejectAllPending('Connection closed');
+    setSharedState('disconnected');
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => {
+    try {
       ws.close();
-    };
+    } catch {
+      /* ignore */
+    }
+  };
 
-    ws.onmessage = (event) => {
-      try {
-        const msg: WSMessage = JSON.parse(event.data);
+  ws.onmessage = (event) => {
+    try {
+      const msg: WSMessage = JSON.parse(event.data);
 
-        // If it has an id, it's a response to a pending request
-        if (msg.id && pendingRef.current.has(msg.id)) {
-          const { resolve, reject, timer } = pendingRef.current.get(msg.id)!;
-          clearTimeout(timer);
-          pendingRef.current.delete(msg.id);
-
-          if (msg.error) {
-            reject(new Error(msg.error.message));
-          } else {
-            resolve(msg.result);
-          }
-          return;
+      // Response to a pending request
+      if (msg.id && pending.has(msg.id)) {
+        const { resolve, reject, timer } = pending.get(msg.id)!;
+        clearTimeout(timer);
+        pending.delete(msg.id);
+        if (msg.error) {
+          reject(new Error(msg.error.message));
+        } else {
+          resolve(msg.result);
         }
-
-        // If it has a method and no id, it's a server push notification
-        if (msg.method && !msg.id) {
-          const handler = handlersRef.current.get(msg.method);
-          if (handler) {
-            handler(msg.params || {});
-          }
-
-          // Handle state changes
-          if (msg.method === 'state.changed') {
-            setCharacterState(msg.params?.state || 'idle');
-          }
-
-          // Proactive observer insights (bot noticed something)
-          if (msg.method === 'observer.insight') {
-            setInsight({
-              decision: msg.params?.decision || 'suggest',
-              context: msg.params?.context || 'unknown',
-              tier: msg.params?.tier || 'medium',
-              text: msg.params?.text || '',
-              timestamp: msg.params?.timestamp || Date.now(),
-            });
-          }
-          return;
-        }
-      } catch (e) {
-        console.error('WS message parse error:', e);
+        return;
       }
-    };
-  }, []);
 
-  const disconnect = useCallback(() => {
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
+      // Server push notification
+      if (msg.method && !msg.id) {
+        const handler = notificationHandlers.get(msg.method);
+        if (handler) handler(msg.params || {});
+
+        if (msg.method === 'state.changed') {
+          sharedCharacter = msg.params?.state || 'idle';
+          characterListeners.forEach((l) => l(sharedCharacter));
+        }
+
+        if (msg.method === 'observer.insight') {
+          sharedInsight = {
+            decision: msg.params?.decision || 'suggest',
+            context: msg.params?.context || 'unknown',
+            tier: msg.params?.tier || 'medium',
+            text: msg.params?.text || '',
+            timestamp: msg.params?.timestamp || Date.now(),
+          };
+          insightListeners.forEach((l) => l(sharedInsight));
+        }
+        return;
+      }
+    } catch (e) {
+      console.error('WS message parse error:', e);
     }
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    setState('disconnected');
+  };
+}
+
+function disconnect() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (sharedSocket) {
+    sharedSocket.close();
+    sharedSocket = null;
+  }
+  setSharedState('disconnected');
+}
+
+export function useWS() {
+  const [state, setState] = useState<WSState>(sharedState);
+  const [characterState, setCharacterState] = useState<string>(sharedCharacter);
+  const [insight, setInsight] = useState<Insight | null>(sharedInsight);
+
+  useEffect(() => {
+    // Share one socket across all pages — do NOT close it on unmount,
+    // otherwise in-flight requests die when the user switches tabs.
+    if (!sharedSocket) connect();
+
+    const onState = (s: WSState) => setState(s);
+    const onCharacter = (s: string) => setCharacterState(s);
+    const onInsight = (i: Insight | null) => setInsight(i);
+
+    stateListeners.add(onState);
+    characterListeners.add(onCharacter);
+    insightListeners.add(onInsight);
+
+    return () => {
+      stateListeners.delete(onState);
+      characterListeners.delete(onCharacter);
+      insightListeners.delete(onInsight);
+    };
   }, []);
 
   const send = useCallback((method: string, params: any = {}): Promise<any> => {
     return new Promise((resolve, reject) => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      if (!sharedSocket || sharedSocket.readyState !== WebSocket.OPEN) {
         reject(new Error('WebSocket not connected'));
         return;
       }
+      const ws = sharedSocket;
 
-      const id = `req-${++idCounterRef.current}`;
+      const id = `req-${++idCounter}`;
+      // Chat + tool rounds can legitimately take a while.
       const timer = setTimeout(() => {
-        pendingRef.current.delete(id);
+        pending.delete(id);
         reject(new Error(`Request ${method} timed out`));
-      }, 90000);
+      }, 180000);
 
-      pendingRef.current.set(id, { resolve, reject, timer });
+      pending.set(id, { resolve, reject, timer });
 
-      wsRef.current.send(JSON.stringify({
+      ws.send(JSON.stringify({
         jsonrpc: '2.0',
         id,
         method,
@@ -144,17 +202,16 @@ export function useWS() {
   }, []);
 
   const onNotification = useCallback((method: string, handler: (params: any) => void) => {
-    handlersRef.current.set(method, handler);
+    notificationHandlers.set(method, handler);
     return () => {
-      handlersRef.current.delete(method);
+      if (notificationHandlers.get(method) === handler) {
+        notificationHandlers.delete(method);
+      }
     };
   }, []);
 
-  // Auto-connect on mount
-  useEffect(() => {
-    connect();
-    return () => disconnect();
-  }, [connect, disconnect]);
+  const connectNow = useCallback(() => connect(), []);
+  const disconnectNow = useCallback(() => disconnect(), []);
 
   return {
     state,
@@ -162,7 +219,7 @@ export function useWS() {
     insight,
     send,
     onNotification,
-    connect,
-    disconnect,
+    connect: connectNow,
+    disconnect: disconnectNow,
   };
 }
