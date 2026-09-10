@@ -299,6 +299,11 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         if not sys_prompt.strip():
             sys_prompt = (f"You are {agent_name}, a helpful AI desktop "
                           "companion with access to system tools.")
+        # Core memory: durable facts the agent saved about the user
+        from backend.memory.facts import build_facts_context
+        facts_ctx = build_facts_context()
+        if facts_ctx:
+            sys_prompt = sys_prompt + "\n\n" + facts_ctx
         context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
 
         # Long-term recall: inject relevant past conversation turns
@@ -320,6 +325,12 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         session_ctx = build_session_context()
         if session_ctx:
             user_messages.insert(0, {"role": "user", "content": session_ctx})
+
+        # Rolling conversation continuity (long chats — compaction summaries)
+        from backend.memory.compaction import build_rolling_context
+        rolling_ctx = build_rolling_context()
+        if rolling_ctx:
+            user_messages.insert(0, {"role": "user", "content": rolling_ctx})
 
         # Live screen awareness: let the model know what the observer sees
         screen_note = None
@@ -483,6 +494,15 @@ def _register_default_handlers():
         if not message:
             return {"response": "I didn't catch that.", "tokens": 0, "conversationId": None}
         result = await run_chat_pipeline(message, params)
+        # Rolling compaction: summarize the oldest turns in the background
+        # once the conversation outgrows the context window.
+        try:
+            reply = result.get("response", "") if isinstance(result, dict) else ""
+            if reply and not reply.startswith(("[Not connected:", "[Provider")):
+                from backend.memory.compaction import maybe_compact
+                asyncio.create_task(maybe_compact())
+        except Exception:
+            log.debug("compaction dispatch failed", exc_info=True)
         # Auto-speak replies when voice.auto_tts is enabled (Settings → Voice)
         try:
             from backend.config import config
@@ -640,6 +660,26 @@ def _register_default_handlers():
     async def memory_clear(params: dict, ws) -> dict:
         from backend.memory.session_summary import clear_summaries
         return {"cleared": clear_summaries()}
+
+    async def memory_get_facts(params: dict, ws) -> dict:
+        from backend.memory.facts import get_facts
+        return {"facts": get_facts(int(params.get("limit", 50)))}
+
+    async def memory_set_fact(params: dict, ws) -> dict:
+        from backend.memory.facts import add_fact
+        fact = add_fact(str(params.get("fact", "")).strip(),
+                        source=params.get("source", "manual"))
+        if fact is None:
+            return {"success": False, "error": "Empty or duplicate fact"}
+        return {"success": True, "fact": fact}
+
+    async def memory_delete_fact(params: dict, ws) -> dict:
+        from backend.memory.facts import delete_fact
+        try:
+            ok = delete_fact(int(params.get("id")))
+        except (TypeError, ValueError):
+            return {"success": False, "error": "id must be a number"}
+        return {"success": ok}
 
     async def chat_get_history(params: dict, ws) -> dict:
         """Recent conversation turns — used by the chat page to recover a
@@ -1147,6 +1187,9 @@ def _register_default_handlers():
     _server.register("memory.deleteSummary", memory_delete_summary)
     _server.register("memory.deleteMemory", memory_delete_memory)
     _server.register("memory.clear", memory_clear)
+    _server.register("memory.getFacts", memory_get_facts)
+    _server.register("memory.setFact", memory_set_fact)
+    _server.register("memory.deleteFact", memory_delete_fact)
 
     # Sprite skins
     _server.register("character.skinsList", character_skins_list)

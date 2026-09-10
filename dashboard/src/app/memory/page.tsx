@@ -16,10 +16,19 @@ interface MemoryEntry {
   metadata?: { role?: string; text?: string } | null;
 }
 
+interface Fact {
+  id: number;
+  text: string;
+  ts?: number;
+  source?: string;
+}
+
 export default function MemoryPage() {
   const { state: wsState, send } = useWS();
   const [summaries, setSummaries] = useState<Summary[]>([]);
   const [memories, setMemories] = useState<MemoryEntry[]>([]);
+  const [facts, setFacts] = useState<Fact[]>([]);
+  const [newFact, setNewFact] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -30,6 +39,10 @@ export default function MemoryPage() {
       const result = await send('memory.list', {});
       setSummaries(result?.summaries || []);
       setMemories(result?.memories || []);
+      try {
+        const f = await send('memory.getFacts', {});
+        setFacts(f?.facts || []);
+      } catch { /* older backend */ }
       setError('');
     } catch (e: any) {
       setError(e.message);
@@ -51,6 +64,29 @@ export default function MemoryPage() {
     try {
       const r = await send('memory.deleteMemory', { id });
       if (r?.success) load();
+    } catch { /* ignore */ }
+  };
+
+  const addFact = async () => {
+    const text = newFact.trim();
+    if (!text) return;
+    setNewFact('');
+    try {
+      const r = await send('memory.setFact', { fact: text, source: 'dashboard' });
+      if (r?.success) {
+        const f = await send('memory.getFacts', {});
+        setFacts(f?.facts || []);
+      }
+    } catch { /* ignore */ }
+  };
+
+  const deleteFact = async (id: number) => {
+    try {
+      const r = await send('memory.deleteFact', { id });
+      if (r?.success) {
+        const f = await send('memory.getFacts', {});
+        setFacts(f?.facts || []);
+      }
     } catch { /* ignore */ }
   };
 
@@ -122,6 +158,47 @@ export default function MemoryPage() {
                 </div>
               );
             })}
+          </div>
+        </section>
+
+        {/* Core facts */}
+        <section>
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-[#8b949e] mb-2">
+            Saved facts ({facts.length})
+          </h2>
+          <div className="flex gap-2 mb-3">
+            <input
+              value={newFact}
+              onChange={(e) => setNewFact(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') addFact(); }}
+              placeholder="e.g. Kun prefers PowerShell over CMD"
+              className="flex-1 bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"
+            />
+            <button
+              onClick={addFact}
+              disabled={!newFact.trim()}
+              className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium"
+            >
+              Save
+            </button>
+          </div>
+          {facts.length === 0 && !loading && (
+            <p className="text-sm text-[#8b949e]">No saved facts yet — add one above, or let the agent save its own (Settings → Memory → Auto memory notes).</p>
+          )}
+          <div className="space-y-2">
+            {facts.map((f) => (
+              <div key={f.id} className="rounded-lg border border-[#30363d] bg-[#161b22] p-3 flex items-start gap-3">
+                <span className="text-[10px] font-semibold uppercase mt-0.5 px-1.5 py-0.5 rounded bg-[#1f2937] text-[#58a6ff]">fact</span>
+                <p className="flex-1 text-sm text-[#e8eaed] whitespace-pre-wrap break-words min-w-0">{f.text}</p>
+                <button
+                  onClick={() => deleteFact(f.id)}
+                  className="text-xs text-[#8b949e] hover:text-[#f85149] px-1"
+                  title="Delete fact"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
           </div>
         </section>
 

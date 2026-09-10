@@ -805,6 +805,40 @@ class SkillRegistry:
             list_forged, "meta",
         ))
 
+        async def memory_get(params: dict) -> dict:
+            """Read the durable facts saved about the user."""
+            from backend.memory.facts import get_facts
+            facts = get_facts(50)
+            return {"success": True, "facts": [f["text"] for f in facts]}
+
+        self.register(SkillDefinition(
+            "memory_get",
+            "Read durable facts you have saved about the user (preferences, "
+            "decisions, context). Use before answering personal questions.",
+            {"type": "object", "properties": {}},
+            memory_get, "memory",
+        ))
+
+        async def memory_set(params: dict) -> dict:
+            """Save a durable fact about the user."""
+            from backend.memory.facts import add_fact
+            fact = add_fact(str(params.get("fact", "")).strip(),
+                            source="agent")
+            if fact is None:
+                return {"success": False, "error": "Empty or duplicate fact"}
+            return {"success": True, "fact": fact["text"]}
+
+        self.register(SkillDefinition(
+            "memory_set",
+            "Save a durable fact about the user so you remember it in future "
+            "sessions (e.g. 'User prefers PowerShell over CMD').",
+            {"type": "object", "properties": {
+                "fact": {"type": "string",
+                         "description": "One short fact about the user"}},
+             "required": ["fact"]},
+            memory_set, "memory",
+        ))
+
 
 # ── Singleton ────────────────────────────────────────────────────────────
 
