@@ -110,8 +110,13 @@ export interface AppSettings {
   };
   voice: {
     tts_engine: string;
+    tts_voice: string;
+    kokoro_voice: string;
+    stt_engine: string;
+    stt_model: string;
     wake_word: string;
     auto_tts: boolean;
+    vad_enabled: boolean;
     language: string;
   };
   safety: {

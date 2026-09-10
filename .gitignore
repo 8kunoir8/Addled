@@ -23,3 +23,7 @@ backend/memory/*.jsonl
 
 backend/memory/skins/
 
+
+# Voice models (fetched by scripts/fetch_voice_models.py)
+backend/voice/models/
+

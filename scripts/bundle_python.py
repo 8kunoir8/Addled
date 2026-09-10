@@ -104,6 +104,13 @@ def main() -> int:
         check=False, env=ISOLATED_ENV,
     )
 
+    # ── 4c. Fetch voice models (Silero VAD + Kokoro TTS) ────────────────
+    log("fetching voice models ...")
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "fetch_voice_models.py")],
+        check=False, env=ISOLATED_ENV,
+    )
+
     # ── 5. Verify critical imports ───────────────────────────────────────
     check = (
         "import sys, websockets, httpx, mss, numpy, PIL, pyautogui, pyperclip, edge_tts, onnxruntime; "

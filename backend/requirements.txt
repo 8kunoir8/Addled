@@ -14,9 +14,14 @@ ollama>=0.2.0
 # Voice (TTS + STT)
 edge-tts>=6.1.0
 faster-whisper>=1.0.0
-funasr>=1.0.0
 sounddevice>=0.4.0
 soundfile>=0.12.0
+kokoro-onnx>=0.4
+misaki>=0.7
+# Silero VAD is driven directly via onnxruntime (backend/voice/vad.py) —
+# no silero-vad package / torch required.
+# funasr>=1.0.0  # SenseVoice — BLOCKED on Python 3.14: kaldi-native-fbank
+#                 has no cp314 wheel; stt.py falls back to faster-whisper.
 
 # Vision & OCR
 Pillow>=10.0.0
