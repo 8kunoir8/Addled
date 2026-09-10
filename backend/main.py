@@ -142,6 +142,13 @@ def main():
     engine = Engine(char_widget=char_widget)
     engine.sig_agent_state.connect(char_widget.set_agent_state)
 
+    # Mood → character visual tint (warmth, brightness)
+    try:
+        engine.sig_mood.connect(
+            lambda w, b: char_widget._animator.set_mood(w, b))
+    except Exception:
+        pass
+
     # Mirror every engine state change to dashboard clients
     def _broadcast_agent_state(state: str):
         try:
@@ -189,7 +196,60 @@ def main():
         from backend.memory.maintenance import run_maintenance
         scheduler.register_housekeeping("memory_maintenance",
                                         run_maintenance, interval_s=60)
-        log.info("Scheduler wired (calendar reminders + memory maintenance)")
+
+        def _initiative_checkin():
+            """Daily check-in: one templated question per day, in-window."""
+            from backend.config import config
+            if not config.get("initiative", "enabled", default=True):
+                return
+            if not config.get("initiative", "checkin_enabled", default=True):
+                return
+            import asyncio
+            import json as _json
+            import time as _t
+            try:
+                target = config.get("initiative", "checkin_time",
+                                    default="09:00")
+                th, tm = map(int, target.split(":"))
+                target_min = th * 60 + tm
+            except (ValueError, AttributeError):
+                return
+            now = _t.localtime()
+            cur = now.tm_hour * 60 + now.tm_min
+            if not (target_min - 30 <= cur <= target_min + 30):
+                return
+            from backend.tasks.actions import in_quiet_hours
+            if in_quiet_hours():
+                return
+            state_path = (
+                Path(__file__).resolve().parent / "memory" / "integrations"
+                / "initiative_state.json")
+            today = _t.strftime("%Y-%m-%d")
+            try:
+                state = _json.loads(state_path.read_text(
+                    encoding="utf-8")) if state_path.exists() else {}
+                if state.get("last_checkin") == today:
+                    return
+            except (_json.JSONDecodeError, OSError):
+                state = {}
+            text = "How's your day going?"
+            try:
+                engine.sig_insight.emit(text)
+                from backend.voice.tts import speak
+                asyncio.create_task(speak(text))
+            except Exception:
+                pass
+            state["last_checkin"] = today
+            try:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                state_path.write_text(_json.dumps(state), encoding="utf-8")
+            except OSError:
+                pass
+
+        scheduler.register_housekeeping("initiative_checkin",
+                                        _initiative_checkin, interval_s=60)
+        log.info("Scheduler wired (calendar reminders + memory maintenance "
+                 "+ daily check-in)")
     except Exception as e:
         log.warning("Scheduler wiring failed: %s", e)
 
@@ -225,6 +285,11 @@ def main():
 
     async def _handle_voice_command(text: str):
         get_server().broadcast_nowait("voice.command", {"text": text})
+        try:
+            from backend.character.mood import mood_engine
+            mood_engine.event("chat_user")
+        except Exception:
+            pass
         result = await run_chat_pipeline(text)
         reply = result.get("response", "")
         get_server().broadcast_nowait("voice.reply", {"text": reply})

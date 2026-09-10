@@ -34,6 +34,15 @@ class Engine(QObject):
     sig_agent_state = pyqtSignal(str)  # "idle", "observing", "in_meeting", etc.
     sig_error = pyqtSignal(str)
     sig_insight = pyqtSignal(str)  # proactive insight text → floating bubble
+    sig_mood = pyqtSignal(float, float)  # (warmth, brightness) → animator tint
+
+    _GREETINGS = [
+        "Welcome back!",
+        "Hey, you're back.",
+        "Good to see you again.",
+        "You're back! How can I help?",
+        "There you are. What's next?",
+    ]
 
     def __init__(self, char_widget=None):
         super().__init__()
@@ -61,6 +70,8 @@ class Engine(QObject):
         self._last_sched = 0.0        # last scheduler poll
         self._chat_busy = False  # a chat is in flight — don't force 'idle'
         self._voice_busy = False  # TTS is speaking — don't force 'idle'
+        self._last_greeting = 0.0  # initiative: return-greeting cooldown
+        self._last_mood = ""       # mood broadcast dedup
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -163,10 +174,36 @@ class Engine(QObject):
                 if self._state != EngineState.SLEEPING:
                     self._set_state(EngineState.SLEEPING)
                     self.sig_agent_state.emit("in_meeting")
+                    try:
+                        from backend.character.mood import mood_engine
+                        mood_engine.event("user_away")
+                    except Exception:
+                        pass
                 return
             elif self._state == EngineState.SLEEPING:
                 self._set_state(EngineState.RUNNING)
                 self.sig_agent_state.emit("idle")
+                # Initiative: greet on return (cooldown + config gated)
+                try:
+                    from backend.character.mood import mood_engine
+                    mood_engine.event("user_return")
+                    if config.get("initiative", "greeting_enabled",
+                                  default=True):
+                        cooldown = config.get(
+                            "initiative", "greeting_cooldown_min",
+                            default=30) * 60
+                        if time.time() - self._last_greeting >= cooldown:
+                            self._last_greeting = time.time()
+                            import random
+                            text = random.choice(self._GREETINGS)
+                            self.sig_insight.emit(text)
+                            try:
+                                from backend.voice.tts import speak
+                                asyncio.ensure_future(speak(text))
+                            except Exception:
+                                pass
+                except Exception as e:
+                    log.debug("greeting failed: %s", e)
 
         # 2. Light observation — screen hash + context classification
         if self._observer:
@@ -241,6 +278,27 @@ class Engine(QObject):
                 asyncio.ensure_future(scheduler.poll())
         except Exception as e:
             log.debug("scheduler dispatch failed: %s", e)
+
+        # 7. Mood decay + visual/WS sync (name changes only)
+        try:
+            from backend.character.mood import mood_engine
+            mood_engine.tick()
+            name = mood_engine.name
+            if name != self._last_mood:
+                self._last_mood = name
+                warmth, brightness = mood_engine.visuals()
+                try:
+                    self.sig_mood.emit(warmth, brightness)
+                except Exception:
+                    pass
+                try:
+                    from backend.ws_server import get_server
+                    get_server().broadcast_nowait("character.mood",
+                                                  mood_engine.state())
+                except Exception:
+                    pass
+        except Exception as e:
+            log.debug("mood tick failed: %s", e)
 
     def _push_insight(self, obs):
         """Deliver a proactive insight to dashboards/bots, and optionally

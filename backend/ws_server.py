@@ -244,6 +244,14 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
         response = await _run_chat_pipeline_inner(message, params)
         # Surface provider/connection failures as the ERROR character state
         text = response.get("response", "") if isinstance(response, dict) else ""
+        try:
+            from backend.character.mood import mood_engine
+            if text.startswith(("[Not connected:", "[Provider")):
+                mood_engine.event("task_failure")
+            else:
+                mood_engine.event("chat_reply")
+        except Exception:
+            pass
         if text.startswith(("[Not connected:", "[Provider")) and _engine_ref is not None:
             try:
                 _engine_ref.sig_agent_state.emit("error")
@@ -1123,6 +1131,10 @@ def _register_default_handlers():
                              "rule": humanize(task)})
         return {"rows": rows}
 
+    async def mood_status(params: dict, ws) -> dict:
+        from backend.character.mood import mood_engine
+        return {"mood": mood_engine.state()}
+
     async def email_fetch(params: dict, ws) -> dict:
         from backend.integrations.email_integration import email_client
         unread = email_client.fetch_unread(limit=params.get("limit", 10))
@@ -1440,6 +1452,7 @@ def _register_default_handlers():
     _server.register("tasks.resume", tasks_resume)
     _server.register("tasks.cancel", tasks_cancel)
     _server.register("tasks.month", tasks_month)
+    _server.register("mood.status", mood_status)
 
     # Browser (Playwright)
     _server.register("browser.navigate", browser_navigate)

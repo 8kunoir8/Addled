@@ -44,19 +44,30 @@ _kokoro_lock = threading.Lock()
 # ---- engine selection --------------------------------------------------------
 
 async def speak(text: str, voice: str | None = None,
-                rate: str = "+0%") -> dict:
-    """Speak text. Returns {success, duration_ms, engine}."""
+                rate: str = "+0%", speed: float | None = None) -> dict:
+    """Speak text. Returns {success, duration_ms, engine}.
+
+    speed: TTS playback speed (Kokoro). None → mood-derived speed so the
+    character's tone follows its emotional state.
+    """
     from backend.config import config
 
     if not (text and text.strip()):
         return {"success": True, "duration_ms": 0, "engine": "none"}
+
+    if speed is None:
+        try:
+            from backend.character.mood import mood_engine
+            speed = mood_engine.speech_speed()
+        except Exception:
+            speed = 1.0
 
     engine = config.get("voice", "tts_engine", default="edge") or "edge"
     if engine == "kokoro":
         kokoro_voice = voice or config.get(
             "voice", "kokoro_voice", default=DEFAULT_KOKORO_VOICE)
         try:
-            return await _speak_kokoro(text, kokoro_voice)
+            return await _speak_kokoro(text, kokoro_voice, speed)
         except Exception as e:
             log.warning("Kokoro TTS failed (%s) — falling back to edge-tts", e)
     edge_voice = voice or DEFAULT_EDGE_VOICE
@@ -151,18 +162,21 @@ def _play_and_wait(path_or_audio, sample_rate: int | None = None) -> float:
     return pcm.size / sr
 
 
-async def _speak_kokoro(text: str, voice: str) -> dict:
+async def _speak_kokoro(text: str, voice: str,
+                        speed: float | None = None) -> dict:
     loop = asyncio.get_running_loop()
+    speed = speed or 1.0
 
     def _work() -> dict:
         started = time.monotonic()
-        audio, sr = _synth_kokoro(text, voice)
+        audio, sr = _synth_kokoro(text, voice, speed=speed)
         synth_s = time.monotonic() - started
         if audio is None or len(audio) == 0:
             raise RuntimeError("kokoro produced no audio")
         play_s = _play_and_wait(audio, sr)
         return {"success": True, "duration_ms": int(play_s * 1000),
-                "engine": "kokoro", "synth_ms": int(synth_s * 1000)}
+                "engine": "kokoro", "synth_ms": int(synth_s * 1000),
+                "speed": speed}
 
     return await loop.run_in_executor(None, _work)
 

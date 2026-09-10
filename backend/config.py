@@ -172,6 +172,17 @@ DEFAULT_SETTINGS: dict = {
         "missed_policy": "catchup_once",
         "llm_actions": ["notify", "chat"],
     },
+    "mood": {
+        "enabled": True,
+        "decay_h": 6.0,
+    },
+    "initiative": {
+        "enabled": True,
+        "greeting_enabled": True,
+        "greeting_cooldown_min": 30,
+        "checkin_enabled": True,
+        "checkin_time": "09:00",
+    },
     "voice": {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",

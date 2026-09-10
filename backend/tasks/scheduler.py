@@ -129,7 +129,15 @@ class Scheduler:
                 log.warning("task %s has unknown action %r",
                             task.id, task.action)
                 return
-            await action(task)
+            result = await action(task)
+            try:
+                from backend.character.mood import mood_engine
+                if isinstance(result, dict) and result.get("ok") is False:
+                    mood_engine.event("task_failure")
+                else:
+                    mood_engine.event("task_success")
+            except Exception:
+                pass
         except Exception as e:
             log.warning("task %s failed: %s", task.id, e)
         finally:
