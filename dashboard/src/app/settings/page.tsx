@@ -7,7 +7,7 @@ type SettingsData = Record<string, any>;
 
 const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
-  notifications: '🔔', memory: '🧠', integrations: '🔗', appearance: '🎨',
+  notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',
   observation: '👁', about: 'ℹ️',
 };
 
@@ -39,7 +39,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['providers','character','voice','safety','notifications','observation','memory','integrations','appearance','about'];
+  const sections = ['providers','character','voice','safety','notifications','observation','memory','tools','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -67,6 +67,7 @@ export default function SettingsPage() {
         {activeSection==='notifications'&&<NotificationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='memory'&&<MemorySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
+        {activeSection==='tools'&&<ToolsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='integrations'&&<IntegrationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='appearance'&&<AppearanceSection/>}
         {activeSection==='about'&&<AboutSection/>}
@@ -296,6 +297,23 @@ function MemorySection({ settings, update, saving, status }: any) {
     <Toggle label="Auto memory notes" desc="Let the agent occasionally write durable facts about you in the background (uses provider credits)" skey="auto_facts"/>
     <Toggle label="Knowledge graph" desc="Extract fact triples (subject → relation → object) from conversations in the background (uses provider credits)" skey="graph_extract"/>
     <SettingRow label="Vector Store"><span className="text-xs text-[#8b949e]">SQLite + numpy (384-dim)</span></SettingRow>
+  </div>;
+}
+
+function ToolsSection({ settings, update, saving, status, send, connected }: any) {
+  const t=settings?.tools||{};
+  const [rtk, setRtk] = useState<any>(null);
+  useEffect(() => {
+    if (connected) send('system.rtkStatus', {}).then((r: any) => setRtk(r || null)).catch(() => {});
+  }, [connected, send]);
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('tools',skey,!t[skey])} className={`w-10 h-5 rounded-full transition-colors ${t[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${t[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  return <div className="space-y-1">
+    <Toggle label="Token saver (RTK)" desc="Auto-compress git / pip / pytest / npm / gh / docker command output before it reaches the model — saves provider credits" skey="rtk_enabled"/>
+    <SettingRow label="RTK binary">
+      <span className={`text-xs ${rtk?.available ? 'text-[#3fb950]' : 'text-[#d29922]'}`}>
+        {rtk ? (rtk.available ? '✓ bundled — compression active' : 'Not bundled — commands run uncompressed') : 'Checking…'}
+      </span>
+    </SettingRow>
   </div>;
 }
 

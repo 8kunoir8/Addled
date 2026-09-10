@@ -279,7 +279,10 @@ class SkillRegistry:
             "Use PowerShell syntax: ';' to chain commands (NOT '&&'), "
             "$env:USERPROFILE instead of '~', 'Test-Path' to check paths, "
             "'New-Item -ItemType Directory -Path X' to create folders. "
-            "Returns stdout/stderr of the command.",
+            "Returns stdout/stderr of the command. High-output commands "
+            "(git, pip, pytest, npm, ruff, gh, docker, kubectl, cargo) are "
+            "auto-compressed by RTK; for other long outputs prefix with "
+            "`rtk ` (e.g. `rtk read file.txt`, `rtk log app.log`).",
             {"type": "object", "properties": {
                 "command": {"type": "string", "description": "The PowerShell command to execute"},
                 "cwd": {"type": "string", "description": "Working directory"},

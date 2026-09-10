@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 log = logging.getLogger("addled.terminal")
 
@@ -35,6 +37,48 @@ DANGEROUS_COMMANDS = {
 }
 
 
+# ---- RTK (Rust Token Killer) integration -----------------------------------
+# When the bundled rtk.exe is available, eligible single commands are rewritten
+# to their RTK equivalents so the agent sees compact output (60-90% fewer
+# tokens) instead of raw dumps. Purely optional — raw passthrough otherwise.
+
+RTK_PREFIXES = (
+    "git ", "pip ", "python -m pip", "pytest", "python -m pytest",
+    "npm ", "ruff ", "gh ", "docker ", "kubectl ", "cargo ",
+)
+
+
+def _find_rtk() -> str | None:
+    """Locate rtk.exe: PATH first, then the bundled copy (tools/rtk/)."""
+    import shutil
+    found = shutil.which("rtk")
+    if found:
+        return found
+    bundled = Path(__file__).resolve().parents[2] / "tools" / "rtk" / "rtk.exe"
+    if bundled.is_file():
+        return str(bundled)
+    return None
+
+
+def _rtk_rewrite(command: str, rtk: str | None) -> tuple[str, bool]:
+    """Rewrite `git status` → `& 'C:\\...\\rtk.exe' git status` when eligible."""
+    if not rtk:
+        return command, False
+    try:
+        from backend.config import config
+        if not config.get("tools", "rtk_enabled", default=True):
+            return command, False
+    except Exception:
+        pass
+    stripped = command.strip()
+    if ";" in stripped or stripped.startswith("rtk"):
+        return command, False  # chained or already-rtk commands — passthrough
+    if not any(stripped.startswith(p) for p in RTK_PREFIXES):
+        return command, False
+    log.info("RTK: %s", stripped)
+    return f"& '{rtk}' {stripped}", True
+
+
 class TerminalExecutor:
     """Execute shell commands safely."""
 
@@ -56,6 +100,16 @@ class TerminalExecutor:
             command = command.replace(" && ", " ; ")
             command = command.replace("~/", "$HOME/")
 
+        # Optional RTK compression for high-output commands (graceful fallback)
+        rtk_path = _find_rtk()
+        command, rewritten = _rtk_rewrite(command, rtk_path)
+        env = None
+        if rewritten and rtk_path:
+            # make the bundled rg.exe (ripgrep) visible to rtk.exe
+            rtk_dir = str(Path(rtk_path).parent)
+            env = {**os.environ,
+                   "PATH": rtk_dir + os.pathsep + os.environ.get("PATH", "")}
+
         try:
             if sys.platform == "win32":
                 # PowerShell is the natural shell for Windows desktop automation
@@ -66,6 +120,7 @@ class TerminalExecutor:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
+                    env=env,
                 )
             else:
                 proc = await asyncio.create_subprocess_shell(
@@ -80,6 +135,7 @@ class TerminalExecutor:
                 "stdout": stdout.decode("utf-8", errors="replace")[:50000],
                 "stderr": stderr.decode("utf-8", errors="replace")[:10000],
                 "exit_code": proc.returncode,
+                "rewritten": rewritten,
             }
         except asyncio.TimeoutError:
             return {"success": False, "error": f"Command timed out after {timeout}s"}

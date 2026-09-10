@@ -138,6 +138,9 @@ DEFAULT_SETTINGS: dict = {
         "dedup_min_sim": 0.95,
         "max_age_days": 365,
     },
+    "tools": {
+        "rtk_enabled": True,
+    },
     "voice": {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",

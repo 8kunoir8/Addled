@@ -482,6 +482,16 @@ def _register_default_handlers():
         from backend.providers.registry import list_available
         return {"providers": list_available()}
 
+    async def system_rtk_status(params: dict, ws) -> dict:
+        """Whether the RTK token-saver binary is available."""
+        from backend.actions.terminal import _find_rtk
+        from backend.config import config
+        path = _find_rtk()
+        return {"available": path is not None,
+                "path": path,
+                "enabled": bool(config.get("tools", "rtk_enabled",
+                                            default=True))}
+
     async def settings_get(params: dict, ws) -> dict:
         from backend.config import config
         section = params.get("section")
@@ -1159,6 +1169,7 @@ def _register_default_handlers():
     _server.register("observer.status", observer_status)
     _server.register("system.status", system_status)
     _server.register("system.getProviders", system_get_providers)
+    _server.register("system.rtkStatus", system_rtk_status)
     _server.register("settings.get", settings_get)
     _server.register("settings.set", settings_set)
 

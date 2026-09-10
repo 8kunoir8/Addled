@@ -19,6 +19,9 @@ extraResources:
   - from: backend
     to: backend
     filter: ['**/*']
+  - from: tools/rtk
+    to: tools/rtk
+    filter: ['**/*']
   - from: dashboard/out
     to: dashboard
     filter: ['**/*']
