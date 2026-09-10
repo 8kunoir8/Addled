@@ -248,8 +248,25 @@ def main():
 
         scheduler.register_housekeeping("initiative_checkin",
                                         _initiative_checkin, interval_s=60)
+
+        def _journal_nightly():
+            """Summarize finished days + refresh the learned user profile."""
+            import asyncio
+            try:
+                from backend.memory.journal import nightly_summarize
+                asyncio.create_task(nightly_summarize())
+            except Exception:
+                pass
+            try:
+                from backend.memory.user_profile import auto_learn
+                auto_learn()
+            except Exception:
+                pass
+
+        scheduler.register_housekeeping("journal_nightly",
+                                        _journal_nightly, interval_s=3600)
         log.info("Scheduler wired (calendar reminders + memory maintenance "
-                 "+ daily check-in)")
+                 "+ daily check-in + journal)")
     except Exception as e:
         log.warning("Scheduler wiring failed: %s", e)
 

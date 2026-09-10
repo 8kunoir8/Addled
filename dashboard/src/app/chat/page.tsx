@@ -83,6 +83,7 @@ export default function ChatPage() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [processingFiles, setProcessingFiles] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [anchors, setAnchors] = useState<{type: string; text: string}[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
@@ -142,6 +143,13 @@ export default function ChatPage() {
         timestamp: Date.now(),
       }]);
     }
+  }), [onNotification]);
+
+  // Memory anchors: which memories the backend injected into this turn
+  useEffect(() => onNotification('memory.anchors', (params: any) => {
+    if (params?.anchors) setAnchors(params.anchors);
+    const t = setTimeout(() => setAnchors([]), 12000);
+    return () => clearTimeout(t);
   }), [onNotification]);
 
   useEffect(() => {
@@ -316,6 +324,16 @@ export default function ChatPage() {
 
       {/* Input */}
       <div className="border-t border-[#30363d] p-4">
+        {anchors.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {anchors.map((a, i) => (
+              <span key={i} title={a.text}
+                className="text-[10px] px-2 py-0.5 rounded-full bg-[#1f6feb22] text-[#58a6ff] border border-[#1f6feb44] max-w-[280px] truncate">
+                🧠 {a.type === 'facts' ? 'memory' : a.type === 'timeline' ? 'timeline' : 'recall'} · {a.text.slice(0, 60)}…
+              </span>
+            ))}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {attachments.map((a, i) => (

@@ -252,6 +252,14 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
                 mood_engine.event("chat_reply")
         except Exception:
             pass
+        # Episodic timeline: journal every real turn
+        try:
+            from backend.memory.journal import record
+            record("user", message)
+            if not text.startswith(("[Not connected:", "[Provider")):
+                record("assistant", text[:500])
+        except Exception:
+            pass
         if text.startswith(("[Not connected:", "[Provider")) and _engine_ref is not None:
             try:
                 _engine_ref.sig_agent_state.emit("error")
@@ -322,6 +330,26 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         facts_ctx = build_facts_context()
         if facts_ctx:
             sys_prompt = sys_prompt + "\n\n" + facts_ctx
+
+        # User model: learned profile (preferences, rituals, hours, tone)
+        from backend.memory.user_profile import build_profile_context
+        profile_ctx = build_profile_context()
+        if profile_ctx:
+            sys_prompt = sys_prompt + "\n\n" + profile_ctx
+
+        # Episodic timeline: recent day summaries (persistent identity)
+        from backend.memory.journal import build_timeline_context
+        timeline_ctx = build_timeline_context()
+        if timeline_ctx:
+            sys_prompt = sys_prompt + "\n\n" + timeline_ctx
+
+        # Memory-grounded conversation: volunteer relevant past organically
+        sys_prompt += ("\n\nIf a saved fact, a previous conversation, or a "
+                       "recent day's summary is clearly relevant to this "
+                       "conversation, mention it naturally (e.g. 'last time "
+                       "we...', 'you mentioned before that...'). Do not force "
+                       "it when nothing fits.")
+
         context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
 
         # Long-term recall: inject relevant past conversation turns
@@ -337,6 +365,21 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         ]
         if memory_ctx:
             user_messages.insert(0, {"role": "user", "content": memory_ctx})
+
+        # Memory anchors for the chat UI: which memories were injected
+        try:
+            anchors = []
+            if memory_ctx:
+                anchors.append({"type": "recall", "text": memory_ctx[:300]})
+            if timeline_ctx:
+                anchors.append({"type": "timeline", "text": timeline_ctx[:300]})
+            if facts_ctx:
+                anchors.append({"type": "facts", "text": facts_ctx[:300]})
+            if anchors:
+                get_server().broadcast_nowait("memory.anchors",
+                                               {"anchors": anchors})
+        except Exception:
+            pass
 
         # Session continuity: recent session summaries (long-run memory)
         from backend.memory.session_summary import build_session_context
@@ -1135,6 +1178,20 @@ def _register_default_handlers():
         from backend.character.mood import mood_engine
         return {"mood": mood_engine.state()}
 
+    async def journal_list(params: dict, ws) -> dict:
+        from backend.memory.journal import list_days
+        return {"days": list_days(int(params.get("limit", 14)))}
+
+    async def journal_today(params: dict, ws) -> dict:
+        from backend.memory.journal import get_day
+        day = get_day()
+        return {"date": day["date"], "entries": day["entries"][-100:],
+                "summary": day["summary"]}
+
+    async def profile_get(params: dict, ws) -> dict:
+        from backend.memory.user_profile import get_profile
+        return {"profile": get_profile()}
+
     async def email_fetch(params: dict, ws) -> dict:
         from backend.integrations.email_integration import email_client
         unread = email_client.fetch_unread(limit=params.get("limit", 10))
@@ -1453,6 +1510,9 @@ def _register_default_handlers():
     _server.register("tasks.cancel", tasks_cancel)
     _server.register("tasks.month", tasks_month)
     _server.register("mood.status", mood_status)
+    _server.register("journal.list", journal_list)
+    _server.register("journal.today", journal_today)
+    _server.register("profile.get", profile_get)
 
     # Browser (Playwright)
     _server.register("browser.navigate", browser_navigate)

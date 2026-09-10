@@ -30,6 +30,8 @@ export default function MemoryPage() {
   const [facts, setFacts] = useState<Fact[]>([]);
   const [newFact, setNewFact] = useState('');
   const [triples, setTriples] = useState<any[]>([]);
+  const [journalDays, setJournalDays] = useState<any[]>([]);
+  const [profile, setProfile] = useState<any>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -47,6 +49,14 @@ export default function MemoryPage() {
       try {
         const t = await send('memory.listTriples', {});
         setTriples(t?.triples || []);
+      } catch { /* older backend */ }
+      try {
+        const j = await send('journal.list', { limit: 14 });
+        setJournalDays(j?.days || []);
+      } catch { /* older backend */ }
+      try {
+        const p = await send('profile.get', {});
+        setProfile(p?.profile || {});
       } catch { /* older backend */ }
       setError('');
     } catch (e: any) {
@@ -244,6 +254,41 @@ export default function MemoryPage() {
               </div>
             ))}
           </div>
+        </section>
+
+        {/* Conversation memories */}
+        <section>
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-[#8b949e] mb-2">
+            Timeline & User model
+          </h2>
+          {profile?.preferences?.length > 0 && (
+            <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-3 mb-3">
+              <p className="text-[10px] uppercase tracking-wide text-[#8b949e] mb-1">Learned profile</p>
+              <p className="text-xs text-[#e8eaed]">
+                {profile.tone && <span>Tone: {profile.tone} · </span>}
+                {profile.hours?.start && <span>Around {profile.hours.start}–{profile.hours.end} · </span>}
+                {profile.preferences?.length > 0 && <span>{profile.preferences.length} preferences</span>}
+              </p>
+              {profile.rituals?.length > 0 && (
+                <p className="text-[11px] text-[#8b949e] mt-1">Rituals: {profile.rituals.join(' · ')}</p>
+              )}
+            </div>
+          )}
+          {journalDays.length === 0 ? (
+            <p className="text-sm text-[#8b949e]">No journal days yet — the timeline fills in as you chat.</p>
+          ) : (
+            <div className="space-y-2">
+              {journalDays.slice(0, 7).map((d) => (
+                <div key={d.date} className="rounded-lg border border-[#30363d] bg-[#161b22] p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-[#58a6ff]">{d.date}</span>
+                    <span className="text-[10px] text-[#8b949e]">{d.entries} turns{d.summarized ? ' · summarized' : ''}</span>
+                  </div>
+                  {d.summary && <p className="text-xs text-[#e8eaed] mt-1">{d.summary}</p>}
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         {/* Conversation memories */}
