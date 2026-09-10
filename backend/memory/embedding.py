@@ -29,6 +29,7 @@ TRANSFORMERS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 _session = None       # onnxruntime.InferenceSession OR transformers AutoModel
 _tokenizer = None     # transformers tokenizer (used by both backends)
+_fast_tokenizer = None  # tokenizers.Tokenizer — works without transformers
 _backend = "uninitialized"   # "onnx" | "transformers" | "hash"
 
 
@@ -57,15 +58,33 @@ def _load() -> bool:
     if ONNX_PATH.exists():
         try:
             import onnxruntime as ort
-            from transformers import AutoTokenizer
             _session = ort.InferenceSession(
                 str(ONNX_PATH), providers=["CPUExecutionProvider"])
-            _tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR))
+        except Exception as e:
+            log.warning("ONNX session failed (%s) — trying transformers", e)
+            _session = None
+        else:
+            # Tokenizer: transformers when available, else the lightweight
+            # `tokenizers` lib (no torch dependency — fresh installs)
+            try:
+                from transformers import AutoTokenizer
+                global _tokenizer
+                _tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR))
+            except Exception:
+                _tokenizer = None
+            if _tokenizer is None:
+                try:
+                    from tokenizers import Tokenizer
+                    global _fast_tokenizer
+                    _fast_tokenizer = Tokenizer.from_file(
+                        str(MODEL_DIR / "tokenizer.json"))
+                except Exception as e:
+                    log.warning("No tokenizer available (%s) — hash fallback", e)
+                    _backend = "hash"
+                    return False
             _backend = "onnx"
             log.info("Embedder: ONNX MiniLM loaded from %s", MODEL_DIR)
             return True
-        except Exception as e:
-            log.warning("ONNX embedder failed (%s) — trying transformers", e)
 
     # 2) transformers fp32 (torch + transformers ship with the app bundle)
     try:
@@ -89,11 +108,20 @@ def embed_text(text: str) -> np.ndarray:
     if _load():
         try:
             if _backend == "onnx":
-                tok = _tokenizer(text, return_tensors="np",
-                                 truncation=True, max_length=256)
+                if _tokenizer is not None:
+                    tok = _tokenizer(text, return_tensors="np",
+                                     truncation=True, max_length=256)
+                    inputs = {k: v for k, v in tok.items()}
+                else:
+                    enc = _fast_tokenizer.encode(text)
+                    ids = enc.ids[:256]
+                    inputs = {
+                        "input_ids": np.array([ids], dtype=np.int64),
+                        "attention_mask": np.ones((1, len(ids)), dtype=np.int64),
+                    }
                 # only pass tensors the exported model actually expects
                 need = {i.name for i in _session.get_inputs()}
-                inputs = {k: v for k, v in tok.items() if k in need}
+                inputs = {k: v for k, v in inputs.items() if k in need}
                 out = _session.run(None, inputs)
                 hs = out[0]
                 vec = hs.mean(axis=1).squeeze(0) if hs.ndim == 3 else hs
