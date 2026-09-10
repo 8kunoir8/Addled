@@ -152,6 +152,9 @@ DEFAULT_SETTINGS: dict = {
         "user_browser": False,
         "cdp_port": 9222,
         "readonly": True,
+        "engine": "auto",
+        "task_mode": "auto",
+        "framework_max_steps": 10,
     },
     "desktop": {
         "allow_input": False,

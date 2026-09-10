@@ -10,8 +10,27 @@ export default function BrowserPage() {
   const [screenshot, setScreenshot] = useState<string|null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [taskInput, setTaskInput] = useState('');
+  const [taskRunning, setTaskRunning] = useState(false);
 
   const addLog = (msg: string) => setLogs(prev => [...prev.slice(-49), `[${new Date().toLocaleTimeString()}] ${msg}`]);
+
+  const runTask = async () => {
+    const task = taskInput.trim();
+    if (!task || wsState !== 'connected') return;
+    setTaskRunning(true);
+    addLog(`Task: ${task.slice(0, 80)}${task.length > 80 ? '…' : ''}`);
+    try {
+      const r = await send('browser.task', { task });
+      const engine = r?.engine || '?';  
+      addLog(r?.success
+        ? `Done via ${engine}${r?.degraded ? ` (degraded — ${r?.fallback_reason || 'fallback'})` : ''}`
+        : `Failed (${engine}): ${r?.error || 'unknown'}`);
+      if (r?.text) addLog(`Result: ${String(r.text).slice(0, 160)}...`);
+      else if (r?.result_text) addLog(`Result: ${String(r.result_text).slice(0, 160)}...`);
+    } catch (e: any) { addLog(`Task error: ${e.message}`); }
+    setTaskRunning(false);
+  };
 
   const handleNavigate = async () => {
     if (!url.trim() || wsState !== 'connected') return;
@@ -50,6 +69,16 @@ export default function BrowserPage() {
         <button onClick={handleNavigate} disabled={!url.trim()||loading||wsState!=='connected'} className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-lg px-3 py-1.5 text-sm">{loading?'...':'Go'}</button>
         {sessionActive&&<button onClick={handleClose} className="text-sm px-3 py-1.5 bg-[#f85149] text-white rounded-lg hover:bg-[#ff6a63]">Close</button>}
       </header>
+      <div className="px-4 py-2 border-b border-[#21262d] flex gap-2 items-center">
+        <span className="text-[11px] text-[#8b949e] shrink-0">🧠 Task:</span>
+        <input value={taskInput} onChange={e=>setTaskInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&runTask()}
+          placeholder="e.g. find the cheapest flight NYC → Tokyo next Friday and list the top 3"
+          className="flex-1 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-1.5 text-sm text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"/>
+        <button onClick={runTask} disabled={!taskInput.trim()||taskRunning||wsState!=='connected'}
+          className="bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 text-[#e8eaed] rounded-lg px-3 py-1.5 text-sm">
+          {taskRunning?'⟳':'Run'}
+        </button>
+      </div>
       <div className="flex-1 flex">
         <div className="flex-1 bg-[#0d1117] flex items-center justify-center">
           {screenshot ? <img src={screenshot} alt="Screenshot" className="max-w-full max-h-full object-contain"/> : (

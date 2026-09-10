@@ -1068,6 +1068,17 @@ def _register_default_handlers():
         from backend.browser.browser_engine import browser
         return await browser.close()
 
+    async def browser_status(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        return await browser.status()
+
+    async def browser_task(params: dict, ws) -> dict:
+        from backend.browser.browser_engine import browser
+        task = str(params.get("task", "")).strip()
+        if not task:
+            return {"success": False, "error": "task is required"}
+        return await browser.route_task(task, params.get("max_steps"))
+
     # ---- Skill Forge — self-extending capabilities --------------------------
 
     async def forge_create(params: dict, ws) -> dict:
@@ -1308,6 +1319,8 @@ def _register_default_handlers():
     _server.register("browser.screenshot", browser_screenshot)
     _server.register("browser.extract", browser_extract)
     _server.register("browser.close", browser_close)
+    _server.register("browser.status", browser_status)
+    _server.register("browser.task", browser_task)
 
     # Skill Forge
     _server.register("forge.create", forge_create)

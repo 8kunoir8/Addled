@@ -107,6 +107,49 @@ class PlaywrightBrowser:
                              "(Settings → Browser)"}
         return None
 
+    def _engine_allows(self, name: str) -> bool:
+        """True when the configured engine (auto or explicit) permits `name`."""
+        from backend.config import config
+        engine = config.get("browser", "engine", default="auto")
+        return engine in ("auto", name)
+
+    @staticmethod
+    def _playwright_available() -> bool:
+        try:
+            import playwright  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _cdp_port_reachable(port: int) -> bool:
+        try:
+            from backend.browser.cdp_client import CDPClient
+            return bool(CDPClient(port).list_targets())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _looks_open_ended(task: str) -> bool:
+        from backend.browser.framework_agent import OPEN_ENDED_HINTS
+        t = (task or "").lower()
+        return len(t.split()) > 8 or any(k in t for k in OPEN_ENDED_HINTS)
+
+    async def status(self) -> dict:
+        """Health snapshot for the dashboard + router."""
+        from backend.config import config
+        from backend.browser import framework_agent
+        return {
+            "mode": self.mode,
+            "engine": config.get("browser", "engine", default="auto"),
+            "task_mode": config.get("browser", "task_mode", default="auto"),
+            "playwright_available": self._playwright_available(),
+            "cdp_available": self._cdp_port_reachable(
+                int(config.get("browser", "cdp_port", default=9222))),
+            "framework_available": framework_agent.available(),
+            "llm_available": framework_agent.llm_available(),
+        }
+
     async def _fetch_http(self, url: str) -> dict:
         """Fetch a page with stdlib urllib and reduce it to readable text.
         Used when Playwright is unavailable — covers navigate/extract for
@@ -163,9 +206,11 @@ class PlaywrightBrowser:
             return {"success": False, "error": "No URL provided"}
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        from backend.config import config
+        engine = config.get("browser", "engine", default="auto")
 
         # 1) User's own browser via CDP (opt-in)
-        if await self._ensure_cdp():
+        if engine in ("auto", "cdp") and await self._ensure_cdp():
             err = self._cdp_guard("navigate")
             if err:
                 return err
@@ -183,40 +228,45 @@ class PlaywrightBrowser:
             except Exception as e:
                 return {"success": False, "error": f"CDP navigate failed: {e}"}
 
-        if not await self._ensure_browser():
-            # Playwright unavailable — fall back to plain HTTP fetch
-            log.info("Playwright unavailable — using lightweight HTTP fetch")
+        # 2) Own Playwright Chromium
+        if engine in ("auto", "playwright") and await self._ensure_browser():
             try:
-                return await self._fetch_http(url)
+                await self._page.goto(url, wait_until="domcontentloaded",
+                                      timeout=30000)
+                self._state.url = self._page.url
+                self._state.title = await self._page.title()
+                self._state.history.append(self._state.url)
+                self._state.history_index = len(self._state.history) - 1
+
+                screenshot = await self._page.screenshot(type="jpeg", quality=70)
+                self._state.screenshot_b64 = base64.b64encode(screenshot).decode()
+
+                return {
+                    "success": True,
+                    "url": self._state.url,
+                    "title": self._state.title,
+                    "screenshot": self._state.screenshot_b64,
+                    "engine": "playwright",
+                }
             except Exception as e:
-                hint = ("Automated access may be blocked. Try the web_fetch "
-                        "or web_search tool instead.")
-                return {"success": False, "error": f"{e} — {hint}"}
+                if engine == "playwright":
+                    return {"success": False,
+                            "error": f"Playwright navigate failed: {e}"}
+                log.warning("Playwright navigate failed (%s) — falling back to HTTP", e)
 
+        # Explicit engine unavailable → clear error, no silent fallback
+        if engine in ("cdp", "playwright"):
+            return {"success": False,
+                    "error": f"Browser engine '{engine}' is not available"}
+
+        # 3) HTTP fallback (always available)
+        log.info("Using lightweight HTTP fetch")
         try:
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            self._state.url = self._page.url
-            self._state.title = await self._page.title()
-            self._state.history.append(self._state.url)
-            self._state.history_index = len(self._state.history) - 1
-
-            screenshot = await self._page.screenshot(type="jpeg", quality=70)
-            self._state.screenshot_b64 = base64.b64encode(screenshot).decode()
-
-            return {
-                "success": True,
-                "url": self._state.url,
-                "title": self._state.title,
-                "screenshot": self._state.screenshot_b64,
-            }
+            return await self._fetch_http(url)
         except Exception as e:
-            log.warning("Playwright navigate failed (%s) — falling back to HTTP", e)
-            try:
-                return await self._fetch_http(url)
-            except Exception as e2:
-                hint = ("Automated access may be blocked. Try the web_fetch "
-                        "or web_search tool instead.")
-                return {"success": False, "error": f"{e2} — {hint}"}
+            hint = ("Automated access may be blocked. Try the web_fetch "
+                    "or web_search tool instead.")
+            return {"success": False, "error": f"{e} — {hint}"}
 
     async def go_back(self) -> dict:
         """Go back in browser history."""
@@ -251,7 +301,7 @@ class PlaywrightBrowser:
     async def click(self, selector: str | None = None, x: int | None = None,
                     y: int | None = None) -> dict:
         """Click on an element by CSS selector or coordinates."""
-        if await self._ensure_cdp():
+        if self._engine_allows("cdp") and await self._ensure_cdp():
             err = self._cdp_guard("click")
             if err:
                 return err
@@ -290,7 +340,7 @@ class PlaywrightBrowser:
 
     async def type_text(self, selector: str, text: str) -> dict:
         """Type text into an input element."""
-        if await self._ensure_cdp():
+        if self._engine_allows("cdp") and await self._ensure_cdp():
             err = self._cdp_guard("type")
             if err:
                 return err
@@ -313,7 +363,7 @@ class PlaywrightBrowser:
 
     async def screenshot(self, full_page: bool = False) -> dict:
         """Take a screenshot of the current page."""
-        if await self._ensure_cdp():
+        if self._engine_allows("cdp") and await self._ensure_cdp():
             try:
                 shot = await self._cdp.screenshot_b64()
                 self._state.screenshot_b64 = shot
@@ -334,7 +384,7 @@ class PlaywrightBrowser:
 
     async def extract(self, selector: str | None = None) -> dict:
         """Extract page content: text, all text, or specific element."""
-        if await self._ensure_cdp():
+        if self._engine_allows("cdp") and await self._ensure_cdp():
             try:
                 if selector:
                     text = await self._cdp.evaluate(
@@ -400,6 +450,110 @@ class PlaywrightBrowser:
             "screenshot": self._state.screenshot_b64[:200] + "..." if self._state.screenshot_b64 else "",
             "historyLength": len(self._state.history),
         }
+
+    # ---- Task routing (conditional framework use) ---------------------------
+
+    async def _run_deterministic(self, task: str, engine: str) -> dict:
+        """Best-effort deterministic handling: search-results page via the
+        chosen backend. engine: auto | cdp | playwright | http."""
+        import urllib.parse
+        q = urllib.parse.quote((task or "")[:200])
+        url = f"https://www.bing.com/search?q={q}"
+        if engine == "http":
+            try:
+                res = await self._fetch_http(url)
+                res["engine"] = "http"
+                return res
+            except Exception as e:
+                return {"success": False, "engine": "http", "error": str(e)}
+        if engine == "cdp":
+            if not await self._ensure_cdp():
+                return {"success": False, "engine": "cdp",
+                        "error": "CDP not available — launch the browser "
+                                 "with --remote-debugging-port"}
+            try:
+                await self._cdp.navigate(url)
+                return {"success": True, "engine": "cdp", "url": url,
+                        "title": await self._cdp.title(),
+                        "text": (await self._cdp.text())[:10000]}
+            except Exception as e:
+                return {"success": False, "engine": "cdp", "error": str(e)}
+        if engine == "playwright":
+            if not await self._ensure_browser():
+                return {"success": False, "engine": "playwright",
+                        "error": "Playwright not installed"}
+            try:
+                await self._page.goto(url, wait_until="domcontentloaded",
+                                      timeout=30000)
+                text = await self._page.inner_text("body")
+                return {"success": True, "engine": "playwright", "url": url,
+                        "title": await self._page.title(),
+                        "text": (text or "")[:10000]}
+            except Exception as e:
+                return {"success": False, "engine": "playwright",
+                        "error": str(e)}
+        # auto: best-fit deterministic
+        if await self._ensure_cdp():
+            return await self._run_deterministic(task, "cdp")
+        if self._playwright_available():
+            return await self._run_deterministic(task, "playwright")
+        return await self._run_deterministic(task, "http")
+
+    async def route_task(self, task: str, max_steps: int | None = None) -> dict:
+        """Route an open-ended browsing task to the best backend.
+
+        The browser-use framework runs ONLY when installed AND an LLM is
+        available AND the task looks open-ended; otherwise the best-fit
+        deterministic backend handles it and the result is marked degraded."""
+        from backend.config import config
+        task = (task or "").strip()
+        if not task:
+            return {"success": False, "error": "No task provided"}
+        engine = config.get("browser", "engine", default="auto")
+        task_mode = config.get("browser", "task_mode", default="auto")
+        max_steps = int(max_steps or config.get("browser",
+                                                "framework_max_steps",
+                                                default=10))
+
+        # 1) explicit deterministic engine override
+        if engine in ("cdp", "playwright", "http"):
+            return await self._run_deterministic(task, engine)
+
+        # 2) framework decision (conditional)
+        from backend.browser.framework_agent import available as fw_available
+        from backend.browser.framework_agent import llm_available
+        use_framework = False
+        reason = ""
+        if task_mode == "always":
+            if fw_available():
+                use_framework = True
+            else:
+                reason = "browser-use not installed"
+        elif task_mode == "off":
+            reason = "task_mode is off"
+        else:  # auto
+            if fw_available() and llm_available() and \
+                    self._looks_open_ended(task):
+                use_framework = True
+            elif not llm_available():
+                reason = "LLM unavailable"
+            elif not fw_available():
+                reason = "browser-use not installed"
+            else:
+                reason = "task not open-ended"
+
+        if use_framework:
+            from backend.browser.framework_agent import run_task
+            res = await run_task(task, max_steps=max_steps)
+            if res.get("success"):
+                return {**res, "engine": "framework", "degraded": False}
+            reason = f"framework failed: {res.get('error')}"
+
+        # 3) best-fit deterministic fallback
+        result = await self._run_deterministic(task, "auto")
+        result["degraded"] = True
+        result["fallback_reason"] = reason
+        return result
 
 
 # Singleton

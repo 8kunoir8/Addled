@@ -68,7 +68,7 @@ export default function SettingsPage() {
         {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='memory'&&<MemorySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='tools'&&<ToolsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
-        {activeSection==='browser'&&<BrowserSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
+        {activeSection==='browser'&&<BrowserSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='desktop'&&<DesktopSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='integrations'&&<IntegrationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='appearance'&&<AppearanceSection/>}
@@ -319,14 +319,29 @@ function ToolsSection({ settings, update, saving, status, send, connected }: any
   </div>;
 }
 
-function BrowserSection({ settings, update, saving, status }: any) {
+function BrowserSection({ settings, update, saving, status, send, connected }: any) {
   const b=settings?.browser||{};
+  const [bst, setBst] = useState<any>(null);
+  useEffect(() => {
+    if (connected) send('browser.status', {}).then((r: any) => setBst(r || null)).catch(() => {});
+  }, [connected, send]);
   const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('browser',skey,!b[skey])} className={`w-10 h-5 rounded-full transition-colors ${b[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${b[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const Status=({label, ok}:{label:string;ok?:boolean})=><p className="text-xs mb-0.5">{ok?'✓':'·'} {label}</p>;
   return <div className="space-y-1">
     <Toggle label="Attach to my browser" desc="Use your running Chrome/Edge via its debug port instead of Addled's own browser. Requires launching the browser with --remote-debugging-port." skey="user_browser"/>
     <Toggle label="Read-only" desc="Only read pages and take screenshots — block clicking, typing and navigation in your browser" skey="readonly"/>
     <SettingRow label="Debug port"><input type="number" value={b.cdp_port||9222} onChange={e=>update('browser','cdp_port',parseInt(e.target.value)||9222)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-24"/></SettingRow>
-    <SettingRow label="How to enable" description="Close the browser, then launch it with the flag (e.g. chrome.exe --remote-debugging-port=9222), then revisit."><span className="text-xs text-[#8b949e]">See README</span></SettingRow>
+    <SettingRow label="Engine"><select value={b.engine||'auto'} onChange={e=>update('browser','engine',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="auto">Auto</option><option value="cdp">My browser (CDP)</option><option value="playwright">Playwright</option><option value="http">HTTP only</option></select></SettingRow>
+    <SettingRow label="Framework mode" description="browser-use handles open-ended multi-step tasks — used only when installed AND an LLM is available"><select value={b.task_mode||'auto'} onChange={e=>update('browser','task_mode',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="auto">Auto (conditional)</option><option value="off">Off</option><option value="always">Always</option></select></SettingRow>
+    <SettingRow label="Backend status">
+      <div>
+        <Status label="Playwright installed" ok={bst?.playwright_available}/>
+        <Status label="Browser attach available" ok={bst?.cdp_available}/>
+        <Status label="browser-use installed" ok={bst?.framework_available}/>
+        <Status label="LLM available" ok={bst?.llm_available}/>
+      </div>
+    </SettingRow>
+    <SettingRow label="Optional installs" description="Playwright and browser-use are optional — install via scripts/fetch_playwright.py and scripts/fetch_browser_use.py (see README)."><span className="text-xs text-[#8b949e]">See README</span></SettingRow>
   </div>;
 }
 

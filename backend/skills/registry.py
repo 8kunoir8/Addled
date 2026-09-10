@@ -678,6 +678,27 @@ class SkillRegistry:
             browser_type, "browser",
         ))
 
+        async def browser_task(params: dict) -> dict:
+            from backend.browser.browser_engine import browser
+            return await browser.route_task(
+                str(params.get("task", "")), params.get("max_steps"))
+        self.register(SkillDefinition(
+            "browser_task",
+            "Delegate an open-ended multi-step web task (e.g. 'find the "
+            "cheapest flight from NYC to Tokyo next Friday and list the "
+            "top 3'). Addled picks the best backend automatically and "
+            "falls back to a simple search when the AI framework or LLM "
+            "is unavailable.",
+            {"type": "object", "properties": {
+                "task": {"type": "string",
+                         "description": "Natural-language browsing task"},
+                "max_steps": {"type": "integer",
+                              "description": "Max framework steps",
+                              "default": 10},
+            }, "required": ["task"]},
+            browser_task, "browser",
+        ))
+
     # ── Code ─────────────────────────────────────────────────────────────
 
     def _register_code_skills(self):
