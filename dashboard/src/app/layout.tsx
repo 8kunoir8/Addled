@@ -51,6 +51,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     setBrowserPrompt(p?.backend || 'playwright');
   }), [onNotification]);
 
+  // Backend-initiated navigation (e.g. character right-click → Settings)
+  useEffect(() => onNotification('ui.navigate', (p: any) => {
+    let path = p?.path || '/';
+    if (!path.startsWith('/')) path = '/' + path;
+    if (typeof window !== 'undefined' && window.location.pathname !== path) {
+      window.location.href = path;
+    }
+  }), [onNotification]);
+
   const wsStatusColor =
     wsState === 'connected' ? 'bg-green-500' :
     wsState === 'connecting' ? 'bg-yellow-500' : 'bg-red-500';

@@ -304,14 +304,37 @@ class CharacterWidget(QWidget):
                 )
 
     def _default_settings_dialog(self):
-        """Open the dashboard in the default browser (correct URL for
-        dev vs packaged install)."""
+        """Open Settings in the Addled GUI window (not an external browser tab)."""
         import pathlib
         import sys
         import webbrowser
         backend_dir = pathlib.Path(sys.argv[0]).resolve().parent
         packaged = backend_dir.parent.name == "resources"
         url = "http://127.0.0.1:3001" if packaged else "http://localhost:3000"
+
+        # 1) tell the dashboard (Electron window) to navigate to /settings
+        try:
+            from backend.ws_server import get_server
+            server = get_server()
+            if server is not None:
+                server.broadcast_nowait("ui.navigate", {"path": "/settings"})
+        except Exception:
+            pass
+
+        # 2) bring the Addled window to the front
+        try:
+            import asyncio
+            from backend.actions.window_manager import WindowManager
+
+            async def _focus():
+                return await WindowManager().focus("Addled")
+
+            asyncio.run(_focus())
+            return
+        except Exception:
+            pass
+
+        # 3) fallback: open in the default browser
         try:
             webbrowser.open(url)
         except Exception:
