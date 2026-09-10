@@ -158,12 +158,18 @@ Prompt guard (15 injection + 5 exfiltration patterns), presence guard (meeting/g
 ### 🎤 Voice & Perception
 **Voice input**: wake word → command → chat → spoken reply (local faster-whisper, offline). Edge TTS output. **Auto TTS toggle** (Settings → Voice): dashboard chat and character prompts speak replies out loud. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
 
-### 📦 Installer & Auto-Update
+### � Skills & Market
+33 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
+
+### 🌐 Browser & Desktop
+Four browser backends with **task-based routing**: your running Chrome/Edge via CDP (read-only by default, opt-in), Playwright's own Chromium, the **browser-use** AI framework for open-ended tasks (used only when installed AND an LLM is available), and an always-on HTTP fallback. Missing backends can **auto-install on demand** (`ask` / `off` / `auto` policy with a dashboard approval banner). **Desktop control** (mouse/keyboard) is first-class but off by default: session grants via dashboard prompt, screen-bounds checks, typing caps, hotkey whitelist, pyautogui FAILSAFE, and egress logging.
+
+### �📦 Installer & Auto-Update
 Windows NSIS + portable installer via electron-builder. **Weekly auto-update** against the latest GitHub release (version discovery via the GitHub API; delta updates via latest.yml + blockmap). If the repo is private, the check degrades gracefully and resumes automatically once it's public. Manual "Check for Updates" in the tray. First-run PyQt6 onboarding wizard (6 steps).
 
 ---
 
-## WebSocket API (62 handlers)
+## WebSocket API (74 handlers)
 
 ### Core
 `chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set`
@@ -184,7 +190,7 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 `calendar.add` `calendar.list` `calendar.delete` `email.fetch` `email.send` `email.search`
 
 ### Browser
-`browser.navigate` `browser.go_back` `browser.go_forward` `browser.click` `browser.type` `browser.screenshot` `browser.extract` `browser.close`
+`browser.navigate` `browser.go_back` `browser.go_forward` `browser.click` `browser.type` `browser.screenshot` `browser.extract` `browser.close` `browser.status` `browser.task` `browser.installApprove`
 
 ### Privacy & Monitoring
 `privacy.setZones` `privacy.list` `privacy.excludeApp` `privacy.removeApp` `egress.list` `snapshot.list`
@@ -194,6 +200,12 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 
 ### Skill Forge
 `forge.create` `forge.list`
+
+### Skills
+`skills.list` `skills.setState` `skills.delete` `skills.searchMarket` `skills.installFrom`
+
+### Desktop control
+`desktop.status` `desktop.grant` `desktop.revoke`
 
 ### Server pushes
 `state.changed` (character state) · `observer.insight` (proactive suggestions) · `chat.push` (character/voice-initiated messages) · `kill.activated`
