@@ -197,6 +197,84 @@ class VectorStore:
         except Exception:
             return (-1, -1)
 
+    def reembed(self, row_id: int, embedding: np.ndarray,
+                kind: str = "minilm") -> bool:
+        """Replace a row's vector and tag it with the embedder used."""
+        if not self.available:
+            return False
+        try:
+            if embedding.shape[0] != self._dim:
+                embedding = self._resize(embedding)
+            blob = embedding.astype(np.float32).tobytes()
+            row = self._conn.execute(
+                "SELECT metadata FROM vectors WHERE id = ?",
+                (int(row_id),)).fetchone()
+            meta = json.loads(row[0]) if row and row[0] else {}
+            meta["embedder"] = kind
+            self._conn.execute(
+                "UPDATE vectors SET embedding = ?, metadata = ? WHERE id = ?",
+                (blob, json.dumps(meta), int(row_id)))
+            self._conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def dedup(self, category: str | None = None, min_sim: float = 0.95,
+              scan_limit: int = 2000) -> int:
+        """Drop near-duplicate rows (newest kept). Returns count removed."""
+        if not self.available:
+            return 0
+        try:
+            rows = self._conn.execute(
+                "SELECT id, embedding, category FROM vectors "
+                "ORDER BY timestamp DESC LIMIT ?", (scan_limit,)).fetchall()
+            kept: list[tuple[np.ndarray, str]] = []
+            drop_ids: list[int] = []
+            for row_id, blob, cat in rows:
+                vec = np.frombuffer(blob, dtype=np.float32)
+                if vec.shape[0] != self._dim:
+                    continue
+                vn = np.linalg.norm(vec)
+                if vn == 0:
+                    continue
+                dup = False
+                for kvec, kcat in kept:
+                    if category is not None and kcat != category:
+                        continue
+                    sim = float(np.dot(vec, kvec) / (vn * np.linalg.norm(kvec)))
+                    if sim >= min_sim:
+                        dup = True
+                        break
+                if dup:
+                    drop_ids.append(row_id)
+                else:
+                    kept.append((vec, cat))
+            for rid in drop_ids:
+                self._conn.execute("DELETE FROM vectors WHERE id = ?", (rid,))
+            self._conn.commit()
+            return len(drop_ids)
+        except Exception:
+            return 0
+
+    def expire(self, category: str | None = None,
+               max_age_h: float = 24 * 365) -> int:
+        """Delete rows older than max_age_h. Returns count removed."""
+        if not self.available:
+            return 0
+        cutoff = time.time() - max_age_h * 3600
+        try:
+            if category:
+                cur = self._conn.execute(
+                    "DELETE FROM vectors WHERE category = ? AND timestamp < ?",
+                    (category, cutoff))
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM vectors WHERE timestamp < ?", (cutoff,))
+            self._conn.commit()
+            return cur.rowcount
+        except Exception:
+            return 0
+
 
 # Singleton
 vector_store = VectorStore()

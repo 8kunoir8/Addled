@@ -132,8 +132,11 @@ DEFAULT_SETTINGS: dict = {
         "min_similarity": 0.05,
         "compaction_threshold": 40,
         "auto_facts": False,
+        "graph_extract": False,
         "facts_max": 200,
         "maintenance_interval_min": 30,
+        "dedup_min_sim": 0.95,
+        "max_age_days": 365,
     },
     "voice": {
         "tts_engine": "edge",

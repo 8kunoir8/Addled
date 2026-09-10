@@ -332,6 +332,23 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         if rolling_ctx:
             user_messages.insert(0, {"role": "user", "content": rolling_ctx})
 
+        # Temporal fact triples (Graphiti-lite) — relational questions only
+        rel_kw = ("decide", "decided", "prefer", "preference", "favorite",
+                  "project", "working on", "what is my", "name of", "use for")
+        if any(k in message.lower() for k in rel_kw):
+            try:
+                from backend.memory.knowledge_graph import kg
+                triples = kg.lookup(limit=10)
+                if triples:
+                    lines = "\n".join(
+                        f"- {t['subject']} {t['relation']} {t['object']}"
+                        for t in triples)
+                    user_messages.insert(0, {"role": "user", "content":
+                        "[Saved facts] Things on record about the user:\n" +
+                        lines + "\nUse them when relevant."})
+            except Exception as e:
+                log.debug("triple lookup failed: %s", e)
+
         # Live screen awareness: let the model know what the observer sees
         screen_note = None
         if _engine_ref:

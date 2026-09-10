@@ -90,3 +90,53 @@ def build_facts_context(max_facts: int = 20) -> str | None:
     return ("[Core memory] Durable facts saved about the user (preferences, "
             f"decisions, context):\n{lines}\n"
             "Treat these as true unless the user contradicts them.")
+
+
+async def auto_extract_facts() -> int:
+    """Ask the LLM for durable facts from recent turns. Opt-in only
+    (memory.auto_facts). Returns the number of facts added."""
+    from backend.config import config
+    if not config.get("memory", "auto_facts", default=False):
+        return 0
+
+    from backend.memory.chat_history import chat_history
+    messages = chat_history.get_context(max_messages=20)
+    user_msgs = [str(m["content"])[:300] for m in messages
+                 if m.get("role") == "user"]
+    if not user_msgs:
+        return 0
+
+    from backend.providers.registry import get_provider
+    try:
+        provider = get_provider()
+    except Exception:
+        return 0
+
+    transcript = "\n".join(f"- {m}" for m in user_msgs[-10:])
+    prompt = ("From this conversation, extract up to 5 durable facts about "
+              "the user worth remembering (preferences, projects, decisions). "
+              "Return ONLY a JSON array of short strings, or [] if nothing "
+              "worth saving.\n\n" + transcript)
+    try:
+        result = await provider.chat(
+            [{"role": "user", "content": prompt}],
+            max_tokens=200, temperature=0.2)
+        if not result.ok or not result.response or \
+                result.response.startswith(("[Provider", "[Not connected")):
+            return 0
+        match = re.search(r"\[.*\]", result.response, re.S)
+        if not match:
+            return 0
+        items = json.loads(match.group(0))
+        added = 0
+        for item in items:
+            if isinstance(item, str):
+                fact = add_fact(item, source="agent")
+                if fact:
+                    added += 1
+        if added:
+            log.info("Auto-extracted %d fact(s)", added)
+        return added
+    except Exception as e:
+        log.debug("auto facts failed: %s", e)
+        return 0

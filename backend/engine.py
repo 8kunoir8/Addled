@@ -57,6 +57,7 @@ class Engine(QObject):
         self._last_context = None  # latest meaningful activity context
         self._last_insight_text = ""  # dedup: don't repeat the same insight
         self._last_insight_time = 0.0
+        self._last_maintenance = 0.0  # last memory-maintenance dispatch
         self._chat_busy = False  # a chat is in flight — don't force 'idle'
         self._voice_busy = False  # TTS is speaking — don't force 'idle'
 
@@ -212,6 +213,16 @@ class Engine(QObject):
         if (self._state == EngineState.RUNNING
                 and not self._chat_busy and not self._voice_busy):
             self.sig_agent_state.emit("idle")
+
+        # 5. Memory maintenance (re-embed, compaction, facts, triples,
+        #    dedup) — fire-and-forget; each job throttles itself internally
+        try:
+            if time.time() - self._last_maintenance >= 60.0:
+                self._last_maintenance = time.time()
+                from backend.memory.maintenance import run_maintenance
+                asyncio.ensure_future(run_maintenance())
+        except Exception as e:
+            log.debug("maintenance dispatch failed: %s", e)
 
     def _push_insight(self, obs):
         """Deliver a proactive insight to dashboards/bots, and optionally

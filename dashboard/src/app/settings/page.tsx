@@ -294,6 +294,7 @@ function MemorySection({ settings, update, saving, status }: any) {
     <Toggle label="Semantic recall" desc="Local MiniLM embeddings for meaning-based memory search (falls back to hashed keywords when the model is missing)" skey="semantic_embeddings"/>
     <Toggle label="Hybrid search" desc="Fuse semantic + exact-keyword matching for stronger recall" skey="hybrid_search"/>
     <Toggle label="Auto memory notes" desc="Let the agent occasionally write durable facts about you in the background (uses provider credits)" skey="auto_facts"/>
+    <Toggle label="Knowledge graph" desc="Extract fact triples (subject → relation → object) from conversations in the background (uses provider credits)" skey="graph_extract"/>
     <SettingRow label="Vector Store"><span className="text-xs text-[#8b949e]">SQLite + numpy (384-dim)</span></SettingRow>
   </div>;
 }
