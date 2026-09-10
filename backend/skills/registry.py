@@ -205,27 +205,42 @@ class SkillRegistry:
     def register(self, skill: SkillDefinition):
         self._skills[skill.name] = skill
 
+    def unregister(self, name: str) -> None:
+        self._skills.pop(name, None)
+
     def get(self, name: str) -> SkillDefinition | None:
         return self._skills.get(name)
 
     def list_all(self) -> list[SkillDefinition]:
         return list(self._skills.values())
 
+    def is_enabled(self, name: str) -> bool:
+        """Per-skill off switch (Settings → Skills / skills.setState)."""
+        try:
+            from backend.config import config
+            disabled = config.get("skills", "disabled", default=[]) or []
+        except Exception:
+            disabled = []
+        return name not in disabled
+
+    def enabled_list_all(self) -> list[SkillDefinition]:
+        return [s for s in self._skills.values() if self.is_enabled(s.name)]
+
     def list_category(self, category: str) -> list[SkillDefinition]:
         return [s for s in self._skills.values() if s.category == category]
 
     def to_openai_tools(self) -> list[dict]:
-        return [s.to_openai_tool() for s in self._skills.values()]
+        return [s.to_openai_tool() for s in self.enabled_list_all()]
 
     def to_claude_tools(self) -> list[dict]:
-        return [s.to_claude_tool() for s in self._skills.values()]
+        return [s.to_claude_tool() for s in self.enabled_list_all()]
 
     def to_prompt_tools(self) -> str:
         """For providers without native tool support: append to system prompt."""
         lines = ["\n## Available Tools\n"]
         lines.append("You can call these tools by responding with a JSON block:")
         lines.append('```tool\n{"tool": "tool_name", "params": {...}}\n```\n')
-        for skill in self._skills.values():
+        for skill in self.enabled_list_all():
             lines.append(skill.to_prompt_desc())
             lines.append("")
         return "\n".join(lines)
@@ -235,6 +250,9 @@ class SkillRegistry:
         skill = self._skills.get(name)
         if not skill:
             return SkillResult(False, name, error=f"Unknown skill: {name}")
+        if not self.is_enabled(name):
+            return SkillResult(False, name,
+                               error=f"Skill '{name}' is disabled")
 
         try:
             result = await skill.handler(params)

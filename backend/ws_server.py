@@ -1073,6 +1073,82 @@ def _register_default_handlers():
         skills = skill_forge.list_forged()
         return {"skills": skills, "count": len(skills)}
 
+    # ---- Skill management (market + toggles) -------------------------------
+
+    async def skills_list(params: dict, ws) -> dict:
+        from backend.skills.registry import skill_registry
+        out = []
+        for s in sorted(skill_registry.list_all(),
+                        key=lambda x: (x.category, x.name)):
+            out.append({
+                "name": s.name,
+                "category": s.category,
+                "description": s.description[:300],
+                "requires_approval": bool(s.requires_approval),
+                "enabled": skill_registry.is_enabled(s.name),
+                "deletable": s.category in ("forged", "market"),
+                "source": s.category,
+            })
+        return {"skills": out, "count": len(out)}
+
+    async def skills_set_state(params: dict, ws) -> dict:
+        from backend.config import config
+        name = str(params.get("name", "")).strip()
+        enabled = bool(params.get("enabled", True))
+        if not name:
+            return {"success": False, "error": "name is required"}
+        disabled = list(config.get("skills", "disabled", default=[]) or [])
+        if enabled:
+            disabled = [d for d in disabled if d != name]
+        elif name not in disabled:
+            disabled.append(name)
+        config.set("skills", "disabled", value=disabled)
+        return {"success": True, "name": name, "enabled": enabled}
+
+    async def skills_delete(params: dict, ws) -> dict:
+        from backend.skills.registry import skill_registry
+        name = str(params.get("name", "")).strip()
+        if not name:
+            return {"success": False, "error": "name is required"}
+        skill = skill_registry.get(name)
+        if not skill:
+            return {"success": False, "error": f"Skill not found: {name}"}
+        if skill.category == "market":
+            from backend.skills.market import market
+            ok = market.delete(name)
+        elif skill.category == "forged":
+            from backend.skills.forge import skill_forge
+            ok = skill_forge.delete(name)
+        else:
+            return {"success": False,
+                    "error": "Built-in skills cannot be deleted — disable them instead"}
+        return {"success": ok}
+
+    async def skills_search_market(params: dict, ws) -> dict:
+        from backend.skills.market_search import search
+        q = str(params.get("query", "")).strip()
+        if not q:
+            return {"success": False, "error": "query is required"}
+        return {"success": True, "results": await search(q, limit=8)}
+
+    async def skills_install_from(params: dict, ws) -> dict:
+        from backend.skills.market import market
+        repo = str(params.get("repo", "")).strip()
+        url = str(params.get("url", "")).strip()
+        if not repo and not url:
+            return {"success": False, "error": "Provide 'url' or 'repo'"}
+        try:
+            if url:
+                meta = market.install_from_url(url)
+            else:
+                meta = market.install_from_github(
+                    repo, str(params.get("path", "")).strip())
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, "skill": meta["name"],
+                "scripts": meta.get("scripts", []),
+                "license": meta.get("license", "")}
+
     # ---- Sprite skins (codex-pet style character body) ----------------------
 
     async def character_skins_list(params: dict, ws) -> dict:
@@ -1212,6 +1288,13 @@ def _register_default_handlers():
     # Skill Forge
     _server.register("forge.create", forge_create)
     _server.register("forge.list", forge_list)
+
+    # Skill management
+    _server.register("skills.list", skills_list)
+    _server.register("skills.setState", skills_set_state)
+    _server.register("skills.delete", skills_delete)
+    _server.register("skills.searchMarket", skills_search_market)
+    _server.register("skills.installFrom", skills_install_from)
 
     # Excel operations
     _server.register("excel.read", excel_read)

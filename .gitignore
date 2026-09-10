@@ -8,6 +8,7 @@ backend/memory/*.db
 backend/memory/*.json
 backend/memory/goals/
 backend/memory/models/
+backend/memory/market_skills/
 tools/
 backend/memory/.vault*
 backend/memory/*.log

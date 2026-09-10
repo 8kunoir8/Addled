@@ -76,6 +76,19 @@ class SkillForge:
             except Exception as e:
                 log.warning("Failed to load forged skill %s: %s", f.name, e)
 
+    def delete(self, name: str) -> bool:
+        """Remove a forged skill from disk + registry."""
+        p = FORGE_DIR / f"{name}.py"
+        ok = False
+        if p.exists():
+            p.unlink()
+            ok = True
+        self._forged.pop(name, None)
+        skill_registry.unregister(name)
+        if ok:
+            log.info("Deleted forged skill: %s", name)
+        return ok
+
     # ── Discovery ────────────────────────────────────────────────────────
 
     async def discover(self, task_description: str, provider=None) -> dict:

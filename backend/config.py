@@ -141,6 +141,13 @@ DEFAULT_SETTINGS: dict = {
     "tools": {
         "rtk_enabled": True,
     },
+    "skills": {
+        "disabled": [],
+        "pinned": [],
+        "market_search": True,
+        "market_sim_threshold": 0.45,
+        "allow_script_skills": False,
+    },
     "voice": {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",

@@ -35,8 +35,29 @@ async def execute_skill(name: str, params: dict, provider=None) -> dict:
             "forged": False,
         }
 
-    # Skill not found — try forging it
-    log.info("Skill '%s' not found — attempting forge", name)
+    # Skill not found — try the market first, then the forge
+    log.info("Skill '%s' not found — attempting market search", name)
+    try:
+        from backend.config import config
+        if config.get("skills", "market_search", default=True):
+            from backend.skills.market_search import search_and_install
+            installed_name = await search_and_install(
+                name,
+                float(config.get("skills", "market_sim_threshold",
+                                 default=0.45)))
+            if installed_name:
+                result = await skill_registry.execute(installed_name, params)
+                return {
+                    "success": result.success,
+                    "data": result.data,
+                    "error": result.error,
+                    "forged": False,
+                    "market": True,
+                    "installed_skill": installed_name,
+                }
+    except Exception as e:
+        log.debug("market search failed: %s", e)
+
     try:
         from backend.skills.forge import skill_forge
 
