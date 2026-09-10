@@ -35,6 +35,12 @@ def available() -> bool:
     return _available_cache
 
 
+def refresh() -> None:
+    """Invalidate the import cache (call after a successful install)."""
+    global _available_cache
+    _available_cache = None
+
+
 def llm_available() -> bool:
     """True when an LLM usable by browser-use is configured and healthy.
 

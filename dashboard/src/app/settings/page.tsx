@@ -333,11 +333,14 @@ function BrowserSection({ settings, update, saving, status, send, connected }: a
     <SettingRow label="Debug port"><input type="number" value={b.cdp_port||9222} onChange={e=>update('browser','cdp_port',parseInt(e.target.value)||9222)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-24"/></SettingRow>
     <SettingRow label="Engine"><select value={b.engine||'auto'} onChange={e=>update('browser','engine',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="auto">Auto</option><option value="cdp">My browser (CDP)</option><option value="playwright">Playwright</option><option value="http">HTTP only</option></select></SettingRow>
     <SettingRow label="Framework mode" description="browser-use handles open-ended multi-step tasks — used only when installed AND an LLM is available"><select value={b.task_mode||'auto'} onChange={e=>update('browser','task_mode',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="auto">Auto (conditional)</option><option value="off">Off</option><option value="always">Always</option></select></SettingRow>
+    <SettingRow label="Auto-install backends" description="When a task needs Playwright or browser-use and it's missing: ask first (recommended), install silently, or never"><select value={b.auto_install||'ask'} onChange={e=>update('browser','auto_install',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="ask">Ask first</option><option value="off">Never</option><option value="auto">Auto</option></select></SettingRow>
     <SettingRow label="Backend status">
       <div>
         <Status label="Playwright installed" ok={bst?.playwright_available}/>
+        {bst?.installing_playwright && <p className="text-xs text-[#d29922]">⟳ downloading Playwright + Chromium…</p>}
         <Status label="Browser attach available" ok={bst?.cdp_available}/>
         <Status label="browser-use installed" ok={bst?.framework_available}/>
+        {bst?.installing_framework && <p className="text-xs text-[#d29922]">⟳ installing browser-use…</p>}
         <Status label="LLM available" ok={bst?.llm_available}/>
       </div>
     </SettingRow>

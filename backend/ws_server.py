@@ -1079,6 +1079,11 @@ def _register_default_handlers():
             return {"success": False, "error": "task is required"}
         return await browser.route_task(task, params.get("max_steps"))
 
+    async def browser_install_approve(params: dict, ws) -> dict:
+        """Run a dashboard-approved backend install (auto_install=ask flow)."""
+        from backend.browser.auto_install import approve
+        return await approve(str(params.get("backend", "")))
+
     # ---- Skill Forge — self-extending capabilities --------------------------
 
     async def forge_create(params: dict, ws) -> dict:
@@ -1321,6 +1326,7 @@ def _register_default_handlers():
     _server.register("browser.close", browser_close)
     _server.register("browser.status", browser_status)
     _server.register("browser.task", browser_task)
+    _server.register("browser.installApprove", browser_install_approve)
 
     # Skill Forge
     _server.register("forge.create", forge_create)

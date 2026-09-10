@@ -155,6 +155,7 @@ DEFAULT_SETTINGS: dict = {
         "engine": "auto",
         "task_mode": "auto",
         "framework_max_steps": 10,
+        "auto_install": "ask",
     },
     "desktop": {
         "allow_input": False,

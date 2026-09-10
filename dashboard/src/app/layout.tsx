@@ -39,10 +39,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const { state: wsState, characterState, send, onNotification } = useWS();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [desktopPrompt, setDesktopPrompt] = useState(false);
+  const [browserPrompt, setBrowserPrompt] = useState<string | null>(null);
 
   // Desktop-control permission request from the backend
   useEffect(() => onNotification('desktop.permissionRequest', () => {
     setDesktopPrompt(true);
+  }), [onNotification]);
+
+  // Browser backend auto-install request
+  useEffect(() => onNotification('browser.installRequest', (p: any) => {
+    setBrowserPrompt(p?.backend || 'playwright');
   }), [onNotification]);
 
   const wsStatusColor =
@@ -114,6 +120,30 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 onClick={() => { send('desktop.revoke', {}).catch(() => {}); setDesktopPrompt(false); }}
                 className="flex-1 bg-[#3d1f1f] hover:bg-[#5a2a2a] text-[#f85149] rounded-md py-1.5 text-sm font-medium">
                 Deny
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Browser backend install prompt */}
+        {browserPrompt && (
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[#3380FF] bg-[#161b22] p-4 shadow-xl">
+            <p className="text-sm font-semibold text-[#e8eaed]">⬇ Install {browserPrompt}?</p>
+            <p className="text-xs text-[#8b949e] mt-1">
+              Addled needs <span className="font-mono text-[#58a6ff]">{browserPrompt}</span> for this task
+              {browserPrompt === 'playwright' ? ' (Playwright + Chromium, ~170 MB)' : ' (the browser-use framework)'}.
+              Install it now?
+            </p>
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={() => { send('browser.installApprove', { backend: browserPrompt }).catch(() => {}); setBrowserPrompt(null); }}
+                className="flex-1 bg-[#3380FF] hover:bg-[#4d94ff] text-white rounded-md py-1.5 text-sm font-medium">
+                Install
+              </button>
+              <button
+                onClick={() => setBrowserPrompt(null)}
+                className="flex-1 bg-[#21262d] hover:bg-[#30363d] text-[#8b949e] rounded-md py-1.5 text-sm font-medium">
+                Not now
               </button>
             </div>
           </div>

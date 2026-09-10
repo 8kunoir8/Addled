@@ -135,19 +135,40 @@ class PlaywrightBrowser:
         t = (task or "").lower()
         return len(t.split()) > 8 or any(k in t for k in OPEN_ENDED_HINTS)
 
+    INTERACTIVE_HINTS = ("fill", "click", "form", "submit", "login",
+                         "sign in", "cart", "button", "order", "type into")
+
+    @staticmethod
+    def _looks_interactive(task: str) -> bool:
+        t = (task or "").lower()
+        return any(k in t for k in PlaywrightBrowser.INTERACTIVE_HINTS)
+
+    @staticmethod
+    def _maybe_trigger_install(backend: str) -> str:
+        try:
+            from backend.browser.auto_install import maybe_trigger
+            return maybe_trigger(backend)
+        except Exception:
+            return "off"
+
     async def status(self) -> dict:
         """Health snapshot for the dashboard + router."""
         from backend.config import config
         from backend.browser import framework_agent
+        from backend.browser import auto_install
         return {
             "mode": self.mode,
             "engine": config.get("browser", "engine", default="auto"),
             "task_mode": config.get("browser", "task_mode", default="auto"),
+            "auto_install": config.get("browser", "auto_install",
+                                      default="ask"),
             "playwright_available": self._playwright_available(),
             "cdp_available": self._cdp_port_reachable(
                 int(config.get("browser", "cdp_port", default=9222))),
             "framework_available": framework_agent.available(),
             "llm_available": framework_agent.llm_available(),
+            "installing_playwright": auto_install.installing("playwright"),
+            "installing_framework": auto_install.installing("framework"),
         }
 
     async def _fetch_http(self, url: str) -> dict:
@@ -497,6 +518,9 @@ class PlaywrightBrowser:
             return await self._run_deterministic(task, "cdp")
         if self._playwright_available():
             return await self._run_deterministic(task, "playwright")
+        # interactive task with no engine at all → offer to auto-install
+        if self._looks_interactive(task):
+            self._maybe_trigger_install("playwright")
         return await self._run_deterministic(task, "http")
 
     async def route_task(self, task: str, max_steps: int | None = None) -> dict:
@@ -539,6 +563,9 @@ class PlaywrightBrowser:
                 reason = "LLM unavailable"
             elif not fw_available():
                 reason = "browser-use not installed"
+                # offer to auto-install the framework when an LLM exists
+                if llm_available():
+                    self._maybe_trigger_install("framework")
             else:
                 reason = "task not open-ended"
 
