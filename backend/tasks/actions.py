@@ -57,6 +57,8 @@ async def _run_notify(task) -> dict:
                 "text": text,
                 "time": task.time,
             })
+            # Remote companion: bot bridges can consume this broadcast
+            server.broadcast_nowait("bot.notify", {"text": message})
             server.broadcast_nowait("chat.push", {
                 "role": "assistant",
                 "content": message,

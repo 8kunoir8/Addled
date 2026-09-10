@@ -216,6 +216,13 @@ class Engine(QObject):
                         log.info("Observer deep analysis: %s", obs.detail[:90])
                     if obs.context not in (None, "unknown", "unchanged", "private"):
                         self._last_context = obs.context
+                        # Character presence: movement reacts to what's on screen
+                        try:
+                            if self._char_widget is not None:
+                                self._char_widget._mover.set_context(
+                                    str(obs.context))
+                        except Exception:
+                            pass
                 if obs and obs.context != "unknown" and obs.changed:
                     log.debug("Observer: context=%s tier=%s decision=%s",
                               obs.context, obs.tier, obs.decision)

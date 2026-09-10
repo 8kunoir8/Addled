@@ -142,10 +142,16 @@ def main():
     engine = Engine(char_widget=char_widget)
     engine.sig_agent_state.connect(char_widget.set_agent_state)
 
-    # Mood → character visual tint (warmth, brightness)
+    # Mood → character visual tint (warmth, brightness) + movement energy
     try:
-        engine.sig_mood.connect(
-            lambda w, b: char_widget._animator.set_mood(w, b))
+        def _apply_mood(w, b):
+            char_widget._animator.set_mood(w, b)
+            try:
+                char_widget._mover.set_energy(0.4 + b * 1.2)
+            except Exception:
+                pass
+
+        engine.sig_mood.connect(_apply_mood)
     except Exception:
         pass
 
@@ -279,8 +285,16 @@ def main():
 
         scheduler.register_housekeeping("patterns_suggest",
                                         _patterns_suggest, interval_s=1800)
+
+        def _weekly_reflection():
+            from backend.reflection.weekly_review import weekly_review
+            weekly_review(engine.sig_insight.emit)
+
+        scheduler.register_housekeeping("weekly_reflection",
+                                        _weekly_reflection, interval_s=21600)
         log.info("Scheduler wired (calendar reminders + memory maintenance "
-                 "+ daily check-in + journal + project index + patterns)")
+                 "+ daily check-in + journal + project index + patterns "
+                 "+ reflection)")
     except Exception as e:
         log.warning("Scheduler wiring failed: %s", e)
 

@@ -40,6 +40,22 @@ _KOKORO_MAX_CHARS = 180
 _kokoro = None
 _kokoro_lock = threading.Lock()
 
+# Barge-in: playback can be interrupted when the user starts speaking.
+_stop_requested = False
+_speaking = False
+_playback_lock = threading.Lock()
+
+
+def is_speaking() -> bool:
+    """True while audio is actively playing (for barge-in detection)."""
+    return _speaking
+
+
+def stop_playback() -> None:
+    """Request the current utterance to stop (user started talking)."""
+    global _stop_requested
+    _stop_requested = True
+
 
 # ---- engine selection --------------------------------------------------------
 
@@ -145,7 +161,8 @@ def _synth_kokoro(text: str, voice: str, speed: float = 1.0):
 
 
 def _play_and_wait(path_or_audio, sample_rate: int | None = None) -> float:
-    """Play audio, block until finished, return duration in seconds."""
+    """Play audio, block until finished (or barge-in), return duration."""
+    global _speaking, _stop_requested
     import sounddevice as sd
     if isinstance(path_or_audio, (str, os.PathLike)):
         with wave.open(str(path_or_audio), "rb") as wf:
@@ -157,9 +174,24 @@ def _play_and_wait(path_or_audio, sample_rate: int | None = None) -> float:
         sr = sample_rate or 24000
     if pcm.size == 0:
         return 0.0
-    sd.play(pcm, sr)
-    sd.wait()
-    return pcm.size / sr
+    duration = pcm.size / sr
+    _stop_requested = False
+    _speaking = True
+    try:
+        sd.play(pcm, sr)
+        elapsed = 0.0
+        while elapsed < duration:
+            if _stop_requested:
+                sd.stop()
+                log.info("TTS interrupted (barge-in)")
+                break
+            time.sleep(0.05)
+            elapsed += 0.05
+        else:
+            sd.wait()
+        return duration if elapsed >= duration else elapsed
+    finally:
+        _speaking = False
 
 
 async def _speak_kokoro(text: str, voice: str,

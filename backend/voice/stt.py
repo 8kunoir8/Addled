@@ -192,6 +192,16 @@ class VoiceListener:
         segment = None
         for off in range(0, len(data), FRAME):
             ev, seg = self._vad.feed_and_collect(data[off:off + FRAME])
+            # Barge-in: if the user starts talking while Addled speaks,
+            # stop the current TTS playback immediately.
+            if ev and "start" in ev:
+                try:
+                    from backend.voice import tts
+                    if tts.is_speaking():
+                        tts.stop_playback()
+                        log.info("Barge-in: user speech interrupted TTS")
+                except Exception:
+                    pass
             if seg is not None and len(seg) > int(SAMPLE_RATE * 0.25):
                 segment = seg
         if segment is None:

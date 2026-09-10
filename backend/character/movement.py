@@ -52,6 +52,10 @@ class Mover:
         self._wander_range = int(char_settings.get("idle_wander_range", 300))
         self._hold = False  # Pause autonomous movement while user is dragging
 
+        # Lifelike presence: mood energy scales wander, screen context hints
+        self.energy_factor = 1.0   # <1 tired/slow, >1 excited/fast
+        self.context_hint = ""     # observer context ("code", "media", ...)
+
         # Corner preferences for sleep/retreat
         corner_map = {
             "top-left": (0, 0),
@@ -75,6 +79,13 @@ class Mover:
         self._fly_start = QPointF(self._pos)
         self._target = QPointF(x, y)
         self._fly_progress = 0.0
+
+    def set_energy(self, factor: float):
+        """Mood energy: <1 sluggish, >1 lively. Clamped to 0.4–1.6."""
+        self.energy_factor = max(0.4, min(1.6, factor))
+
+    def set_context(self, hint: str):
+        self.context_hint = (hint or "")[:24]
 
     def warp(self, x: float, y: float):
         self._pos = QPointF(x, y)
@@ -108,7 +119,9 @@ class Mover:
         self._clamp_to_screen()
 
     def _wander(self, dt: float):
-        self._wander_timer += dt
+        # media on screen → livelier wander; tired mood → slower
+        hint_bonus = 1.3 if "media" in self.context_hint.lower() else 1.0
+        self._wander_timer += dt * self.energy_factor * hint_bonus
         if self._wander_timer > random.uniform(2.0, 5.0):
             self._wander_timer = 0.0
             self._wander_angle += random.uniform(-1.0, 1.0)
@@ -123,7 +136,7 @@ class Mover:
         # Move toward target with easing
         dist = math.hypot(self._target.x() - self._pos.x(), self._target.y() - self._pos.y())
         if dist > 1:
-            speed = min(self._speed * 0.8, dist * 0.5)
+            speed = min(self._speed * 0.8, dist * 0.5) * self.energy_factor
             t = speed / dist
             self._pos = QPointF(
                 self._pos.x() + (self._target.x() - self._pos.x()) * t,

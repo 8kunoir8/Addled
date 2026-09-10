@@ -21,6 +21,17 @@ MAX_TOOL_ROUNDS = 8
 
 
 async def execute_skill(name: str, params: dict, provider=None) -> dict:
+    """Execute a skill by name, recording usage/failure telemetry."""
+    result = await _execute_skill_inner(name, params, provider)
+    try:
+        from backend.skills.telemetry import record
+        record(name, bool(result.get("success")))
+    except Exception:
+        pass
+    return result
+
+
+async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
     """
     Execute a skill by name. If not found, try the forge.
     Returns {"success": bool, "data": dict, "forged": bool, ...}
