@@ -97,6 +97,13 @@ def main() -> int:
     )
     log("core requirements installed")
 
+    # ── 4b. Fetch the local embedder model (ONNX MiniLM) ────────────────
+    log("fetching embedder model ...")
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "fetch_embedder.py")],
+        check=False, env=ISOLATED_ENV,
+    )
+
     # ── 5. Verify critical imports ───────────────────────────────────────
     check = (
         "import sys, websockets, httpx, mss, numpy, PIL, pyautogui, pyperclip, edge_tts, onnxruntime; "

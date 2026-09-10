@@ -153,7 +153,7 @@ Telegram (grammY with 6 commands), WhatsApp (Baileys multi-device with QR pairin
 Prompt guard (15 injection + 5 exfiltration patterns), presence guard (meeting/gaming/away auto-sleep), rate limiter, destruction gate with approval workflow (`action.approve` / `action.deny`), **global kill-switch hotkey** (Ctrl+Shift+Alt+K, configurable), **clipboard secret filter** (API keys, tokens, passwords, private keys redacted before the agent sees them), **egress monitor** (logs + scrubs every outbound payload), and **privacy zones** (screen blackout regions + excluded apps actually applied to screenshots).
 
 ### 🧠 Memory
-Chat history (JSON, cross-session), **long-term conversational recall** (every turn remembered; relevant past turns auto-injected into new chats), vector store (SQLite + numpy cosine similarity), and **rolling screenshot memory** (last 30 privacy-masked screenshots, 24h auto-purge — enables "what was I doing 20 minutes ago?").
+**Local semantic memory** — a fully offline, layered memory system: chat history (JSON, cross-session), **semantic long-term recall** (local ONNX MiniLM embeddings + BM25 hybrid search — every turn remembered; relevant past turns auto-injected into new chats, with hash fallback when the model is missing), **rolling compaction** (long conversations auto-summarize their oldest turns so early context survives), **core facts** (durable user facts the agent saves/reads via `memory_get`/`memory_set` tools — shown on the Memory page), **temporal knowledge graph** (subject → relation → object triples with semantic + time-bounded lookup), and **rolling screenshot memory** (last 30 privacy-masked screenshots, 24h auto-purge — enables "what was I doing 20 minutes ago?"). Idle-time maintenance re-embeds legacy rows, dedups and prunes in the background. All controllable in Settings → Memory.
 
 ### 🎤 Voice & Perception
 **Voice input**: wake word → command → chat → spoken reply (local faster-whisper, offline). Edge TTS output. **Auto TTS toggle** (Settings → Voice): dashboard chat and character prompts speak replies out loud. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
@@ -163,7 +163,7 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 
 ---
 
-## WebSocket API (59 handlers)
+## WebSocket API (62 handlers)
 
 ### Core
 `chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set`
@@ -188,6 +188,9 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 
 ### Privacy & Monitoring
 `privacy.setZones` `privacy.list` `privacy.excludeApp` `privacy.removeApp` `egress.list` `snapshot.list`
+
+### Memory
+`chat.history` `memory.list` `memory.deleteSummary` `memory.deleteMemory` `memory.clear` `memory.getFacts` `memory.setFact` `memory.deleteFact` `memory.listTriples` `memory.deleteTriple`
 
 ### Skill Forge
 `forge.create` `forge.list`
@@ -229,7 +232,8 @@ Addled/
 │   │                       #   clipboard filter, egress monitor, privacy zones
 │   ├── perception/          # 3-tier observer (light/medium/deep) + snapshot hook
 │   ├── voice/               # Edge TTS + wake-word STT (faster-whisper)
-│   ├── memory/              # Chat history, vector store, long-term recall, snapshot store
+│   ├── memory/              # Chat history, semantic recall (ONNX MiniLM + BM25), compaction,
+│   │                       #   facts, knowledge graph, snapshot store, maintenance
 │   ├── browser/             # Playwright browser automation
 │   ├── goals/               # Planner, executor, store
 │   ├── code/                # Diff engine (apply with backup), language detection
