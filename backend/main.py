@@ -123,6 +123,10 @@ def main():
     _ws_thread.start()
     log.info("WebSocket server starting on ws://127.0.0.1:9876")
 
+    # ---- tiny HTTP API for the Electron shell (window show / navigation) -----
+    from backend.http_api import start_http_api
+    start_http_api(port=9877)
+
     # ---- character widget ----------------------------------------------------
     from backend.character.states import CharacterState, StateMachine, AGENT_TO_CHARACTER
     from backend.character.avatar import CharacterWidget

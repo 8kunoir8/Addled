@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 
 // ─── Windows App User Model ID ───────────────────────────────────────────────
 if (process.platform === 'win32') {
@@ -34,6 +35,8 @@ let tray = null;
 let pythonProcess = null;
 let pythonRestarts = 0;
 let nextProcess = null;
+let navPollTimer = null;
+let dashboardUrl = null;
 const isDev = !app.isPackaged;
 const DASHBOARD_PORT = 3000;
 const WS_PORT = 9876;
@@ -223,6 +226,34 @@ function startNextDashboard() {
   });
 }
 
+// ─── GUI navigation polling (backend → window show + navigate) ─────────────
+function startNavPolling() {
+  if (navPollTimer) return;
+  navPollTimer = setInterval(() => {
+    const req = http.get('http://127.0.0.1:9877/api/nav', (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(data);
+          if (j && j.path && dashboardUrl) {
+            const target = dashboardUrl + j.path;
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              if (mainWindow.webContents.getURL() !== target) {
+                mainWindow.loadURL(target);
+              }
+              mainWindow.show();
+              mainWindow.focus();
+            }
+          }
+        } catch (e) { /* ignore malformed */ }
+      });
+    });
+    req.on('error', () => {});
+    req.setTimeout(2000, () => req.destroy());
+  }, 1500);
+}
+
 // ─── Create Main Window ───────────────────────────────────────────────────────
 async function createWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
@@ -244,12 +275,10 @@ async function createWindow() {
   });
 
   // Load dashboard — static files in production, dev server in dev
-  let dashboardUrl;
   if (isDev) {
     dashboardUrl = `http://localhost:${DASHBOARD_PORT}`;
   } else {
     // Start a local static file server for the dashboard
-    const http = require('http');
     const servePort = 3001;
     const outDir = isDev
       ? path.join(DASHBOARD_DIR, 'out')
@@ -258,7 +287,14 @@ async function createWindow() {
     if (fs.existsSync(outDir)) {
       // Simple static file server for Next.js export
       const server = http.createServer((req, res) => {
-        let filePath = path.join(outDir, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
+        let urlPath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+        let filePath = path.join(outDir, urlPath);
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
+          // trailing-slash export → dir/index.html; else Next puts file.html
+          // at the top level (e.g. /settings → settings.html)
+          const idx = path.join(filePath, 'index.html');
+          filePath = fs.existsSync(idx) ? idx : filePath + '.html';
+        }
         if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
           filePath = path.join(outDir, 'index.html');
         }
@@ -280,6 +316,7 @@ async function createWindow() {
       server.listen(servePort, '127.0.0.1');
       dashboardUrl = `http://127.0.0.1:${servePort}`;
       console.log(`[Dashboard] Serving static files on ${dashboardUrl}`);
+      startNavPolling();
     } else {
       console.warn('[Dashboard] No static build found. Run: cd dashboard && npm run build');
       dashboardUrl = `http://127.0.0.1:${DASHBOARD_PORT}`; // fallback

@@ -41,6 +41,16 @@ class WSServer:
         self._connections: set[WebSocketServerProtocol] = set()
         self._server = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._nav_intent: str | None = None
+
+    def set_nav_intent(self, path: str):
+        """Queue a GUI navigation request (consumed by the Electron shell)."""
+        self._nav_intent = path
+
+    def consume_nav_intent(self) -> str | None:
+        """Return + clear the pending navigation intent (single-shot)."""
+        intent, self._nav_intent = self._nav_intent, None
+        return intent
 
     def register(self, method: str, handler: HandlerFunc):
         """Register a JSON-RPC method handler."""

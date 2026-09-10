@@ -317,6 +317,7 @@ class CharacterWidget(QWidget):
             from backend.ws_server import get_server
             server = get_server()
             if server is not None:
+                server.set_nav_intent("/settings")
                 server.broadcast_nowait("ui.navigate", {"path": "/settings"})
         except Exception:
             pass
