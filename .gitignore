@@ -27,3 +27,8 @@ backend/memory/skins/
 # Voice models (fetched by scripts/fetch_voice_models.py)
 backend/voice/models/
 
+
+# Scheduler runtime state
+backend/memory/integrations/scheduled_tasks.json
+backend/memory/integrations/scheduler_state.json
+
