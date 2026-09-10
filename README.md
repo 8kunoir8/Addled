@@ -145,8 +145,8 @@ Workspace folder binding with file tree, language detection (40+ languages), uni
 ### 🌐 Browser Automation
 Playwright-powered Chromium browser when installed — navigate, click, type, extract text, screenshot, history navigation. **Without Playwright, navigation automatically falls back to a lightweight HTTP fetch** (browser-like headers, HTML→text), and blocked sites are re-discovered through search results. Web search uses DuckDuckGo with automatic Bing fallback (some networks block DDG) and snippet extraction.
 
-### 📅 Calendar & Email
-Local calendar with Google Calendar OAuth sync. IMAP/SMTP email — fetch unread, send, search. Dashboard integration for both.
+### 📅 Calendar, Tasks & Scheduling
+Local calendar with Google Calendar OAuth sync — and a **tick-driven task scheduler** (no cron/APScheduler): one-shot and recurring tasks (daily / weekly / monthly) with `notify` (reminder: bubble + spoken TTS) and `chat` (run a prompt later) actions. Calendar events fire reminders before they start; relative dates like "tomorrow 3pm" are normalized on add. Tasks are created from the **Calendar page** (day-click sidebar with edit/pause/delete), from **chat** via the `task_schedule` skill, and from **voice** — including a heuristic parser fallback that works when the LLM provider is down. Memory-maintenance housekeeping jobs run through the same scheduler. IMAP/SMTP email — fetch unread, send, search.
 
 ### 🤖 Bot Bridges
 Telegram (grammY with 6 commands), WhatsApp (Baileys multi-device with QR pairing), Discord (discord.js with 5 slash commands). All forward messages to Addled's chat.
@@ -189,7 +189,7 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 `swarm.spawn` `swarm.list` `swarm.run` `swarm.stop`
 
 ### Calendar & Email
-`calendar.add` `calendar.list` `calendar.delete` `email.fetch` `email.send` `email.search`
+`calendar.add` `calendar.list` `calendar.delete` `calendar.update` `tasks.schedule` `tasks.list` `tasks.update` `tasks.pause` `tasks.resume` `tasks.cancel` `tasks.month` `email.fetch` `email.send` `email.search`
 
 ### Browser
 `browser.navigate` `browser.go_back` `browser.go_forward` `browser.click` `browser.type` `browser.screenshot` `browser.extract` `browser.close` `browser.status` `browser.task` `browser.installApprove`
