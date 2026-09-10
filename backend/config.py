@@ -183,6 +183,12 @@ DEFAULT_SETTINGS: dict = {
         "checkin_enabled": True,
         "checkin_time": "09:00",
     },
+    "project": {
+        "enabled": False,
+        "roots": [],
+        "max_files": 500,
+        "inject_into_chat": True,
+    },
     "voice": {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",

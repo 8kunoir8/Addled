@@ -43,7 +43,32 @@ class GoalExecutor:
 
         # Sort steps by index
         steps.sort(key=lambda s: s.get("index", 0))
+
+        # Checkpoint recovery: steps left 'in_progress' by a crashed run
+        for step in steps:
+            if step.get("status") == "in_progress":
+                step["status"] = "pending"
+                step.pop("error", None)
+        self._store.save(goal)
+
         completed = set()
+        attempts = 0
+        max_attempts = max(8, 2 * len(steps) + 4)  # stuck guard
+
+        def _progress(status: str, extra: dict | None = None):
+            try:
+                from backend.ws_server import get_server
+                get_server().broadcast_nowait("goal.progress", {
+                    "goalId": goal_id,
+                    "status": status,
+                    "step": len(completed),
+                    "total": len(steps),
+                    **(extra or {}),
+                })
+            except Exception:
+                pass
+
+        _progress("running")
 
         for step in steps:
             if self._cancel_flags.get(goal_id):
@@ -63,6 +88,13 @@ class GoalExecutor:
                 completed.add(step_idx)
                 continue
 
+            attempts += 1
+            if attempts > max_attempts:
+                self._store.update_status(goal_id, "failed")
+                _progress("failed", {"error": "too many attempts (stuck)"})
+                return {"status": "failed", "error": "stuck",
+                        "completed": len(completed), "total": len(steps)}
+
             # Execute step
             step["status"] = "in_progress"
             self._store.save(goal)
@@ -79,9 +111,11 @@ class GoalExecutor:
                     step["status"] = "completed"
                     step["result"] = {"summary": result.summary, "data": result.data}
                     completed.add(step_idx)
+                    _progress("step_completed")
                 else:
                     step["status"] = "failed"
                     step["error"] = result.error
+                    _progress("step_failed", {"error": str(result.error)[:120]})
                     # Retry once with modified approach
                     if step.get("retry_count", 0) < 1:
                         step["retry_count"] = step.get("retry_count", 0) + 1
@@ -89,18 +123,30 @@ class GoalExecutor:
                         self._store.save(goal)
                         continue
                     self._store.update_status(goal_id, "failed")
+                    try:
+                        from backend.character.mood import mood_engine
+                        mood_engine.event("goal_stuck")
+                    except Exception:
+                        pass
                     return {"status": "failed", "step": step_idx, "error": result.error,
                             "completed": len(completed), "total": len(steps)}
             except Exception as e:
                 step["status"] = "failed"
                 step["error"] = str(e)
                 self._store.update_status(goal_id, "failed")
+                _progress("failed", {"error": str(e)[:120]})
                 return {"status": "failed", "step": step_idx, "error": str(e)}
 
             self._store.save(goal)
             await asyncio.sleep(0.5)  # Brief pause between steps
 
         self._store.update_status(goal_id, "completed")
+        _progress("completed")
+        try:
+            from backend.character.mood import mood_engine
+            mood_engine.event("goal_done")
+        except Exception:
+            pass
         return {"status": "completed", "completed": len(completed), "total": len(steps)}
 
     def cancel(self, goal_id: str):

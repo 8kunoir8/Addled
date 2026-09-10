@@ -410,6 +410,27 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
             except Exception as e:
                 log.debug("triple lookup failed: %s", e)
 
+        # Project awareness: inject matching code snippets when the message
+        # looks code/file-related
+        if config.get("project", "inject_into_chat", default=True):
+            try:
+                code_hint = any(k in message.lower() for k in
+                                (".py", ".js", ".ts", "file", "function",
+                                 "class ", "code", "bug", "repo", "import"))
+                if code_hint:
+                    from backend.project.indexer import search_project
+                    hits = search_project(message, top_k=4)
+                    if hits:
+                        lines = "\n".join(
+                            f"- {h['path']}: {h['snippet'][:180]}"
+                            for h in hits)
+                        user_messages.insert(0, {"role": "user", "content":
+                            "[Project context] Matching code in the indexed "
+                            "workspace:\n" + lines +
+                            "\nUse them when relevant."})
+            except Exception as e:
+                log.debug("project injection failed: %s", e)
+
         # Live screen awareness: let the model know what the observer sees
         screen_note = None
         if _engine_ref:
@@ -1192,6 +1213,20 @@ def _register_default_handlers():
         from backend.memory.user_profile import get_profile
         return {"profile": get_profile()}
 
+    async def project_search(params: dict, ws) -> dict:
+        from backend.project.indexer import search_project
+        results = search_project(str(params.get("query", "")),
+                                 top_k=int(params.get("top_k", 6)))
+        return {"results": results, "count": len(results)}
+
+    async def project_patterns(params: dict, ws) -> dict:
+        from backend.project.patterns import detect_patterns
+        return {"patterns": detect_patterns()}
+
+    async def project_status(params: dict, ws) -> dict:
+        from backend.project.indexer import status
+        return status()
+
     async def email_fetch(params: dict, ws) -> dict:
         from backend.integrations.email_integration import email_client
         unread = email_client.fetch_unread(limit=params.get("limit", 10))
@@ -1513,6 +1548,9 @@ def _register_default_handlers():
     _server.register("journal.list", journal_list)
     _server.register("journal.today", journal_today)
     _server.register("profile.get", profile_get)
+    _server.register("project.search", project_search)
+    _server.register("project.patterns", project_patterns)
+    _server.register("project.status", project_status)
 
     # Browser (Playwright)
     _server.register("browser.navigate", browser_navigate)

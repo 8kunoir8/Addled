@@ -265,8 +265,22 @@ def main():
 
         scheduler.register_housekeeping("journal_nightly",
                                         _journal_nightly, interval_s=3600)
+
+        def _project_index():
+            from backend.project.indexer import index_roots
+            index_roots()
+
+        scheduler.register_housekeeping("project_index",
+                                        _project_index, interval_s=600)
+
+        def _patterns_suggest():
+            from backend.project.patterns import maybe_suggest_patterns
+            maybe_suggest_patterns(engine.sig_insight.emit)
+
+        scheduler.register_housekeeping("patterns_suggest",
+                                        _patterns_suggest, interval_s=1800)
         log.info("Scheduler wired (calendar reminders + memory maintenance "
-                 "+ daily check-in + journal)")
+                 "+ daily check-in + journal + project index + patterns)")
     except Exception as e:
         log.warning("Scheduler wiring failed: %s", e)
 
