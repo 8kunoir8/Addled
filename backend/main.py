@@ -328,8 +328,9 @@ def main():
     from backend.voice.stt import voice_listener
     from backend.ws_server import run_chat_pipeline, get_server
 
-    async def _handle_voice_command(text: str):
-        get_server().broadcast_nowait("voice.command", {"text": text})
+    async def _handle_voice_command(text: str, lang: str | None = None):
+        get_server().broadcast_nowait("voice.command",
+                                      {"text": text, "lang": lang})
         try:
             from backend.character.mood import mood_engine
             mood_engine.event("chat_user")
@@ -372,17 +373,19 @@ def main():
             try:
                 engine.sig_agent_state.emit("speaking")
                 engine._voice_busy = True
-                from backend.voice.tts import speak
-                await speak(spoken)
+                from backend.voice.tts import pick_voice, speak
+                voice, tts_engine = pick_voice(lang)
+                await speak(spoken, voice=voice, engine=tts_engine)
             except Exception as e:
                 log.warning("Voice reply TTS failed: %s", e)
             finally:
                 engine._voice_busy = False
                 engine.sig_agent_state.emit("idle")
 
-    def _on_voice_command(text: str):
+    def _on_voice_command(text: str, lang: str | None = None):
         try:
-            asyncio.run_coroutine_threadsafe(_handle_voice_command(text), _ws_loop)
+            asyncio.run_coroutine_threadsafe(
+                _handle_voice_command(text, lang), _ws_loop)
         except Exception as e:
             log.warning("Voice dispatch failed: %s", e)
 

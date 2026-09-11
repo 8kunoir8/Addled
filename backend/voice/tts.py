@@ -33,6 +33,35 @@ KOKORO_VOICES = MODELS_DIR / "voices-v1.0.bin"
 DEFAULT_EDGE_VOICE = "en-US-JennyNeural"
 DEFAULT_KOKORO_VOICE = "af_heart"
 
+# Detected STT language → spoken voice (kokoro first, edge otherwise)
+LANG_TO_KOKORO = {
+    "en": "af_heart", "en-gb": "bm_george", "es": "ef_dora",
+    "fr": "ff_siwis", "hi": "hf_alpha", "it": "if_sara",
+    "pt": "pf_dora", "ja": "jf_alpha",
+}
+LANG_TO_EDGE = {
+    "id": "id-ID-GadisNeural", "en": "en-US-JennyNeural",
+    "ja": "ja-JP-NanamiNeural", "zh": "zh-CN-XiaoxiaoNeural",
+    "ko": "ko-KR-SunHiNeural", "es": "es-ES-ElviraNeural",
+    "fr": "fr-FR-DeniseNeural", "de": "de-DE-KatjaNeural",
+    "ar": "ar-SA-ZariyahNeural", "ru": "ru-RU-SvetlanaNeural",
+    "vi": "vi-VN-HoaiMyNeural", "th": "th-TH-PremwadeeNeural",
+}
+
+
+def pick_voice(lang: str | None) -> tuple[str | None, str | None]:
+    """Map a detected language code to (voice, engine).
+
+    Returns (None, None) when the language is unknown — caller falls back
+    to the configured tts_engine/voice.
+    """
+    code = (lang or "").lower()
+    if code in LANG_TO_KOKORO:
+        return LANG_TO_KOKORO[code], "kokoro"
+    if code in LANG_TO_EDGE:
+        return LANG_TO_EDGE[code], "edge"
+    return None, None
+
 # Kokoro caps each synthesis at MAX_PHONEME_LENGTH (510); long chat replies
 # must be split into sentence-sized pieces and concatenated.
 _KOKORO_MAX_CHARS = 180
@@ -60,11 +89,13 @@ def stop_playback() -> None:
 # ---- engine selection --------------------------------------------------------
 
 async def speak(text: str, voice: str | None = None,
-                rate: str = "+0%", speed: float | None = None) -> dict:
+                rate: str = "+0%", speed: float | None = None,
+                engine: str | None = None) -> dict:
     """Speak text. Returns {success, duration_ms, engine}.
 
     speed: TTS playback speed (Kokoro). None → mood-derived speed so the
     character's tone follows its emotional state.
+    engine: optional override of voice.tts_engine ("kokoro"|"edge").
     """
     from backend.config import config
 
@@ -78,7 +109,8 @@ async def speak(text: str, voice: str | None = None,
         except Exception:
             speed = 1.0
 
-    engine = config.get("voice", "tts_engine", default="edge") or "edge"
+    engine = engine or config.get("voice", "tts_engine", default="edge") \
+        or "edge"
     if engine == "kokoro":
         kokoro_voice = voice or config.get(
             "voice", "kokoro_voice", default=DEFAULT_KOKORO_VOICE)

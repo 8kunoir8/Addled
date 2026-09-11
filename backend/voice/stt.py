@@ -52,6 +52,7 @@ class VoiceListener:
         self.model_loaded = False
         self._vad = None
         self._use_vad = False
+        self._last_lang: str | None = None  # detected language of last command
 
     def on_command(self, callback) -> None:
         self._callbacks.append(callback)
@@ -70,10 +71,12 @@ class VoiceListener:
         text = (text or "").strip()
         if not text:
             return
-        log.info("Voice command: %s", text)
+        log.info("Voice command: %s (lang=%s)", text, self._last_lang)
         for cb in list(self._callbacks):
             try:
-                cb(text)
+                cb(text, self._last_lang)  # new-style: (text, lang)
+            except TypeError:
+                cb(text)  # legacy 1-arg callback
             except Exception as e:
                 log.warning("Voice callback failed: %s", e)
 
@@ -209,7 +212,9 @@ class VoiceListener:
                 return "wake", command_start  # timed out waiting for command
             return mode, command_start
 
-        text = self._transcribe(segment)
+        text, lang = self._transcribe(segment)
+        if lang:
+            self._last_lang = lang
         if not text:
             return mode, command_start
         if mode == "wake":
@@ -235,7 +240,9 @@ class VoiceListener:
         rms = float(np.sqrt(np.mean(np.square(data))))
         if rms < 0.01:
             return mode
-        text = self._transcribe(data)
+        text, lang = self._transcribe(data)
+        if lang:
+            self._last_lang = lang
         if not text:
             return mode
         if _contains_wake_word(text, self._wake_word):
@@ -256,19 +263,25 @@ class VoiceListener:
                 return text[idx + len(self._wake_word):].strip()
         return text
 
-    def _transcribe(self, audio) -> str:
+    def _transcribe(self, audio) -> tuple[str, str | None]:
+        """Transcribe audio → (text, detected_language_code)."""
         try:
             if self._stt_kind == "sensevoice":
                 result = self._model.generate(
                     input=audio, cache={}, language="auto",
                     use_itn=True, batch_size_s=60)
                 return " ".join(
-                    r.get("text", "") for r in result).strip()
-            segments, _info = self._model.transcribe(
-                audio, language=None, beam_size=1, vad_filter=True)
-            return " ".join(s.text for s in segments).strip()
+                    r.get("text", "") for r in result).strip(), None
+            from backend.config import config
+            lang_hint = config.get("voice", "language", default="auto")
+            language = None if lang_hint in ("auto", "") else lang_hint
+            segments, info = self._model.transcribe(
+                audio, language=language, beam_size=1, vad_filter=True)
+            text = " ".join(s.text for s in segments).strip()
+            detected = getattr(info, "language", None) or None
+            return text, detected
         except Exception:
-            return ""
+            return "", None
 
     def _listen_command(self, stream, block: int) -> str:
         """After wake word, capture up to ~6 s of speech."""
@@ -288,7 +301,9 @@ class VoiceListener:
         if not chunks:
             return ""
         audio = np.concatenate(chunks)
-        text = self._transcribe(audio)
+        text, lang = self._transcribe(audio)
+        if lang:
+            self._last_lang = lang
         return self._strip_wake_word(text)
 
 

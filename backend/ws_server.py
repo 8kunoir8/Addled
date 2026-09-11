@@ -350,6 +350,10 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
                        "we...', 'you mentioned before that...'). Do not force "
                        "it when nothing fits.")
 
+        # Language mirroring: answer in the user's language
+        sys_prompt += ("\n\nAlways reply in the same language the user "
+                       "writes or speaks in.")
+
         context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
 
         # Long-term recall: inject relevant past conversation turns
