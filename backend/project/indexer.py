@@ -45,6 +45,17 @@ def _save_state(state: dict) -> None:
 def _roots() -> list[Path]:
     from backend.config import config
     roots = config.get("project", "roots", default=[]) or []
+    if not roots:
+        # No explicit project roots, so fall back to the workspace. Otherwise the
+        # Code page's "index this folder" button indexes nothing for the very
+        # folder the user just picked as their workspace.
+        try:
+            from backend.workspace import root as workspace_root
+            workspace = workspace_root()
+            if workspace:
+                roots = [workspace]
+        except Exception:
+            pass
     result = []
     for r in roots:
         p = Path(r).expanduser()

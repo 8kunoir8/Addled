@@ -342,6 +342,29 @@ DEFAULT_SETTINGS: dict = {
         "max_files": 500,
         "inject_into_chat": True,
     },
+    # The folder Addled works in. File tools are confined to it (plus
+    # extra_dirs, when safety.file_access_mode is "custom"), relative paths
+    # resolve against it, and the Code page and project indexer default to it.
+    "workspace": {
+        "root": "",
+        "extra_dirs": [],
+    },
+    # Standard operating procedures: what worked last time for this kind of
+    # task. The similarity bars are per scoring method because an embedding
+    # cosine and a word-overlap share are different units — a matching task
+    # scores about 0.45 by embedding and 0.42 by words, an unrelated one 0.20,
+    # and one from the wrong category 0.28.
+    "sop": {
+        "enabled": True,
+        "learn": True,
+        "inject_top_k": 1,
+        "min_similarity": 0.35,
+        "lexical_min_similarity": 0.25,
+        "merge_similarity": 0.82,
+        "lexical_merge_similarity": 0.60,
+        "max_per_category": 40,
+        "dir": "",
+    },
     "voice": {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",

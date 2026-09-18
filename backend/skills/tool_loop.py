@@ -104,6 +104,32 @@ async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
         }
 
 
+def _last_user_text(messages: list[dict]) -> str:
+    for message in reversed(messages or []):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            return message["content"]
+    return ""
+
+
+def _learn_procedure(messages: list[dict], tool_results: list[dict]) -> None:
+    """Keep the route a turn actually took, when it worked.
+
+    Called on the way out of a tool-using turn. It is a side effect of a reply
+    that has already been produced, so it must never raise and must never
+    delay or alter the response.
+    """
+    try:
+        if not tool_results:
+            return
+        if not any(tr.get("success") for tr in tool_results):
+            return
+        from backend.sop.learn import record_run
+        names = [str(tr.get("tool") or "") for tr in tool_results]
+        record_run(None, names, _last_user_text(messages), success=True)
+    except Exception as e:
+        log.debug("Procedure learning skipped: %s", e)
+
+
 async def chat_with_tools(
     provider,
     messages: list[dict],
@@ -172,6 +198,8 @@ async def chat_with_tools(
 
         # No tool call — normal text response
         if not result.get("tool_calls"):
+            _learn_procedure(messages, all_tool_results
+                             or result.get("tool_results", []))
             return {
                 "response": result.get("response", ""),
                 "tokens": result.get("tokens", 0),
@@ -249,6 +277,7 @@ async def chat_with_tools(
     # Round cap reached: force one final answer from the gathered results.
     final = await _final_answer(tool_results if tool_results else [])
     if final is not None:
+        _learn_procedure(messages, all_tool_results or tool_results)
         return final
 
     return {

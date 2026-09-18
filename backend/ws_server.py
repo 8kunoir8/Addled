@@ -386,6 +386,18 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
             except Exception as e:
                 log.debug("wiki context failed: %s", e)
 
+        # Procedures: how this kind of task was done successfully before. Only
+        # offered when it is genuinely close to the task in hand — a recipe for
+        # something else is worse than no recipe.
+        sop_ctx = None
+        try:
+            from backend.sop.match import build_sop_context
+            sop_ctx = build_sop_context(message)
+            if sop_ctx:
+                sys_prompt = sys_prompt + "\n\n" + sop_ctx
+        except Exception as e:
+            log.debug("procedure context failed: %s", e)
+
         # Memory-grounded conversation: volunteer relevant past organically
         sys_prompt += ("\n\nIf a saved fact, a previous conversation, or a "
                        "recent day's summary is clearly relevant to this "
@@ -424,6 +436,8 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
                 anchors.append({"type": "facts", "text": facts_ctx[:300]})
             if wiki_ctx:
                 anchors.append({"type": "wiki", "text": wiki_ctx[:300]})
+            if sop_ctx:
+                anchors.append({"type": "procedure", "text": sop_ctx[:300]})
             if anchors:
                 get_server().broadcast_nowait("memory.anchors",
                                                {"anchors": anchors})
@@ -900,6 +914,16 @@ def _register_default_handlers():
                 log.debug("Local model policy after settings change: %s", exc)
         return {"success": True}
 
+    async def workspace_status(params: dict, ws) -> dict:
+        """The resolved view of the workspace: what is allowed right now.
+
+        The raw settings are just two strings; whether they confine anything
+        depends on the access mode, so this reports the outcome rather than the
+        inputs.
+        """
+        from backend.workspace import describe
+        return {"success": True, **describe()}
+
     # ---- Phase 3: Chat with prompt guard + provider integration ---------------
 
     async def chat_send(params: dict, ws) -> dict:
@@ -1282,6 +1306,80 @@ def _register_default_handlers():
     async def wiki_refresh_links(params: dict, ws) -> dict:
         from backend.wiki import store
         return {"success": True, **store.reindex_links()}
+
+    # ---- Procedures ---------------------------------------------------------
+
+    async def sop_status(params: dict, ws) -> dict:
+        """What the Settings panel shows: on/off, and how much is stored."""
+        from backend.sop import store
+        try:
+            return {"success": True, **store.describe()}
+        except Exception as e:
+            log.debug("sop.status failed: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def sop_list(params: dict, ws) -> dict:
+        from backend.sop import store
+        category = params.get("category") or None
+        try:
+            return {"success": True,
+                    "procedures": store.list_all(category),
+                    "categories": store.categories()}
+        except Exception as e:
+            log.debug("sop.list failed: %s", e)
+            return {"success": False, "error": str(e), "procedures": []}
+
+    async def sop_get(params: dict, ws) -> dict:
+        from backend.sop import store
+        sop = store.get(str(params.get("id") or ""))
+        if not sop:
+            return {"success": False, "error": f"No procedure '{params.get('id')}'."}
+        return {"success": True, "procedure": sop}
+
+    async def sop_save(params: dict, ws) -> dict:
+        from backend.sop import store
+        try:
+            if not store.enabled():
+                return {"success": False,
+                        "error": "Procedures are turned off in settings."}
+            out = store.upsert({
+                "id": params.get("id"),
+                "category": params.get("category"),
+                "title": params.get("title"),
+                "steps": params.get("steps"),
+                "tools": params.get("tools"),
+                "source": "manual",
+            })
+            if not out.get("success"):
+                return out
+            return {"success": True, "procedure": out["sop"],
+                    "categories": store.categories()}
+        except Exception as e:
+            log.debug("sop.save failed: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def sop_delete(params: dict, ws) -> dict:
+        from backend.sop import store
+        try:
+            removed = store.delete(str(params.get("id") or ""))
+            return {"success": removed,
+                    "categories": store.categories(),
+                    **({"error": "No such procedure."} if not removed else {})}
+        except Exception as e:
+            log.debug("sop.delete failed: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def sop_reseed(params: dict, ws) -> dict:
+        """Re-add the built-in procedures the user has deleted."""
+        from backend.sop import seeds, store
+        try:
+            added = seeds.seed()
+            return {"success": True, "added": added,
+                    "categories": store.categories(),
+                    "procedures": store.list_all()}
+        except Exception as e:
+            log.debug("sop.reseed failed: %s", e)
+            return {"success": False, "error": str(e)}
 
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
@@ -2103,6 +2201,7 @@ def _register_default_handlers():
     _server.register("desktop.revoke", desktop_revoke)
     _server.register("settings.get", settings_get)
     _server.register("settings.set", settings_set)
+    _server.register("workspace.status", workspace_status)
     _server.register("models.routes", models_routes)
     _server.register("models.catalog", models_catalog)
     _server.register("models.refresh", models_refresh)
@@ -2232,6 +2331,12 @@ def _register_default_handlers():
     _server.register("wiki.ingest", wiki_ingest)
     _server.register("wiki.lint", wiki_lint)
     _server.register("wiki.refreshLinks", wiki_refresh_links)
+    _server.register("sop.status", sop_status)
+    _server.register("sop.list", sop_list)
+    _server.register("sop.get", sop_get)
+    _server.register("sop.save", sop_save)
+    _server.register("sop.delete", sop_delete)
+    _server.register("sop.reseed", sop_reseed)
 
     # Sprite skins
     _server.register("character.skinsList", character_skins_list)

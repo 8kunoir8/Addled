@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import { useWS } from '@/lib/useWS';
 
 type SettingsData = Record<string, any>;
@@ -8,7 +9,7 @@ type SettingsData = Record<string, any>;
 const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
   notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️', guidelines: '📐',
-  mcp: '🧰', wiki: '📖',
+  mcp: '🧰', wiki: '📖', workspace: '📁',
 };
 
 export default function SettingsPage() {
@@ -39,7 +40,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['providers','character','voice','safety','notifications','observation','memory','wiki','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
+  const sections = ['providers','character','voice','workspace','safety','notifications','observation','memory','wiki','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -63,6 +64,7 @@ export default function SettingsPage() {
         {activeSection==='character'&&<CharacterSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='character'&&<SkinsSection send={send} connected={wsState==='connected'}/>}
         {activeSection==='voice'&&<VoiceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
+        {activeSection==='workspace'&&<WorkspaceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='safety'&&<SafetySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='notifications'&&<NotificationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
@@ -878,11 +880,69 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
   </div>;
 }
 
+function WorkspaceSection({ settings, update, saving, status, send, connected }: any) {
+  const w = settings?.workspace || {};
+  const s = settings?.safety || {};
+  const [info, setInfo] = useState<any>(null);
+  const [extraText, setExtraText] = useState<string>((w.extra_dirs||[]).join('\n'));
+  const [extraDirty, setExtraDirty] = useState(false);
+
+  const root = w.root || '';
+  const mode = s.file_access_mode || 'workspace_only';
+
+  // The settings are just two strings; what matters is which folders end up
+  // allowed, which is what the backend reports back.
+  useEffect(() => {
+    if (!connected) return;
+    send('workspace.status', {}).then(setInfo).catch(() => {});
+  }, [connected, send, root, mode, JSON.stringify(w.extra_dirs||[])]);
+
+  return <div className="space-y-1">
+    <SettingRow label="Workspace Folder" description="The folder Addled works in. Relative paths resolve here, and file tools stay inside it.">
+      <input type="text" value={root} placeholder="C:\\Users\\you\\Projects\\thing"
+        onChange={e=>update('workspace','root',e.target.value)}
+        className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-80 font-mono"/>
+    </SettingRow>
+
+    <SettingRow label="File Access" description="Workspace Only keeps everything inside the folder above. Custom also allows the extra folders. Unrestricted disables all confinement.">
+      <select value={mode} onChange={e=>update('safety','file_access_mode',e.target.value)}
+        className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]">
+        <option value="workspace_only">Workspace Only</option>
+        <option value="custom">Custom</option>
+        <option value="unrestricted">Unrestricted</option>
+      </select>
+    </SettingRow>
+
+    {mode==='custom'&&<SettingRow label="Extra Folders" description="One absolute path per line. Only used when File Access is Custom.">
+      <div className="flex items-start gap-2">
+        <textarea value={extraText} rows={3}
+          onChange={e=>{setExtraText(e.target.value); setExtraDirty(true);}}
+          placeholder="D:\\Notes\nE:\\Scratch"
+          className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-80 font-mono"/>
+        <button onClick={()=>{update('workspace','extra_dirs',extraText.split('\n').map(x=>x.trim()).filter(Boolean)); setExtraDirty(false);}}
+          className={`px-3 py-1.5 rounded text-sm ${extraDirty?'bg-[#1f6feb] text-white':'bg-[#21262d] text-[#8b949e]'}`}>Save</button>
+      </div>
+    </SettingRow>}
+
+    {info&&<div className="mt-4 rounded-md border border-[#30363d] bg-[#0d1117] p-3 text-xs space-y-1.5 font-mono text-[#8b949e]">
+      <div className={info.configured?'text-[#e8eaed]':'text-[#d29922]'}>
+        {info.configured ? `Workspace: ${info.root}` : info.note}
+      </div>
+      <div>Mode: {info.mode_label}{info.enforced?' — enforced':' — not enforced'}</div>
+      <div>
+        {info.allowed&&info.allowed.length
+          ? <>Allowed folders:{info.allowed.map((p:string,i:number)=><div key={i} className="pl-3 truncate">{p}</div>)}</>
+          : 'No folder restriction is active.'}
+      </div>
+      {info.configured&&info.mode==='unrestricted'&&<div className="text-[#d29922]">The folder is set but Unrestricted mode means it is not being enforced.</div>}
+    </div>}
+  </div>;
+}
+
 function SafetySection({ settings, update, saving, status }: any) {
   const s=settings?.safety||{};
   const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('safety',skey,!s[skey])} className={`w-10 h-5 rounded-full transition-colors ${s[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${s[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   return <div className="space-y-1">
-    <SettingRow label="File Access"><select value={s.file_access_mode||'workspace_only'} onChange={e=>update('safety','file_access_mode',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="workspace_only">Workspace Only</option><option value="custom">Custom</option><option value="unrestricted">Full</option></select></SettingRow>
     <SettingRow label="Kill Switch"><input type="text" value={s.kill_switch_hotkey||'ctrl+shift+alt+k'} onChange={e=>update('safety','kill_switch_hotkey',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-44 font-mono"/></SettingRow>
     <Toggle label="Clipboard Filter" desc="Redact secrets from clipboard" skey="clipboard_filter"/>
     <Toggle label="Prompt Guard" desc="Block injection attempts" skey="prompt_guard"/>
@@ -927,7 +987,8 @@ function MemorySection({ settings, update, saving, status }: any) {
 function WikiSection({ settings, update, saving, status }: any) {
   const l=settings?.links||{};
   const w=settings?.wiki||{};
-  const Toggle=(group:'links'|'wiki', cfg:any)=>{
+  const sop=settings?.sop||{};
+  const Toggle=(group:'links'|'wiki'|'sop', cfg:any)=>{
     const T=({label,desc,skey}:{label:string;desc?:string;skey:string})=>(
       <SettingRow label={label} description={desc}>
         <button onClick={()=>update(group,skey,!cfg[skey])} className={`w-10 h-5 rounded-full transition-colors ${cfg[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}>
@@ -937,7 +998,7 @@ function WikiSection({ settings, update, saving, status }: any) {
     );
     return T;
   };
-  const Num=(group:'links'|'wiki', cfg:any, min:number, max:number)=>{
+  const Num=(group:'links'|'wiki'|'sop', cfg:any, min:number, max:number)=>{
     return ({label,desc,skey}:{label:string;desc?:string;skey:string})=>(
       <SettingRow label={label} description={desc}>
         <input type="number" min={min} max={max} value={cfg[skey] ?? ''}
@@ -950,6 +1011,15 @@ function WikiSection({ settings, update, saving, status }: any) {
   const LinkNum=Num('links', l, 0, 50);
   const WikiToggle=Toggle('wiki', w);
   const WikiNum=Num('wiki', w, 1, 20);
+  const SopToggle=Toggle('sop', sop);
+  const SopNum=Num('sop', sop, 1, 5);
+  // Similarity bars are on a 0-1 scale, so they need their own step.
+  const SopScore=(label:string, desc:string, skey:string)=>
+    <SettingRow label={label} description={desc}>
+      <input type="number" min={0} max={1} step={0.05} value={sop[skey] ?? ''}
+        onChange={(e)=>update('sop',skey,Number(e.target.value))}
+        className="w-20 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] focus:outline-none focus:border-[#3380FF]"/>
+    </SettingRow>;
   return <div className="space-y-1">
     <p className="text-xs text-[#8b949e] mb-2">One graph connects every memory store (facts, triples, memories, summaries, journal days, wiki pages) to each other and to files on disk.</p>
     <LinkToggle label="Memory relations" desc="Record and use relations between memories, and between memories and files" skey="enabled"/>
@@ -966,6 +1036,16 @@ function WikiSection({ settings, update, saving, status }: any) {
     <WikiNum label="Pages to inject" desc="How many matching pages to give the model per message" skey="inject_top_k"/>
     <WikiNum label="Prompt budget (chars)" desc="Upper bound on wiki text added to one message" skey="max_chars"/>
     <SettingRow label="Wiki folder"><span className="text-xs text-[#8b949e] break-all">{w.dir || 'default (backend/memory/wiki)'}</span></SettingRow>
+
+    <div className="border-t border-[#30363d] my-3"/>
+    <p className="text-xs text-[#8b949e] mb-2">A procedure is the route a task took the last time it worked. When a new task is close enough to one, Addled is given those steps up front instead of working them out again.</p>
+    <SopToggle label="Procedures" desc="Look up a standard procedure before starting a task" skey="enabled"/>
+    <SopToggle label="Learn from runs" desc="Keep the route after a task that used tools and succeeded. Failed runs are never kept" skey="learn"/>
+    <SopNum label="Procedures to offer" desc="How many matching procedures to give the model per message" skey="inject_top_k"/>
+    {SopScore("Minimum similarity", "How close a task must be before a procedure is offered. Higher means fewer, safer matches", "min_similarity")}
+    {SopScore("Merge similarity", "How close two runs must be to count as the same procedure rather than a new one", "merge_similarity")}
+    <SettingRow label="Procedures folder"><span className="text-xs text-[#8b949e] break-all">{sop.dir || 'default (backend/memory/sop)'}</span></SettingRow>
+    <SettingRow label="Browse procedures"><Link href="/sop" className="text-xs text-[#3380FF] hover:underline">Open the Procedures page →</Link></SettingRow>
   </div>;
 }
 

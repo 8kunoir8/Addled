@@ -45,3 +45,7 @@ backend/memory/guidelines/
 backend/memory/wiki/
 backend/memory/journal/
 
+# Procedures are learned from this machine's own activity, so they differ per
+# user and are not repository content. The built-in seeds live in code.
+backend/memory/sop/
+

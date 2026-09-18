@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useWS } from '@/lib/useWS';
 
 interface CodeFile { name: string; path: string; language: string; size: number; }
@@ -17,6 +17,25 @@ export default function CodePage() {
   const [pending, setPending] = useState<{editId:string; filePath:string; diff:any}|null>(null);
   const [diffError, setDiffError] = useState('');
   const [applied, setApplied] = useState('');
+  const prefilled = useRef(false);
+  const touched = useRef(false);
+
+  // Open the workspace the user configured, so this page is useful without
+  // them retyping a path they already gave Addled.
+  useEffect(() => {
+    if (wsState !== 'connected' || prefilled.current) return;
+    prefilled.current = true;
+    send('settings.get', { section: 'workspace' }).then(async r => {
+      const root = r?.settings?.workspace?.root || '';
+      if (!root || touched.current) return;
+      setWorkspacePath(root);
+      try {
+        const b = await send('code.bind', { folderPath: root });
+        setFiles(b?.files || []);
+        setBound(true);
+      } catch { /* leave it for the user to bind manually */ }
+    }).catch(() => {});
+  }, [wsState, send]);
 
   const handleBind = async () => {
     if (!workspacePath.trim() || wsState !== 'connected') return;
@@ -107,7 +126,7 @@ export default function CodePage() {
         <div className="p-3 border-b border-[#30363d]">
           {!bound ? (
             <div className="space-y-2">
-              <input value={workspacePath} onChange={e=>setWorkspacePath(e.target.value)} placeholder="Folder path..."
+              <input value={workspacePath} onChange={e=>{touched.current=true; setWorkspacePath(e.target.value);}} placeholder="Folder path..."
                 className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-[#e8eaed] placeholder-[#484f58]"/>
               <button onClick={handleBind} disabled={!workspacePath.trim()||loading||wsState!=='connected'}
                 className="w-full bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-2 py-1.5 text-xs font-medium">

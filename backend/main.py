@@ -373,6 +373,13 @@ def main():
     except Exception:
         log.exception("Skin restore failed (ignored)")
 
+    # ---- standard operating procedures (starter set on first run) -------------
+    try:
+        from backend.sop import seeds as sop_seeds
+        sop_seeds.ensure_seeded()
+    except Exception as e:
+        log.debug("Procedure seeding skipped: %s", e)
+
     # ---- kill switch (global hotkey: stops everything immediately) -----------
     from backend.safety.kill_switch import kill_switch
 

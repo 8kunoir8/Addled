@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { href: '/chat', label: 'Chat', icon: '💬' },
   { href: '/memory', label: 'Memory', icon: '🧠' },
   { href: '/wiki', label: 'Wiki', icon: '📖' },
+  { href: '/sop', label: 'Procedures', icon: '📋' },
   { href: '/skills', label: 'Skills', icon: '🧩' },
   { href: '/goals', label: 'Goals', icon: '🎯' },
   { href: '/code', label: 'Code', icon: '💻' },
