@@ -16,16 +16,13 @@ files:
   - '!**/.git'
 
 # The bot bridges are Node scripts launched by an external `node`, which cannot
-# read app.asar. Unpack them and the dependencies they require, or the Bots page
-# can only ever report "the bot scripts are not on disk".
+# read inside app.asar. Unpack them and the packed dependencies they resolve
+# through (the bots pull transitive packages, so listing them individually is
+# not enough). Dev-only packages such as electron and app-builder-bin are not
+# packed in the first place.
 asarUnpack:
   - bots/**
-  - node_modules/grammy/**
-  - node_modules/discord.js/**
-  - node_modules/@discordjs/**
-  - node_modules/@whiskeysockets/**
-  - node_modules/@hapi/**
-  - node_modules/ws/**
+  - node_modules/**
 
 extraResources:
   - from: backend

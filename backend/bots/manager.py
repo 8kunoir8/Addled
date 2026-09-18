@@ -18,7 +18,6 @@ import asyncio
 import logging
 import os
 import shutil
-import sys
 from collections import deque
 from pathlib import Path
 
@@ -71,19 +70,26 @@ _tasks: dict[str, asyncio.Task] = {}
 def _root() -> Path | None:
     """The directory that contains ``bots/``.
 
-    In a dev run that is the repo root. In a packaged build the app lives in
-    app.asar, which a plain ``node`` process cannot read, so the scripts have to
-    be unpacked next to it (see asarUnpack in electron-builder.yml).
+    Two layouts matter. A dev run keeps them in the repo root. A packaged build
+    keeps them inside ``app.asar``, which an external ``node`` cannot read, so
+    they are unpacked *beside* it — ``<resources>/app.asar.unpacked/bots`` — and
+    that is also where their Node dependencies land. The build config does the
+    unpacking; this has to look in both places or the packaged app reports the
+    scripts as missing even when they are there.
     """
     here = Path(__file__).resolve()
-    candidates = [
-        here.parents[2],                                   # <root>/backend/bots/
+    resources = here.parents[2]          # <repo> or <install>/resources
+    candidates: list[Path] = [
+        resources,
+        resources / "app.asar.unpacked",
     ]
-    if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).parent)
-    resources = Path(os.environ.get("ADDLED_RESOURCES", "") or ".")
-    if resources != Path("."):
-        candidates.append(resources / "app.asar.unpacked")
+    if len(here.parents) > 3:
+        parent = here.parents[3]
+        candidates += [parent, parent / "app.asar.unpacked"]
+    extra = os.environ.get("ADDLED_RESOURCES")
+    if extra:
+        candidates += [Path(extra), Path(extra) / "app.asar.unpacked"]
+
     for base in candidates:
         try:
             if (base / "bots").is_dir():
