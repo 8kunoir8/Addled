@@ -206,6 +206,8 @@ export default function CodePage() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activePath, setActivePath] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [treeOpen, setTreeOpen] = useState(true);
+  const treeToggled = useRef(false);
 
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
@@ -458,6 +460,21 @@ export default function CodePage() {
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty]);
 
+  /**
+   * A 256px tree and an editor need room between them. Below roughly 900px the
+   * tree used to win the whole window and the editor was squeezed to zero
+   * width, which makes an editor useless. It now hides itself, and the toggle
+   * in the tree header overrides this either way.
+   */
+  useEffect(() => {
+    const apply = () => {
+      if (!treeToggled.current) setTreeOpen(window.innerWidth >= 900);
+    };
+    apply();
+    window.addEventListener('resize', apply);
+    return () => window.removeEventListener('resize', apply);
+  }, []);
+
   const tree = useMemo(() => buildTree(files), [files]);
   const matches = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -533,7 +550,16 @@ export default function CodePage() {
   return (
     <div className="flex h-full">
       {/* ---------------- file tree ---------------- */}
-      <div className="w-64 border-r border-[#30363d] flex flex-col shrink-0">
+      {!treeOpen && (
+        <div className="w-9 border-r border-[#30363d] flex flex-col items-center shrink-0">
+          <button
+            onClick={() => { treeToggled.current = true; setTreeOpen(true); }}
+            className="w-9 py-2 text-[#8b949e] hover:text-[#e8eaed]"
+            title="Show the file tree"
+          >☰</button>
+        </div>
+      )}
+      <div className={`w-64 border-r border-[#30363d] flex flex-col shrink-0 ${treeOpen ? '' : 'hidden'}`}>
         <div className="p-3 border-b border-[#30363d] space-y-2">
           {!bound ? (
             <>
@@ -561,6 +587,9 @@ export default function CodePage() {
               <button
                 onClick={() => { setBound(false); setFiles([]); setTabs([]); setActivePath(''); }}
                 className="text-[#8b949e] hover:text-[#f85149]" title="Unbind">✕</button>
+              <button
+                onClick={() => { treeToggled.current = true; setTreeOpen(false); }}
+                className="text-[#8b949e] hover:text-[#e8eaed]" title="Hide the file tree">«</button>
             </div>
           )}
           {bindError && <p className="text-[11px] text-[#f85149]">{bindError}</p>}
