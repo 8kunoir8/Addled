@@ -61,6 +61,17 @@ win:
   # Menu and desktop shortcuts point at Addled.exe with icon index 0, so while
   # this was false electron-builder skipped stamping the exe and every shortcut
   # showed Electron's default atom instead of Addled's own icon.
+  #
+  # It needs rcedit, which ships inside electron-builder's `winCodeSign` bundle.
+  # That bundle contains macOS symlinks, and Windows refuses to create symlinks
+  # without elevation, so the extraction fails with "A required privilege is not
+  # held by the client" and the build stops. Turning Windows Developer Mode on
+  # (Settings > Privacy & security > For developers) fixes it properly; the
+  # alternative is to seed the cache once by hand, copying the extracted
+  # rcedit-x64.exe into
+  #   %LOCALAPPDATA%\electron-builder\Cache\winCodeSign\winCodeSign-2.6.0\
+  # The rest of the archive extracts fine - only those two .dylib links fail,
+  # and they are of no use on Windows anyway.
   signAndEditExecutable: true
 
 nsis:
