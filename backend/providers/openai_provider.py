@@ -14,6 +14,38 @@ import httpx
 from backend.providers.base import BaseProvider, ProviderResult
 
 
+_HTTP_ERROR_CHARS = 400
+
+
+def http_error_detail(exc: httpx.HTTPStatusError) -> str:
+    """The upstream's own explanation, not httpx's status line.
+
+    ``str(exc)`` is "Client error '404 Not Found' for url ...", which throws
+    away the only useful part. OpenRouter, for one, explains a refusal in the
+    body and links to the setting that lifts it — the difference between a
+    mystery and a one-click fix.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return str(exc)
+    detail = ""
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                detail = str(error.get("message") or "")
+            elif isinstance(error, str):
+                detail = error
+            detail = detail or str(payload.get("message") or "")
+    except Exception:
+        detail = (response.text or "")[:_HTTP_ERROR_CHARS]
+    detail = " ".join(detail.split())[:_HTTP_ERROR_CHARS]
+    if not detail:
+        return str(exc)
+    return f"HTTP {response.status_code}: {detail}"
+
+
 class OpenAIProvider(BaseProvider):
     provider_id = "openai"
     provider_name = "OpenAI"
@@ -67,6 +99,9 @@ class OpenAIProvider(BaseProvider):
                     duration_ms=int((time.monotonic() - t0) * 1000),
                     tool_calls=message.get("tool_calls") or None,
                 )
+        except httpx.HTTPStatusError as e:
+            return ProviderResult(ok=False, error=http_error_detail(e),
+                                  duration_ms=int((time.monotonic() - t0) * 1000))
         except Exception as e:
             return ProviderResult(ok=False, error=str(e), duration_ms=int((time.monotonic() - t0) * 1000))
 

@@ -12,6 +12,7 @@ import json
 import logging
 import re
 
+from backend.providers import budget
 from backend.skills.registry import skill_registry, SkillResult
 
 log = logging.getLogger("addled.tool_loop")
@@ -233,8 +234,13 @@ async def chat_with_tools(
             final = await _final_answer(tool_results)
             if final is not None:
                 return final
+            # Name them. "I tried to use some tools but they didn't work" gave
+            # the user nothing to act on and hid the reason from a bug report.
+            named = "; ".join(
+                f"{tr['tool']} — {tr.get('error') or 'no error reported'}"
+                for tr in tool_results[:3])
             return {
-                "response": "I tried to use some tools but they didn't work.",
+                "response": ("I couldn't run the tool for that: " + named),
                 "tokens": 0,
                 "tool_rounds": rounds,
                 "tool_results": tool_results,
@@ -328,11 +334,35 @@ async def _call_prompt_tools(provider, messages: list[dict],
             "content": modified_messages[-1]["content"] + tools_text,
         }
 
+    # Everything above plus the catalogue has to fit the provider's window.
+    # The local model's context is 8192, so an unbudgeted request is rejected
+    # outright — which is what made tool use fail there and nowhere else.
+    provider_id = getattr(provider, "provider_id", "") or ""
+    limit = budget.context_limit(provider_id)
+    wanted = int(provider_id == "local" and 1536 or 4096)
+    prompt_tokens = budget.message_tokens(modified_messages)
+    trimmed = 0
+    if prompt_tokens + budget.MIN_REPLY_TOKENS > limit:
+        # Drop older middle turns, then re-measure with the catalogue in place.
+        modified_messages, trimmed = budget.fit_messages(
+            modified_messages, limit, budget.MIN_REPLY_TOKENS)
+        if trimmed:
+            log.info("Trimmed %d older message(s) to fit %s's %d-token "
+                     "context", trimmed, provider_id or "provider", limit)
+        prompt_tokens = budget.message_tokens(modified_messages)
+    max_tokens = budget.reply_budget(prompt_tokens, limit, want=wanted)
+    if max_tokens <= 0:
+        return {"response": ("This request is larger than %s can hold (about "
+                             "%d tokens of context). Try a shorter question, "
+                             "or switch provider."
+                             % (provider_id or "the model", limit)),
+                "tokens": 0}
+
     try:
         result = await provider.chat(
             modified_messages,
             model=model,
-            max_tokens=4096,
+            max_tokens=max_tokens,
             temperature=0.7,
         )
 
@@ -342,13 +372,15 @@ async def _call_prompt_tools(provider, messages: list[dict],
         response_text = result.response
         tokens = result.tokens_in + result.tokens_out
 
-        # Parse ```tool blocks from the response
-        tool_calls = _extract_tool_calls(response_text)
+        parsed = _parse_tool_response(response_text)
+        tool_calls = parsed["calls"]
 
-        # Remove tool blocks from visible response
-        visible_response = re.sub(
-            r'```tool\s*\n.*?\n```', '', response_text, flags=re.DOTALL
-        ).strip()
+        # Only strip the blocks that were actually tool calls, so any code the
+        # model legitimately showed the user survives.
+        visible_response = response_text
+        for block in parsed["blocks"]:
+            visible_response = visible_response.replace(block, "")
+        visible_response = visible_response.strip()
 
         return {
             "response": visible_response or response_text,
@@ -361,36 +393,112 @@ async def _call_prompt_tools(provider, messages: list[dict],
         return {"response": f"Error: {e}", "tokens": 0}
 
 
-def _extract_tool_calls(text: str) -> list[dict]:
-    """Extract tool calls from response text (```tool blocks or JSON)."""
-    tool_calls = []
+def _json_objects(text: str):
+    r"""Yield every balanced-brace JSON object in the text.
 
-    # Pattern 1: ```tool\n{...}\n```
-    for match in re.finditer(r'```tool\s*\n(.*?)\n```', text, re.DOTALL):
-        try:
-            data = json.loads(match.group(1))
-            if isinstance(data, dict) and "tool" in data:
-                tool_calls.append({
-                    "name": data["tool"],
-                    "params": data.get("params", {}),
-                })
-        except json.JSONDecodeError:
+    A regex cannot do this: ``\{[^}]*\}`` stops at the first closing brace, so
+    it never matched a call with parameters — which is all of them. This walks
+    the text and respects nesting and string escapes.
+    """
+    depth = 0
+    start = None
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
             continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                yield text[start:index + 1]
+                start = None
 
-    # Pattern 2: Raw JSON with "tool" key (some models output this)
-    if not tool_calls:
-        for match in re.finditer(r'\{[^}]*"tool"\s*:\s*"[^"]+"[^}]*\}', text):
+
+def _as_tool_call(candidate: dict) -> dict | None:
+    """Normalise the several shapes models use for a tool call."""
+    if not isinstance(candidate, dict):
+        return None
+    name = candidate.get("tool") or candidate.get("name")
+    if not name and isinstance(candidate.get("function"), dict):
+        name = candidate["function"].get("name")
+        args = candidate["function"].get("arguments")
+        if isinstance(args, str):
             try:
-                data = json.loads(match.group(0))
-                if isinstance(data, dict) and "tool" in data:
-                    tool_calls.append({
-                        "name": data["tool"],
-                        "params": data.get("params", {}),
-                    })
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        return {"name": str(name), "params": args or {}}
+    if not name:
+        return None
+    params = candidate.get("params") or candidate.get("parameters") \
+        or candidate.get("arguments") or {}
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except json.JSONDecodeError:
+            params = {}
+    return {"name": str(name), "params": params if isinstance(params, dict)
+            else {}}
+
+
+def _extract_tool_calls(text: str) -> list[dict]:
+    """The tool calls in a piece of text. Kept list-shaped: the native path
+    falls back to this and treats the result as a list."""
+    return _parse_tool_response(text)["calls"]
+
+
+def _parse_tool_response(text: str) -> dict:
+    """Find tool calls, and the text blocks that should not be shown.
+
+    Accepts ```tool, ```json or an unfenced object, on one line or several, so
+    a small model is not required to match one exact format. Returns
+    ``{"calls": [...], "blocks": [raw block, ...]}``.
+    """
+    if not text:
+        return {"calls": [], "blocks": []}
+
+    calls: list[dict] = []
+    blocks: list[str] = []
+
+    for match in re.finditer(r"```(?:tool|json)?\s*(.*?)```", text, re.DOTALL):
+        inner = match.group(1).strip()
+        found = False
+        for candidate in _json_objects(inner):
+            try:
+                call = _as_tool_call(json.loads(candidate))
             except json.JSONDecodeError:
                 continue
+            if call:
+                calls.append(call)
+                found = True
+        if found:
+            blocks.append(match.group(0))
 
-    return tool_calls
+    if not calls:
+        # No fenced block, or nothing usable in it: look at the raw text. A
+        # tool block left visible to the user is worse than a strict parse.
+        for candidate in _json_objects(text):
+            try:
+                call = _as_tool_call(json.loads(candidate))
+            except json.JSONDecodeError:
+                continue
+            if call:
+                calls.append(call)
+                blocks.append(candidate)
+
+    return {"calls": calls, "blocks": blocks}
 
 
 def _tool_result_message(tool_name: str, result: dict, tool_call_id: str | None = None) -> dict:

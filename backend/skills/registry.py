@@ -19,6 +19,14 @@ from typing import Any, Callable, Awaitable
 
 log = logging.getLogger("addled.skills")
 
+# How much of a skill's description survives into a text prompt. Providers with
+# native tool support get the full schema; providers without it get the whole
+# catalogue pasted into the user's message, and there the pretty-printed JSON is
+# mostly punctuation. Measured at 56 skills, the verbose form was 18,734
+# characters (~4,700 tokens) — more than the local model's entire remaining
+# context once its reply budget is set aside.
+PROMPT_DESC_CHARS = 110
+
 
 @dataclass
 class SkillDefinition:
@@ -50,13 +58,21 @@ class SkillDefinition:
         }
 
     def to_prompt_desc(self) -> str:
-        """Plain-text description for providers without native tool support."""
-        params_desc = json.dumps(self.parameters.get("properties", {}), indent=2)
-        return (
-            f"Tool: {self.name}\n"
-            f"Description: {self.description}\n"
-            f"Parameters: {params_desc}\n"
-        )
+        """One line per tool, for providers with no native tool support.
+
+        Only the parameter *names* affect what the model can do, so the
+        schemas are not spelled out; the description is clipped so that one
+        verbose skill cannot crowd the rest out of the window. The full
+        schema still reaches providers that take a ``tools`` argument.
+        """
+        props = self.parameters.get("properties", {}) or {}
+        required = set(self.parameters.get("required", []) or [])
+        args = ", ".join(name if name in required else f"{name}?"
+                         for name in props)
+        desc = " ".join((self.description or "").split())
+        if len(desc) > PROMPT_DESC_CHARS:
+            desc = desc[:PROMPT_DESC_CHARS].rstrip() + "…"
+        return f"{self.name}({args}) — {desc}"
 
 
 @dataclass
@@ -236,13 +252,16 @@ class SkillRegistry:
         return [s.to_claude_tool() for s in self.enabled_list_all()]
 
     def to_prompt_tools(self) -> str:
-        """For providers without native tool support: append to system prompt."""
-        lines = ["\n## Available Tools\n"]
-        lines.append("You can call these tools by responding with a JSON block:")
-        lines.append('```tool\n{"tool": "tool_name", "params": {...}}\n```\n')
+        """For providers without native tool support: append to the prompt.
+
+        Deliberately terse. This text is added to the user's own message, so
+        every token here is a token the model cannot spend on the question.
+        """
+        lines = ["\n## Tools",
+                 'Call one with: ```tool\n{"tool": "name", "params": {}}\n```',
+                 "A trailing '?' marks an optional argument.", ""]
         for skill in self.enabled_list_all():
             lines.append(skill.to_prompt_desc())
-            lines.append("")
         return "\n".join(lines)
 
     async def execute(self, name: str, params: dict) -> SkillResult:

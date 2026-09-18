@@ -147,12 +147,18 @@ DEFAULT_SETTINGS: dict = {
                 "name": "OpenRouter",
                 "base_url": "https://openrouter.ai/api/v1",
                 "api_key": "",
-                "default_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                # Not a ":free" model. OpenRouter refuses those for any account
+                # whose privacy settings do not allow free-model training, and
+                # answers 404 — which is what a fresh install used to hit on the
+                # very first message. The free models stay selectable, further
+                # down the list.
+                "default_model": "deepseek/deepseek-v4.1-flash",
                 "models": [
-                    "nvidia/nemotron-3-ultra-550b-a55b:free",
-                    "qwen/qwen3.8-27b:free",
                     "deepseek/deepseek-v4.1-flash",
                     "openrouter/auto",
+                    "deepseek/deepseek-v3.2",
+                    "qwen/qwen3.8-27b:free",
+                    "nvidia/nemotron-3-ultra-550b-a55b:free",
                 ],
                 "vision": True,
                 "vision_model": "qwen/qwen3.8-27b:free",

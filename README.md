@@ -390,6 +390,7 @@ Addled/
 ├── scripts/
 │   ├── verify_python.py     # Python environment check
 │   ├── check_voice.py       # voice catalogue + voice selection
+│   ├── check_tools.py       # tool catalogue, parser and provider errors
 │   ├── check_links.py       # memory relation graph
 │   ├── check_wiki.py        # wiki pages, ingest and skills
 │   └── check_wiring.py      # model routing wiring
