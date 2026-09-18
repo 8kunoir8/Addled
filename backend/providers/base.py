@@ -21,6 +21,9 @@ class ProviderResult:
     duration_ms: int = 0
     error: str | None = None
     tool_calls: list | None = None  # raw API tool_calls (OpenAI format)
+    # Thinking-mode models (e.g. DeepSeek v4) return this alongside tool_calls
+    # and require it to be echoed back on the follow-up request.
+    reasoning_content: str = ""
 
 
 class BaseProvider(ABC):

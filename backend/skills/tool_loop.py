@@ -157,6 +157,10 @@ async def chat_with_tools(
         return None
 
     rounds = 0
+    # Every tool result from every round. The per-round list below is what the
+    # failure and round-cap paths reason about; this accumulates so a normal
+    # text reply still reports what was actually called.
+    all_tool_results: list[dict] = []
     while rounds < max_tool_rounds:
         rounds += 1
 
@@ -171,20 +175,13 @@ async def chat_with_tools(
                 "response": result.get("response", ""),
                 "tokens": result.get("tokens", 0),
                 "tool_rounds": rounds,
-                "tool_results": result.get("tool_results", []),
+                "tool_results": (all_tool_results
+                                 or result.get("tool_results", [])),
             }
 
         # Execute tool calls (with auto-forge for missing skills)
         tool_results = []
-        raw_tool_calls = result.get("raw_tool_calls")
-        if raw_tool_calls:
-            # Keep the assistant tool_call message in history
-            # (required by OpenAI-compatible APIs for the follow-up request)
-            full_messages.append({
-                "role": "assistant",
-                "content": result.get("response") or None,
-                "tool_calls": raw_tool_calls,
-            })
+        executed: list[tuple[dict, dict]] = []
         for tc in result["tool_calls"]:
             exec_result = await execute_skill(
                 tc["name"], tc.get("params", {}), provider)
@@ -198,9 +195,38 @@ async def chat_with_tools(
                 "error": exec_result.get("error"),
                 "forged": exec_result.get("forged", False),
             })
+            executed.append((tc, exec_result))
+
+        # Echo back only the calls whose skill actually exists. A name the model
+        # invented (and the forge could not create) must not appear in the
+        # assistant message: the API rejects the entire follow-up request, which
+        # would lose the answer instead of reporting an unknown tool.
+        valid = [(tc, res) for tc, res in executed
+                 if skill_registry.get(tc["name"])]
+        valid_ids = {tc.get("id") for tc, _ in valid if tc.get("id")}
+        raw_tool_calls = [raw for raw in (result.get("raw_tool_calls") or [])
+                          if raw.get("id") in valid_ids]
+        if raw_tool_calls:
+            # Keep the assistant tool_call message in history
+            # (required by OpenAI-compatible APIs for the follow-up request)
+            assistant_message: dict = {
+                "role": "assistant",
+                "content": result.get("response") or None,
+                "tool_calls": raw_tool_calls,
+            }
+            # Thinking-mode models (DeepSeek v4) reject the follow-up request
+            # unless the reasoning_content they returned is passed back. Only
+            # set it when the provider actually sent it, so providers that
+            # never do are not handed an unknown field.
+            reasoning = result.get("reasoning_content")
+            if reasoning:
+                assistant_message["reasoning_content"] = reasoning
+            full_messages.append(assistant_message)
+        for tc, exec_result in valid:
             # Add to message history so provider sees the result
             full_messages.append(
                 _tool_result_message(tc["name"], exec_result, tc.get("id")))
+        all_tool_results.extend(tool_results)
 
         # If all tools failed, try a forced plain-text answer before giving up
         if all(not tr["success"] for tr in tool_results):
@@ -270,6 +296,7 @@ async def _call_native_tools(provider, messages: list[dict],
                 "tokens": tokens,
                 "tool_calls": tool_calls,
                 "raw_tool_calls": result.tool_calls,
+                "reasoning_content": getattr(result, "reasoning_content", ""),
             }
 
         # Fallback: models that output ```tool blocks in plain text

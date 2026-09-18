@@ -83,9 +83,17 @@ class DeepSeekProvider(BaseProvider):
                     tokens_out=data.get("usage", {}).get("completion_tokens", 0),
                     duration_ms=int((time.monotonic() - t0) * 1000),
                     tool_calls=message.get("tool_calls") or None,
+                    reasoning_content=message.get("reasoning_content") or "",
                 )
         except Exception as e:
-            return ProviderResult(ok=False, error=str(e), duration_ms=int((time.monotonic() - t0) * 1000))
+            # Surface the API's own message: a bare "400 Bad Request" from
+            # httpx hides causes like a rejected model or message shape.
+            detail = str(e)
+            body = getattr(getattr(e, "response", None), "text", "")
+            if body:
+                detail = f"{detail} — {body[:300].strip()}"
+            return ProviderResult(ok=False, error=detail,
+                                  duration_ms=int((time.monotonic() - t0) * 1000))
 
     async def chat_stream(
         self,

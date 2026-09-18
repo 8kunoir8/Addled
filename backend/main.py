@@ -193,6 +193,26 @@ def main():
     except Exception as e:
         log.warning("Local model manager unavailable: %s", e)
 
+    # ---- MCP servers (third-party tool servers) ------------------------------
+    try:
+        from backend.mcp_client.manager import mcp_manager
+
+        def _mcp_started(fut):
+            try:
+                err = fut.exception()
+            except Exception:
+                return
+            if err:
+                log.debug("MCP startup failed: %s", err)
+
+        # Fire and forget: a slow or missing server must never delay startup.
+        handle = asyncio.run_coroutine_threadsafe(
+            mcp_manager.start(), _ws_loop)
+        handle.add_done_callback(_mcp_started)
+        log.info("MCP manager armed")
+    except Exception as e:
+        log.warning("MCP client unavailable: %s", e)
+
     # ---- scheduler (tasks, calendar reminders, housekeeping) ------------------
     try:
         from backend.tasks.scheduler import scheduler
@@ -513,6 +533,14 @@ def main():
         fut.result(timeout=15)
     except Exception as e:
         log.debug("Local model shutdown: %s", e)
+
+    # Close MCP servers so no child process outlives the app either
+    try:
+        from backend.mcp_client.manager import mcp_manager
+        fut = asyncio.run_coroutine_threadsafe(mcp_manager.stop(), _ws_loop)
+        fut.result(timeout=15)
+    except Exception as e:
+        log.debug("MCP shutdown: %s", e)
 
     # Summarize the session into long-term memory before the loops stop
     try:

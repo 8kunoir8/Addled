@@ -24,6 +24,7 @@ const SOURCE_LABELS: Record<string, string> = {
   builtin: 'built-in',
   forged: 'forged',
   market: 'market',
+  mcp: 'MCP',
 };
 
 export default function SkillsPage() {

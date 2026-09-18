@@ -9,6 +9,7 @@ backend/memory/*.json
 backend/memory/goals/
 backend/memory/models/
 backend/memory/market_skills/
+backend/memory/forged_skills/
 tools/
 backend/memory/.vault*
 backend/memory/*.log

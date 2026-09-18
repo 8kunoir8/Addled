@@ -671,6 +671,81 @@ def _register_default_handlers():
         desktop_control.revoke()
         return {"success": True, "granted": False}
 
+    async def mcp_list(params: dict, ws) -> dict:
+        """Configured MCP servers and their live connection state."""
+        from backend.mcp_client.manager import mcp_manager
+        try:
+            return mcp_manager.status()
+        except Exception as e:
+            log.debug("mcp.list failed: %s", e)
+            return {"enabled": False, "servers": [], "error": str(e)}
+
+    async def mcp_add(params: dict, ws) -> dict:
+        from backend.mcp_client.manager import mcp_manager
+        try:
+            return mcp_manager.add(params.get("server") or params)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def mcp_update(params: dict, ws) -> dict:
+        from backend.mcp_client.manager import mcp_manager
+        server_id = str(params.get("id") or "")
+        if not server_id:
+            return {"success": False, "error": "missing server id"}
+        try:
+            return mcp_manager.update(server_id, params.get("patch") or {})
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def mcp_remove(params: dict, ws) -> dict:
+        from backend.mcp_client.manager import mcp_manager
+        server_id = str(params.get("id") or "")
+        if not server_id:
+            return {"success": False, "error": "missing server id"}
+        try:
+            return await mcp_manager.remove(server_id)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def mcp_connect(params: dict, ws) -> dict:
+        from backend.mcp_client.manager import mcp_manager
+        server_id = str(params.get("id") or "")
+        if not server_id:
+            return {"success": False, "error": "missing server id"}
+        try:
+            out = await mcp_manager.connect(server_id)
+            return {**out, "status": mcp_manager.status()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def mcp_disconnect(params: dict, ws) -> dict:
+        from backend.mcp_client.manager import mcp_manager
+        server_id = str(params.get("id") or "")
+        try:
+            out = await mcp_manager.disconnect(server_id)
+            return {**out, "status": mcp_manager.status()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def mcp_reload(params: dict, ws) -> dict:
+        """Reconnect every configured server (after editing the list)."""
+        from backend.mcp_client.manager import mcp_manager
+        try:
+            out = await mcp_manager.reload()
+            return {"success": True, **(out or {}),
+                    "status": mcp_manager.status()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def mcp_tools(params: dict, ws) -> dict:
+        """The tools a connected server advertises, with their schemas."""
+        from backend.mcp_client.manager import mcp_manager
+        server_id = str(params.get("id") or "")
+        try:
+            return mcp_manager.tools(server_id)
+        except Exception as e:
+            return {"success": False, "tools": [], "error": str(e)}
+
     async def guidelines_state(params: dict, ws) -> dict:
         """Guideline pack status for the Settings panel."""
         from backend.guidelines import inject as guidelines
@@ -1732,6 +1807,14 @@ def _register_default_handlers():
     _server.register("models.refresh", models_refresh)
     _server.register("guidelines.state", guidelines_state)
     _server.register("guidelines.refresh", guidelines_refresh)
+    _server.register("mcp.list", mcp_list)
+    _server.register("mcp.add", mcp_add)
+    _server.register("mcp.update", mcp_update)
+    _server.register("mcp.remove", mcp_remove)
+    _server.register("mcp.connect", mcp_connect)
+    _server.register("mcp.disconnect", mcp_disconnect)
+    _server.register("mcp.reload", mcp_reload)
+    _server.register("mcp.tools", mcp_tools)
 
     # Phase 5 Goals engine
     _server.register("goal.create", goal_create)

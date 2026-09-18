@@ -252,6 +252,15 @@ DEFAULT_SETTINGS: dict = {
             "karpathy": {"enabled": True, "level": "full", "scope": "code"},
         },
     },
+    # MCP servers — third-party tool servers Addled can call. Each entry:
+    # {id, name, transport: stdio|http, command, args[], env{}, cwd,
+    #  url, headers{}, enabled, trusted, timeout_s}
+    # "trusted" skips the per-tool approval prompt.
+    "mcp": {
+        "enabled": True,
+        "autoconnect": True,
+        "servers": [],
+    },
     "browser": {
         "user_browser": False,
         "cdp_port": 9222,

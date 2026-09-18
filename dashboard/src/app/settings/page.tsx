@@ -9,6 +9,7 @@ const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
   notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',
   observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️', guidelines: '📐',
+  mcp: '🧰',
 };
 
 export default function SettingsPage() {
@@ -39,7 +40,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['providers','character','voice','safety','notifications','observation','memory','tools','guidelines','browser','desktop','integrations','appearance','about'];
+  const sections = ['providers','character','voice','safety','notifications','observation','memory','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -69,6 +70,7 @@ export default function SettingsPage() {
         {activeSection==='memory'&&<MemorySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='tools'&&<ToolsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='guidelines'&&<GuidelinesSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
+        {activeSection==='mcp'&&<McpSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='browser'&&<BrowserSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='desktop'&&<DesktopSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='integrations'&&<IntegrationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
@@ -230,6 +232,178 @@ function relTime(iso?:string){
   const m=Math.floor(s/60); if(m<60)return `${m} min ago`;
   const h=Math.floor(m/60); if(h<24)return `${h} h ago`;
   return `${Math.floor(h/24)} d ago`;
+}
+
+const MCP_STATES: Record<string,string> = {
+  ready: 'bg-[#238636] text-white',
+  connecting: 'bg-[#d29922] text-black',
+  error: 'bg-[#f85149] text-white',
+  disconnected: 'bg-[#21262d] text-[#8b949e]',
+};
+
+function McpSection({settings,update,saving,status}: any){
+  const m=settings?.mcp||{};
+  const {send,state:wsState}=useWS();
+  const [live,setLive]=useState<any>(null);
+  const [busy,setBusy]=useState<string|null>(null);
+  const [err,setErr]=useState<string|null>(null);
+  const [form,setForm]=useState<any>({name:'',transport:'stdio',command:'',url:'',trusted:false});
+
+  const load=useCallback(async()=>{
+    if(wsState!=='connected')return;
+    try{ setLive(await send('mcp.list',{})); }catch{}
+  },[send,wsState]);
+
+  useEffect(()=>{ load(); },[load]);
+
+  const act=async(method:string,params:any,label:string)=>{
+    if(wsState!=='connected')return;
+    setBusy(label); setErr(null);
+    try{
+      const out=await send(method,params);
+      if(out?.status)setLive(out.status); else await load();
+      if(out&&out.success===false)setErr(out.error||'Request failed');
+    }catch(e:any){ setErr(String(e?.message||e)); }
+    setBusy(null);
+  };
+
+  const addServer=async()=>{
+    if(!form.name.trim()){ setErr('Give the server a name.'); return; }
+    const server:any={name:form.name.trim(),transport:form.transport,enabled:true,trusted:!!form.trusted};
+    if(form.transport==='stdio'){
+      const parts=form.command.trim().split(/\s+/).filter(Boolean);
+      if(!parts.length){ setErr('A stdio server needs a command.'); return; }
+      server.command=parts;
+      server.args=[];
+    }else{
+      if(!form.url.trim()){ setErr('An HTTP server needs a URL.'); return; }
+      server.url=form.url.trim();
+    }
+    await act('mcp.add',{server},'add');
+    setForm({name:'',transport:form.transport,command:'',url:'',trusted:false});
+  };
+
+  const btn='px-3 py-1.5 rounded text-xs font-medium border border-[#30363d] hover:border-[#484f58] text-[#e8eaed] disabled:opacity-40';
+  const inp='bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]';
+  const servers:any[]=live?.servers||[];
+
+  return <div className="space-y-1 max-w-3xl">
+    <p className="text-xs text-[#d29922] px-1 pb-2">
+      ⚠ MCP servers are third-party programs. They run with your permissions and can
+      read, change and delete things. Only add servers you trust.
+    </p>
+    <p className="text-xs text-[#8b949e] px-1 pb-2">
+      Their tools become Addled skills in the <span className="font-mono">MCP</span> category.
+      Tools from an untrusted server ask for your approval the first time they run.
+    </p>
+    <SettingRow label="Enable MCP">
+      <input type="checkbox" checked={m.enabled!==false}
+        onChange={e=>update('mcp','enabled',e.target.checked)}/>
+    </SettingRow>
+    <SettingRow label="Connect at startup">
+      <input type="checkbox" checked={m.autoconnect!==false}
+        onChange={e=>update('mcp','autoconnect',e.target.checked)}/>
+    </SettingRow>
+    <div className="flex items-center gap-2 px-1 pt-1 text-[11px]">
+      <button onClick={()=>act('mcp.reload',{},'reload')}
+        disabled={busy==='reload'||wsState!=='connected'} className={btn}>
+        {busy==='reload'?'Reconnecting…':'↻ Reconnect all'}
+      </button>
+      <span className="text-[#8b949e]">
+        {live?`${servers.filter((s:any)=>s.state==='ready').length}/${servers.length} connected · ${live.tool_count||0} tool(s)`:'loading…'}
+      </span>
+    </div>
+    {err&&<p className="px-1 pt-1 text-xs text-[#f85149]">⚠ {err}</p>}
+
+    {servers.map((s:any)=><div key={s.id} className="mt-3 rounded-lg border border-[#30363d] p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-[#e8eaed] truncate">
+            {s.name} <span className="ml-1 text-[10px] text-[#8b949e]">{s.transport}</span>
+          </p>
+          <p className="truncate text-[10px] text-[#8b949e]"
+            title={s.transport==='http'?s.url:(Array.isArray(s.command)?s.command.join(' '):String(s.command||''))}>
+            {s.transport==='http'?s.url:(Array.isArray(s.command)?s.command.join(' '):String(s.command||''))}
+          </p>
+        </div>
+        <span className={`shrink-0 rounded px-2 py-0.5 text-[10px] ${MCP_STATES[s.state]||MCP_STATES.disconnected}`}>
+          {s.state}{s.tool_count?` · ${s.tool_count} tools`:''}
+        </span>
+      </div>
+      {s.last_error&&<p className="mt-1 text-[10px] text-[#d29922]">⚠ {s.last_error}</p>}
+      <div className="mt-2 flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+          <input type="checkbox" checked={s.enabled}
+            onChange={e=>act('mcp.update',{id:s.id,patch:{enabled:e.target.checked}},'toggle')}/>
+          Enabled
+        </label>
+        <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer"
+          title="Skip the approval prompt for this server's tools">
+          <input type="checkbox" checked={s.trusted}
+            onChange={e=>act('mcp.update',{id:s.id,patch:{trusted:e.target.checked}},'toggle')}/>
+          Trusted
+        </label>
+        <button onClick={()=>act('mcp.connect',{id:s.id},'connect')}
+          disabled={!!busy||wsState!=='connected'} className={btn}>Connect</button>
+        <button onClick={()=>act('mcp.disconnect',{id:s.id},'disconnect')}
+          disabled={!!busy||wsState!=='connected'} className={btn}>Disconnect</button>
+        <button onClick={()=>{ if(window.confirm(`Remove ${s.name}?`)) act('mcp.remove',{id:s.id},'remove'); }}
+          disabled={!!busy||wsState!=='connected'}
+          className={`${btn} text-[#f85149]`}>Remove</button>
+      </div>
+      {s.tools?.length?<div className="mt-2 text-[10px] text-[#8b949e]">
+        {s.tools.slice(0,14).map((t:any)=><span key={t.name} className="mr-2 font-mono">{t.name}</span>)}
+        {s.tools.length>14?<span>+{s.tools.length-14} more</span>:null}
+      </div>:null}
+    </div>)}
+
+    {!servers.length&&<p className="px-1 pt-3 text-xs text-[#8b949e]">No MCP servers configured yet.</p>}
+
+    <div className="mt-4 rounded-lg border border-[#30363d] p-3">
+      <p className="text-sm font-medium text-[#e8eaed]">Add a server</p>
+      <div className="mt-2 space-y-2">
+        <div className="flex items-center gap-2">
+          <span className="w-24 text-[11px] text-[#8b949e]">Name</span>
+          <input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}
+            placeholder="Filesystem" className={`${inp} flex-1`}/>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="w-24 text-[11px] text-[#8b949e]">Transport</span>
+          <select value={form.transport} onChange={e=>setForm({...form,transport:e.target.value})} className={inp}>
+            <option value="stdio">stdio (local command)</option>
+            <option value="http">HTTP (remote URL)</option>
+          </select>
+        </div>
+        {form.transport==='stdio'
+          ?<div className="flex items-center gap-2">
+            <span className="w-24 text-[11px] text-[#8b949e]">Command</span>
+            <input value={form.command} onChange={e=>setForm({...form,command:e.target.value})}
+              placeholder="npx -y @modelcontextprotocol/server-filesystem C:\\Users"
+              className={`${inp} flex-1`}/>
+          </div>
+          :<div className="flex items-center gap-2">
+            <span className="w-24 text-[11px] text-[#8b949e]">URL</span>
+            <input value={form.url} onChange={e=>setForm({...form,url:e.target.value})}
+              placeholder="https://example.com/mcp" className={`${inp} flex-1`}/>
+          </div>}
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+            <input type="checkbox" checked={!!form.trusted}
+              onChange={e=>setForm({...form,trusted:e.target.checked})}/>
+            Trust this server (skip approval prompts)
+          </label>
+          <button onClick={addServer} disabled={!!busy||wsState!=='connected'}
+            className="px-3 py-1.5 rounded text-xs font-medium bg-[#3380FF] hover:bg-[#4d94ff] text-white disabled:opacity-40">
+            Add server
+          </button>
+        </div>
+        <p className="text-[10px] text-[#8b949e]">
+          To change a server's command or URL, remove it and add it again.
+          Header and environment values are stored in settings.json, never sent to the dashboard.
+        </p>
+      </div>
+    </div>
+  </div>;
 }
 
 function GuidelinesSection({settings,update,saving,status}: any){
