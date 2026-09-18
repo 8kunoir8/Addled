@@ -300,6 +300,14 @@ DEFAULT_SETTINGS: dict = {
         "enabled": True,
         "autoconnect": True,
         "servers": [],
+        # The official MCP registry, browsable from Settings -> MCP.
+        "market_enabled": True,
+        # Let the agent find and start an unconfigured server when a task needs
+        # one. Only entries that need nothing from the user are taken.
+        "auto_acquire": True,
+        # Minutes of idleness before a server the agent added is disconnected
+        # again. Its configuration stays, so reconnecting is instant.
+        "auto_deactivate_minutes": 30,
     },
     "browser": {
         "user_browser": False,

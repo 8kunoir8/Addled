@@ -251,6 +251,10 @@ function McpSection({settings,update,saving,status}: any){
   const [busy,setBusy]=useState<string|null>(null);
   const [err,setErr]=useState<string|null>(null);
   const [form,setForm]=useState<any>({name:'',transport:'stdio',command:'',url:'',trusted:false});
+  const [marketQuery,setMarketQuery]=useState('');
+  const [marketHits,setMarketHits]=useState<any[]|null>(null);
+  const [marketBusy,setMarketBusy]=useState(false);
+  const [extraArgs,setExtraArgs]=useState<Record<string,string>>({});
 
   const load=useCallback(async()=>{
     if(wsState!=='connected')return;
@@ -286,6 +290,30 @@ function McpSection({settings,update,saving,status}: any){
     setForm({name:'',transport:form.transport,command:'',url:'',trusted:false});
   };
 
+  const searchMarket=async()=>{
+    if(wsState!=='connected')return;
+    const q=marketQuery.trim();
+    if(!q){ setErr('Type something to search the MCP registry for.'); return; }
+    setMarketBusy(true); setErr(null);
+    try{
+      const out=await send('mcp.searchMarket',{query:q,limit:12});
+      if(out?.success===false)setErr(out.error||'Search failed');
+      setMarketHits(out?.servers||[]);
+    }catch(e:any){ setErr(String(e?.message||e)); }
+    setMarketBusy(false);
+  };
+
+  const installServer=async(name:string,args?:string)=>{
+    if(wsState!=='connected')return;
+    setBusy('install'); setErr(null);
+    try{
+      const out=await send('mcp.install',{name,args:args||''});
+      if(out?.status)setLive(out.status); else await load();
+      if(out&&out.success===false)setErr(out.error||'Could not add that server');
+    }catch(e:any){ setErr(String(e?.message||e)); }
+    setBusy(null);
+  };
+
   const btn='px-3 py-1.5 rounded text-xs font-medium border border-[#30363d] hover:border-[#484f58] text-[#e8eaed] disabled:opacity-40';
   const inp='bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]';
   const servers:any[]=live?.servers||[];
@@ -307,6 +335,22 @@ function McpSection({settings,update,saving,status}: any){
       <input type="checkbox" checked={m.autoconnect!==false}
         onChange={e=>update('mcp','autoconnect',e.target.checked)}/>
     </SettingRow>
+    <SettingRow label="Browse the market"
+      description="Search the official MCP registry for servers to add">
+      <input type="checkbox" checked={m.market_enabled!==false}
+        onChange={e=>update('mcp','market_enabled',e.target.checked)}/>
+    </SettingRow>
+    <SettingRow label="Let Addled add one when needed"
+      description="Find and start a server by itself, only ones needing no setup">
+      <input type="checkbox" checked={m.auto_acquire!==false}
+        onChange={e=>update('mcp','auto_acquire',e.target.checked)}/>
+    </SettingRow>
+    <SettingRow label="Switch off idle servers after"
+      description={`${m.auto_deactivate_minutes??30} minutes — only servers Addled added itself`}>
+      <input type="number" min={0} max={1440} value={m.auto_deactivate_minutes??30}
+        onChange={e=>update('mcp','auto_deactivate_minutes',parseInt(e.target.value||'0'))}
+        className={`${inp} w-24`}/>
+    </SettingRow>
     <div className="flex items-center gap-2 px-1 pt-1 text-[11px]">
       <button onClick={()=>act('mcp.reload',{},'reload')}
         disabled={busy==='reload'||wsState!=='connected'} className={btn}>
@@ -323,6 +367,8 @@ function McpSection({settings,update,saving,status}: any){
         <div className="min-w-0">
           <p className="text-sm font-medium text-[#e8eaed] truncate">
             {s.name} <span className="ml-1 text-[10px] text-[#8b949e]">{s.transport}</span>
+            {s.auto?<span className="ml-1 rounded bg-[#1f6feb22] px-1.5 py-0.5 text-[10px] text-[#58a6ff]"
+              title="Addled added this one; it is switched off again when idle">auto</span>:null}
           </p>
           <p className="truncate text-[10px] text-[#8b949e]"
             title={s.transport==='http'?s.url:(Array.isArray(s.command)?s.command.join(' '):String(s.command||''))}>
@@ -361,6 +407,64 @@ function McpSection({settings,update,saving,status}: any){
     </div>)}
 
     {!servers.length&&<p className="px-1 pt-3 text-xs text-[#8b949e]">No MCP servers configured yet.</p>}
+
+    <div className="mt-4 rounded-lg border border-[#30363d] p-3">
+      <p className="text-sm font-medium text-[#e8eaed]">MCP market</p>
+      <p className="mt-1 text-[11px] text-[#8b949e]">
+        Searches the official Model Context Protocol registry. A server that needs an
+        API key, a required variable or a runtime you do not have is listed with the
+        reason instead of being added to fail later.
+      </p>
+      <div className="mt-2 flex items-center gap-2">
+        <input value={marketQuery} onChange={e=>setMarketQuery(e.target.value)}
+          onKeyDown={e=>{ if(e.key==='Enter') searchMarket(); }}
+          placeholder="pdf, sqlite, github…" className={`${inp} flex-1`}/>
+        <button onClick={searchMarket}
+          disabled={marketBusy||wsState!=='connected'} className={btn}>
+          {marketBusy?'Searching…':'Search'}
+        </button>
+      </div>
+      {marketHits&&!marketHits.length&&
+        <p className="mt-2 text-[11px] text-[#8b949e]">Nothing matched that.</p>}
+      {marketHits&&marketHits.length>0&&<div className="mt-2 space-y-2">
+        {marketHits.map((c:any)=><div key={c.name} className="rounded border border-[#30363d] p-2">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <p className="truncate text-[12px] text-[#e8eaed]">{c.title||c.name}</p>
+              <p className="truncate font-mono text-[10px] text-[#8b949e]">
+                {c.name}{c.version?` · v${c.version}`:''}
+              </p>
+            </div>
+            <span className="shrink-0 rounded bg-[#21262d] px-2 py-0.5 text-[10px] text-[#8b949e]">
+              {c.transport}
+            </span>
+          </div>
+          {c.description&&<p className="mt-1 text-[11px] text-[#8b949e]">{c.description}</p>}
+          {c.transport==='stdio'&&c.runnable&&
+            <div className="mt-1 flex items-center gap-2">
+              <span className="w-16 shrink-0 text-[10px] text-[#8b949e]">Arguments</span>
+              <input value={extraArgs[c.name]||''}
+                onChange={e=>setExtraArgs({...extraArgs,[c.name]:e.target.value})}
+                placeholder="optional — some servers need these and never say so"
+                className={`${inp} flex-1`}/>
+            </div>}
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <span className="min-w-0 truncate text-[10px]"
+              title={c.runnable?(c.transport==='stdio'?`${c.command} ${(c.args||[]).join(' ')}`:c.url):c.blocked_reason}>
+              {c.runnable
+                ?<span className="text-[#3fb950]">
+                  {c.transport==='stdio'?`${c.command} ${(c.args||[]).join(' ')}`:c.url}
+                </span>
+                :<span className="text-[#d29922]">{c.blocked_reason}</span>}
+            </span>
+            <button onClick={()=>installServer(c.name,extraArgs[c.name])}
+              disabled={!c.runnable||busy==='install'||wsState!=='connected'}
+              title={c.runnable?'':'Needs setup before it can run'}
+              className={btn}>Add &amp; connect</button>
+          </div>
+        </div>)}
+      </div>}
+    </div>
 
     <div className="mt-4 rounded-lg border border-[#30363d] p-3">
       <p className="text-sm font-medium text-[#e8eaed]">Add a server</p>

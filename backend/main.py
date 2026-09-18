@@ -238,6 +238,25 @@ def main():
         handle = asyncio.run_coroutine_threadsafe(
             mcp_manager.start(), _ws_loop)
         handle.add_done_callback(_mcp_started)
+
+        # Periodic switch-off for servers the agent added and then stopped
+        # using. Only servers marked 'auto' are ever disconnected, so nothing
+        # the user configured by hand is touched.
+        async def _mcp_idle_loop():
+            from backend.config import config as _config
+            while True:
+                try:
+                    minutes = float(_config.get(
+                        "mcp", "auto_deactivate_minutes", default=30) or 30)
+                    await asyncio.sleep(max(60.0, minutes * 30))
+                    await mcp_manager.sweep_idle()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    log.debug("MCP idle sweep failed: %s", e)
+
+        idle = asyncio.run_coroutine_threadsafe(_mcp_idle_loop(), _ws_loop)
+        idle.add_done_callback(_mcp_started)
         log.info("MCP manager armed")
     except Exception as e:
         log.warning("MCP client unavailable: %s", e)

@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 
 from backend.config import config
 from backend.mcp_client import approval
@@ -95,6 +96,8 @@ class McpServerState:
         self.registered: list[str] = []
         self.state = "disconnected"
         self.last_error: str | None = None
+        # When a tool on this server last ran, for the automatic switch-off.
+        self.last_used: float = 0.0
 
     @property
     def server_info(self) -> dict:
@@ -201,6 +204,17 @@ class McpManager:
 
             if state.state != "ready":
                 if state.client is not None:
+                    # Whatever it printed on the way out is the only real
+                    # reason available, so keep it in the error.
+                    getter = getattr(state.client, "stderr_tail", None)
+                    if callable(getter):
+                        try:
+                            detail = (getter() or "").strip()
+                        except Exception:
+                            detail = ""
+                        if detail:
+                            state.last_error = (
+                                f"{state.last_error}\n{detail[-400:]}")
                     try:
                         await state.client.close()
                     except Exception:
@@ -218,6 +232,7 @@ class McpManager:
                 # Connected but tool listing failed: keep the connection and
                 # report it, since tools/list can succeed on a retry.
                 state.last_error = f"tool discovery failed: {str(e)[:200]}"
+            state.last_used = time.time()
             return {"success": True, "server": self.server_status(server_id)}
 
     async def disconnect(self, server_id: str) -> dict:
@@ -244,6 +259,35 @@ class McpManager:
             return True
         result = await self.connect(server_id)
         return bool(result.get("success"))
+
+    async def sweep_idle(self) -> dict:
+        """Disconnect servers that were added automatically and then went quiet.
+
+        A server found for one task would otherwise hold its child process and
+        keep its tools in every prompt for the rest of the session. Only
+        ``auto`` servers are touched, so nothing the user chose by hand is
+        switched off behind their back, and the configuration stays either way -
+        reconnecting is instant.
+        """
+        minutes = float(config.get("mcp", "auto_deactivate_minutes",
+                                   default=30) or 0)
+        if minutes <= 0:
+            return {"swept": 0, "skipped": "auto deactivation is off"}
+        cutoff = time.time() - minutes * 60
+        swept: list[str] = []
+        for server_id, state in list(self._servers.items()):
+            if not bool(state.spec.get("auto")) or state.state != "ready":
+                continue
+            if state.last_used and state.last_used > cutoff:
+                continue
+            try:
+                await self.disconnect(server_id)
+                swept.append(server_id)
+            except Exception as e:  # noqa: BLE001
+                log.debug("MCP idle sweep failed for '%s': %s", server_id, e)
+        if swept:
+            log.info("MCP: deactivated idle server(s): %s", ", ".join(swept))
+        return {"swept": len(swept), "servers": swept}
 
     def _build_client(self, server_id: str, spec: dict):
         transport = _transport_of(spec)
@@ -335,6 +379,10 @@ class McpManager:
                 return {"success": False,
                         "error": f"MCP server '{server_id}' is unavailable"}
 
+            # Idle accounting: this is what lets an automatically added server
+            # be switched off again once nothing is using it.
+            state.last_used = time.time()
+
             call_params = dict(params or {})
             trusted = bool(state.spec.get("trusted"))
             if not trusted and not approval.is_approved(server_id, tool_name):
@@ -381,6 +429,12 @@ class McpManager:
             "timeout_s": spec.get("timeout_s", 30.0),
             "enabled": bool(spec.get("enabled", True)),
             "trusted": bool(spec.get("trusted")),
+            # True when the market found it rather than the user; the idle
+            # sweep only ever disconnects these.
+            "auto": bool(spec.get("auto")),
+            "market_name": str(spec.get("market_name") or ""),
+            "idle_seconds": (int(time.time() - state.last_used)
+                             if state and state.last_used else None),
             "state": state.state if state else "disconnected",
             "last_error": state.last_error if state else None,
             "server_info": state.server_info if state else {},
@@ -453,6 +507,8 @@ class McpManager:
             if isinstance(headers, dict) else {},
             "enabled": bool(spec.get("enabled", True)),
             "trusted": bool(spec.get("trusted")),
+            "auto": bool(spec.get("auto")),
+            "market_name": str(spec.get("market_name") or ""),
             "timeout_s": float(spec.get("timeout_s") or 30.0),
         }
         return clean, None

@@ -44,6 +44,9 @@ class McpStdioClient:
         self._proc: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        # Kept so a server that dies during the handshake can say why: its own
+        # stderr is the only place that reason exists.
+        self._stderr_tail: list[str] = []
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -71,6 +74,17 @@ class McpStdioClient:
         argv = self._argv()
         if not argv or not argv[0]:
             raise McpError(-32602, "no command configured for this server")
+
+        # Resolve the launcher against PATH before spawning. On Windows an npm
+        # launcher is 'npx.cmd', not an executable, and
+        # create_subprocess_exec does not consult PATHEXT - so an npm-backed
+        # server listed by the market failed to start with "command not
+        # found: npx". shutil.which does the PATHEXT search.
+        from shutil import which
+        resolved = which(argv[0])
+        if resolved:
+            argv[0] = resolved
+
         cwd = self.spec.get("cwd") or None
 
         try:
@@ -188,12 +202,18 @@ class McpStdioClient:
                     break
                 text = line.decode("utf-8", errors="replace").strip()
                 if text:
+                    self._stderr_tail.append(text)
+                    del self._stderr_tail[:-20]
                     log.debug("MCP '%s' stderr: %s", self.server_id,
                               text[:300])
         except asyncio.CancelledError:
             raise
         except Exception:
             pass
+
+    def stderr_tail(self, limit: int = 8) -> str:
+        """The last lines the server wrote to stderr."""
+        return "\n".join(self._stderr_tail[-limit:])
 
     # -- requests ----------------------------------------------------------
 

@@ -914,6 +914,47 @@ def _register_default_handlers():
         except Exception as e:
             return {"success": False, "tools": [], "error": str(e)}
 
+    async def mcp_search_market(params: dict, ws) -> dict:
+        """Search the official MCP registry for servers to add."""
+        from backend.mcp_client import market
+        query = str(params.get("query") or "").strip()
+        if not query:
+            return {"success": False, "servers": [],
+                    "error": "give something to search for"}
+        try:
+            candidates = await market.search(
+                query, limit=int(params.get("limit") or 12))
+            return {"success": True, "query": query, "servers": candidates,
+                    "count": len(candidates), "registry": market.REGISTRY_URL}
+        except Exception as e:
+            return {"success": False, "servers": [], "error": str(e)}
+
+    async def mcp_install(params: dict, ws) -> dict:
+        """Add a server from the registry and connect it."""
+        from backend.mcp_client import market
+        name = str(params.get("name") or "").strip()
+        if not name:
+            return {"success": False, "error": "missing server name"}
+        try:
+            return await market.install(
+                name,
+                trusted=bool(params.get("trusted")),
+                auto=bool(params.get("auto")),
+                extra_args=params.get("args"),
+            )
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def mcp_sweep(params: dict, ws) -> dict:
+        """Disconnect servers the agent added that have gone unused."""
+        from backend.mcp_client.manager import mcp_manager
+        try:
+            out = await mcp_manager.sweep_idle()
+            return {"success": True, **(out or {}),
+                    "status": mcp_manager.status()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     async def guidelines_state(params: dict, ws) -> dict:
         """Guideline pack status for the Settings panel."""
         from backend.guidelines import inject as guidelines
@@ -2493,6 +2534,9 @@ def _register_default_handlers():
     _server.register("mcp.disconnect", mcp_disconnect)
     _server.register("mcp.reload", mcp_reload)
     _server.register("mcp.tools", mcp_tools)
+    _server.register("mcp.searchMarket", mcp_search_market)
+    _server.register("mcp.install", mcp_install)
+    _server.register("mcp.sweep", mcp_sweep)
 
     # Phase 5 Goals engine
     _server.register("goal.create", goal_create)

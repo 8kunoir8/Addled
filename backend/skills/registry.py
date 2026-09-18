@@ -1294,6 +1294,74 @@ class SkillRegistry:
             list_forged, "meta",
         ))
 
+        async def find_mcp_server(params: dict) -> dict:
+            """Find an MCP server that can do this, and start it if it can."""
+            from backend.config import config
+            from backend.mcp_client import market
+
+            if not config.get("mcp", "enabled", default=True):
+                return {"success": False,
+                        "error": "MCP support is switched off in Settings"}
+            if not config.get("mcp", "market_enabled", default=True):
+                return {"success": False,
+                        "error": "the MCP market is switched off in Settings"}
+
+            task = str(params.get("task") or params.get("description")
+                       or "").strip()
+            if not task:
+                return {"success": False,
+                        "error": "No task description provided"}
+
+            wants_install = bool(params.get("install", True))
+            if not wants_install or not config.get("mcp", "auto_acquire",
+                                                   default=True):
+                candidates = await market.suggest(task, limit=6)
+                return {"success": bool(candidates),
+                        "candidates": candidates,
+                        "note": ("Nothing was installed. Add one from "
+                                 "Settings, MCP if it looks right.")}
+
+            result = await market.acquire_for(task)
+            if not result.get("success"):
+                return {"success": False,
+                        "error": result.get("error"),
+                        "candidate": result.get("candidate"),
+                        "candidates": result.get("candidates")}
+
+            server_id = str(result.get("server_id") or "")
+            tools: list[str] = []
+            try:
+                from backend.mcp_client.manager import mcp_manager
+                status = mcp_manager.server_status(server_id)
+                tools = [str(t.get("name")) for t in (status.get("tools") or [])]
+            except Exception as e:
+                log.debug("could not list new MCP tools: %s", e)
+
+            return {
+                "success": True,
+                "server": server_id,
+                "server_name": ((result.get("candidate") or {}).get("title")
+                                or server_id),
+                "tools": tools[:40],
+                "note": ("It is connected. Its tools are named "
+                         "mcp__<server>__<tool> - call one to do the task. "
+                         "It is switched off again once it has been idle."),
+            }
+
+        self.register(SkillDefinition(
+            "find_mcp_server",
+            "Find and start an MCP server for a capability no current tool "
+            "covers, then use its tools. Searches the official MCP registry.",
+            {"type": "object", "properties": {
+                "task": {"type": "string",
+                         "description": "What needs doing, in a few words"},
+                "install": {"type": "boolean",
+                            "description": "Start it if a usable one is found",
+                            "default": True},
+            }, "required": ["task"]},
+            find_mcp_server, "meta",
+        ))
+
         async def memory_get(params: dict) -> dict:
             """Read the durable facts saved about the user."""
             from backend.memory.facts import get_facts
