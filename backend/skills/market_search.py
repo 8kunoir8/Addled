@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import time
 import urllib.parse
@@ -30,7 +31,14 @@ def _gh_search_repos(query: str, limit: int = 8) -> list[dict]:
         r = subprocess.run(
             ["gh", "search", "repos", f"--topic={TOPIC}", query,
              "--limit", str(limit), "--json", "fullName,description"],
-            capture_output=True, text=True, timeout=60)
+            # utf-8, not the locale codec. On Windows text=True decodes as
+            # cp1252, and GitHub descriptions carry characters cp1252 has no
+            # mapping for (a byte 0x8f in one response). That raised inside the
+            # reader thread, killed the gh path, and dropped every search to the
+            # unauthenticated REST API - which is rate limited, so the market
+            # returned nothing and no skill could ever be installed.
+            capture_output=True, text=True, timeout=60,
+            encoding="utf-8", errors="replace")
         if r.returncode == 0:
             for it in json.loads(r.stdout or "[]"):
                 candidates.append({
@@ -60,6 +68,34 @@ def _gh_search_repos(query: str, limit: int = 8) -> list[dict]:
     return candidates
 
 
+def _search_terms(query: str) -> list[str]:
+    """Reduce a query to the words worth searching GitHub for.
+
+    GitHub's repo search is a keyword match, not a question answerer: the
+    phrase "extract text from a pdf file" matched nothing at all, while "pdf"
+    matched eight repositories. Words that carry no topical signal are dropped
+    and the rest are offered longest first.
+
+    Underscores and hyphens split words because the caller is usually a tool
+    name the model invented - "extract_pdf_text" has to become "extract pdf"
+    or GitHub sees one nonsense token and matches nothing.
+    """
+    words = re.findall(r"[A-Za-z0-9]{3,}", query.lower())
+    useful = [w for w in words if w not in _GH_STOPWORDS]
+    return sorted(useful, key=len, reverse=True) or words
+
+
+_GH_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "your",
+    "you", "can", "get", "use", "using", "make", "new", "how", "what",
+    "skill", "skills", "tool", "tools", "file", "files", "text", "data",
+    "python", "library", "function", "called", "implement", "based",
+    "user", "want", "wants", "need", "needs", "help", "please", "them",
+    "then", "than", "when", "where", "which", "about", "some", "something",
+    "their", "there", "here", "have", "has", "its", "out", "all", "any",
+}
+
+
 async def search(query: str, limit: int = 8) -> list[dict]:
     """Rank market skill repos for a query. Results cached for 1h."""
     now = time.time()
@@ -68,6 +104,21 @@ async def search(query: str, limit: int = 8) -> list[dict]:
         return hit[1]
 
     repos = _gh_search_repos(query, limit=max(8, limit * 2))
+    if not repos:
+        # A long question matches nothing; GitHub wants keywords. Retry with
+        # the most substantial words, then with fewer of them.
+        terms = _search_terms(query)
+        tried = {query}
+        for count in (3, 2, 1):
+            joined = " ".join(terms[:count])
+            if not joined or joined in tried:
+                continue
+            tried.add(joined)
+            repos = _gh_search_repos(joined, limit=max(8, limit * 2))
+            if repos:
+                log.info("Market query %r matched nothing; %r found %d",
+                         query, joined, len(repos))
+                break
     if not repos:
         return []
 
@@ -109,18 +160,23 @@ async def search_and_install(skill_name: str,
         return None
 
     from backend.memory.embedding import embed_text_async
+    try:
+        name_vector = await embed_text_async(skill_name)
+    except Exception:
+        return None
+
     best = None
     best_sim = -1.0
     for r in results:
         try:
-            nv = await embed_text_async(skill_name)
-            cv = await embed_text_async(r["name"])
-            sim = float(nv @ cv)
+            sim = float(name_vector @ await embed_text_async(r["name"]))
         except Exception:
             sim = 0.0
         if sim > best_sim:
             best, best_sim = r, sim
-    if best is None or best_sim < 0.4:
+    # The cutoff is the caller's threshold (skills.market_sim_threshold). It used
+    # to be a hardcoded 0.4, which meant the setting could not be tuned at all.
+    if best is None or best_sim < threshold:
         return None
 
     try:

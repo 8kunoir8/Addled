@@ -89,6 +89,7 @@ def apply_diff(filepath: str, diff_text: str, backup: bool = True) -> dict:
         result = subprocess.run(
             ["patch", "-u", "--force", filepath, diff_path],
             capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
         )
         os.unlink(diff_path)
 

@@ -170,6 +170,7 @@ class SkillForge:
                 [sys.executable, "-m"] + args[1:] if args[0] in ("pip", "pip3")
                 else args,
                 capture_output=True, text=True, timeout=120,
+                encoding="utf-8", errors="replace",
             )
             if result.returncode == 0:
                 log.info("Package installed: %s", cmd)

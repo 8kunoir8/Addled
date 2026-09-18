@@ -202,6 +202,7 @@ def verify_signature(path: Path) -> tuple[bool, str]:
                 [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
                  "Bypass", "-Command", script],
                 capture_output=True, text=True, timeout=60,
+                encoding="utf-8", errors="replace",
                 creationflags=ts.CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.SubprocessError) as e:

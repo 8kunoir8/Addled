@@ -53,11 +53,15 @@ class AppLauncher:
         """Find an application's executable path."""
         try:
             if sys.platform == "win32":
-                result = subprocess.run(["where", name], capture_output=True, text=True)
+                result = subprocess.run(["where", name], capture_output=True,
+                                        text=True, encoding="utf-8",
+                                        errors="replace")
                 paths = [p.strip() for p in result.stdout.splitlines() if p.strip()]
                 return {"success": True, "paths": paths, "found": len(paths) > 0}
             else:
-                result = subprocess.run(["which", name], capture_output=True, text=True)
+                result = subprocess.run(["which", name], capture_output=True,
+                                        text=True, encoding="utf-8",
+                                        errors="replace")
                 return {"success": True, "path": result.stdout.strip(), "found": result.returncode == 0}
         except Exception as e:
             return {"success": False, "error": str(e)}

@@ -248,7 +248,8 @@ class SkillMarket:
         try:
             r = subprocess.run(
                 ["gh", "api", f"repos/{repo}/contents/{path}".rstrip("/")],
-                capture_output=True, text=True, timeout=60)
+                capture_output=True, text=True, timeout=60,
+                encoding="utf-8", errors="replace")
             if r.returncode == 0:
                 return json.loads(r.stdout)
             raise ValueError(r.stderr.strip()[:200] or "gh api failed")
