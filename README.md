@@ -87,7 +87,7 @@ launch.bat
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
 | Desktop Shell | Electron 28, system tray, auto-updater, backend auto-respawn | ✅ Built |
 | Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
-| Communication | WebSocket JSON-RPC 2.0 (48 handlers) | ✅ Built |
+| Communication | WebSocket JSON-RPC 2.0 (111 handlers) | ✅ Built |
 
 ---
 
@@ -131,6 +131,79 @@ automatically when selected provider*) or when *Keep local AI running* is switch
 on — and any message routed to it starts it on demand (~3 s). While it is not
 selected or kept, it stays stopped and frees its RAM after `local_llm.idle_unload_min`
 (15 min) of inactivity.
+
+### 🎯 Task-Aware Model Routing
+Addled picks the model by what the task needs instead of sending one model
+everywhere. Each request is classified into a role — `chat`, `reasoning`,
+`vision`, `long` — using pure heuristics (no extra LLM call, no network, no
+latency), and every role resolves to a model:
+
+| Role | Used for | DeepSeek default |
+|------|----------|------------------|
+| `chat` | quick conversational replies | `deepseek-v4-flash` |
+| `reasoning` | analysis, debugging, code changes | `deepseek-v4-pro` |
+| `vision` | images and screenshots | the provider's vision model |
+| `long` | whole files and documents | the provider default |
+
+`providers.<id>.default_model` stays the single baseline: any role left empty
+falls back to it, so a provider with no role map behaves exactly as it did
+before routing existed. Override any role in **Settings → Providers → Model
+routing**, or force one for a single message with an `@role` prefix (for example
+`@reasoning explain this stack trace`). A role pointing at a model the provider
+no longer offers is downgraded to the default with a warning instead of failing
+the request.
+
+### 📚 Model Catalog (Live, Refreshed Weekly)
+Addled asks each provider which models it actually offers — OpenAI-compatible
+`GET /models`, Ollama `/api/tags`, Anthropic `/v1/models`, the Gemini SDK — and
+caches the answer for a week (`backend/memory/models_catalog.json`). The
+discovered models fill the Settings dropdowns and back the routing validation,
+with a **Refresh models** button when you want them sooner.
+
+The cached list is **merged** with your configured one, never replaced, so a
+model you pinned by hand cannot vanish because an API response omitted it. That
+matters in practice: DeepSeek reports only `deepseek-flash` and
+`deepseek-v4-pro`, while Addled's chat role uses `deepseek-v4-flash`, which the
+API accepts but does not list. A provider that is offline or has no key records
+an error and keeps its previous list.
+
+### 📐 Working Guidelines (ponytail + Karpathy)
+Addled can follow two external coding rulesets:
+[**ponytail**](https://github.com/DietrichGebert/ponytail) (a 7-rung ladder that
+stops you writing code that did not need to exist, plus the things it is never
+lazy about) and the
+[**Karpathy guidelines**](https://github.com/multica-ai/andrej-karpathy-skills)
+(think before coding, simplicity first, surgical changes, goal-driven execution).
+
+The text is downloaded from upstream on first use, cached under
+`backend/memory/guidelines/`, and refreshed by the same weekly job as the model
+catalog — nothing is bundled, so upstream edits arrive on their own and each pack
+shows its real source URL and licence. Injection is gated twice: per pack
+(`enabled`, level `lite`/`full`/`ultra`/`off`) and by task — the default scope is
+**code only**, so ordinary chat is not padded with a coding ruleset. Configure it
+in **Settings → Guidelines**, or ask Addled what it is following.
+
+The `ponytail_review` skill reviews a file or diff for over-engineering and
+returns one finding per line (`delete:` / `stdlib:` / `native:` / `yagni:` /
+`shrink:`) plus a `net: -N lines possible.` score.
+
+### 🧰 MCP Servers
+Addled speaks the Model Context Protocol, so third-party tool servers plug in
+alongside the built-in skills. Both **stdio** (a local command) and **streamable
+HTTP** transports are supported, built on the packages Addled already ships — no
+extra dependency, and no rebuild of the bundled Python.
+
+Every tool a server advertises is registered as an ordinary skill in the `MCP`
+category (`mcp__<server>__<tool>`), so it shows up in **Settings → Skills**, in
+every provider's tool list, and behind the existing per-skill on/off switch. Add
+and manage servers in **Settings → MCP**.
+
+MCP servers are third-party programs with real side effects, so a tool from an
+untrusted server needs approval: the first call is refused and the model asks you
+to confirm, and only a retry with your agreement runs it. Approval is per tool,
+not per server, and a *Trusted* switch on the server skips the prompt. A server
+that is missing, slow or crashed records an error and returns a readable tool
+failure rather than hanging the conversation.
 
 ### 🛠️ 30 Built-in Skills (Provider-Agnostic)
 All 10 AI providers can invoke any skill — no provider lock-in.
@@ -195,10 +268,10 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 
 ---
 
-## WebSocket API (74 handlers)
+## WebSocket API (111 handlers)
 
 ### Core
-`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
+`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
 
 ### Goals
 `goal.create` `goal.list` `goal.start` `goal.cancel`
@@ -261,8 +334,11 @@ Addled/
 │   ├── main.py              # Entry point + onboarding + single-instance lock + kill switch + voice
 │   ├── config.py            # Portable JSON settings
 │   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
-│   ├── ws_server.py         # 48 JSON-RPC 2.0 handlers + server pushes
-│   ├── providers/           # 10 AI providers (base + registry + selector) + local Florence-2 vision
+│   ├── ws_server.py         # 111 JSON-RPC 2.0 handlers + server pushes
+│   ├── providers/           # 10 AI providers (base + registry + selector + router)
+│   │                        #   + live model catalog + local Florence-2 vision
+│   ├── mcp_client/          # MCP client (stdio + streamable HTTP) → tools as skills
+│   ├── guidelines/          # External rulesets (ponytail, Karpathy): fetch, cache, inject
 │   ├── local_llm/           # llamafile runtime manager (ask-first download, start/stop, idle unload)
 │   ├── local_models/        # Resumable model downloads + storage paths
 │   ├── skills/              # Skill registry + tool loop + forge
