@@ -642,6 +642,30 @@ def _register_default_handlers():
         desktop_control.revoke()
         return {"success": True, "granted": False}
 
+    async def models_catalog(params: dict, ws) -> dict:
+        """Cached model lists per provider (what Settings shows)."""
+        from backend.providers import model_catalog
+        try:
+            return model_catalog.catalog()
+        except Exception as e:
+            log.debug("models.catalog failed: %s", e)
+            return {"providers": {}, "error": str(e)}
+
+    async def models_refresh(params: dict, ws) -> dict:
+        """Query providers for their current model lists."""
+        from backend.providers import model_catalog
+        pid = params.get("provider")
+        try:
+            if pid:
+                out = await model_catalog.refresh(force=True, only=[pid])
+            else:
+                out = await model_catalog.refresh(force=True)
+            return {"success": True, **out}
+        except Exception as e:
+            log.debug("models.refresh failed: %s", e)
+            return {"success": False, "error": str(e),
+                    "catalog": model_catalog.catalog()}
+
     async def models_routes(params: dict, ws) -> dict:
         """Effective model per task role — powers the Settings routing panel."""
         from backend.config import config
@@ -1642,6 +1666,8 @@ def _register_default_handlers():
     _server.register("settings.get", settings_get)
     _server.register("settings.set", settings_set)
     _server.register("models.routes", models_routes)
+    _server.register("models.catalog", models_catalog)
+    _server.register("models.refresh", models_refresh)
 
     # Phase 5 Goals engine
     _server.register("goal.create", goal_create)

@@ -315,9 +315,25 @@ def main():
 
         scheduler.register_housekeeping("weekly_reflection",
                                         _weekly_reflection, interval_s=21600)
+
+        async def _weekly_refresh():
+            """Refresh slow-moving remote data held in the local cache.
+
+            Currently the model catalog (which models each provider offers).
+            The job also fires at startup, so the staleness check inside
+            refresh_if_stale() is what keeps that first pass a no-op.
+            """
+            try:
+                from backend.providers import model_catalog
+                await model_catalog.refresh_if_stale()
+            except Exception as e:
+                log.debug("model catalog refresh failed: %s", e)
+
+        scheduler.register_housekeeping("weekly_refresh",
+                                        _weekly_refresh, interval_s=604800)
         log.info("Scheduler wired (calendar reminders + memory maintenance "
                  "+ daily check-in + journal + project index + patterns "
-                 "+ reflection)")
+                 "+ reflection + weekly refresh)")
     except Exception as e:
         log.warning("Scheduler wiring failed: %s", e)
 

@@ -220,17 +220,42 @@ const ROUTE_ROLES:[string,string,string][]=[
   ['long','Long context','whole files and documents'],
 ];
 
+function relTime(iso?:string){
+  if(!iso)return 'never';
+  const t=Date.parse(iso);
+  if(!isFinite(t))return 'never';
+  const s=Math.max(0,Math.floor((Date.now()-t)/1000));
+  if(s<60)return 'just now';
+  const m=Math.floor(s/60); if(m<60)return `${m} min ago`;
+  const h=Math.floor(m/60); if(h<24)return `${h} h ago`;
+  return `${Math.floor(h/24)} d ago`;
+}
+
 function ProvidersSection({ settings, update, saving, status }: any) {
   const p=settings?.providers||{}, builtin=p.builtin||{}, active=p.active||'local';
   const llm=settings?.local_llm||{};
   const { send, state: wsState }=useWS();
   const [llmStatus,setLlmStatus]=useState<any>(null);
   const [busy,setBusy]=useState<string|null>(null);
+  const [catalog,setCatalog]=useState<any>(null);
+  const [refreshing,setRefreshing]=useState(false);
 
   const refresh=useCallback(async()=>{
     if(wsState!=='connected')return;
     try{ setLlmStatus(await send('localLlm.status',{})); }catch{}
+    try{ setCatalog(await send('models.catalog',{})); }catch{}
   },[send,wsState]);
+
+  const refreshModels=async()=>{
+    if(wsState!=='connected')return;
+    setRefreshing(true);
+    try{
+      const out=await send('models.refresh',{provider:active});
+      if(out?.catalog)setCatalog(out.catalog);
+      else await refresh();
+    }catch{}
+    setRefreshing(false);
+  };
 
   useEffect(()=>{ refresh(); },[refresh]);
 
@@ -242,7 +267,10 @@ function ProvidersSection({ settings, update, saving, status }: any) {
     setBusy(null);
   };
 
-  const models:string[]=builtin[active]?.models||[];
+  const cat:any=catalog?.providers?.[active]||null;
+  const models:string[]=((cat?.models&&cat.models.length)
+    ?cat.models
+    :builtin[active]?.models)||[];
   const hf=llmStatus?.hf||null;
   const llmPct=typeof llmStatus?.progress==='number'?llmStatus.progress:0;
   const sizeGb=((llm.size_mb||2400)/1024).toFixed(1);
@@ -266,6 +294,21 @@ function ProvidersSection({ settings, update, saving, status }: any) {
         <input type="text" value={builtin[active]?.default_model||''} readOnly className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#8b949e] w-64"/>
       )}
     </SettingRow>
+    <div className="flex items-center gap-2 px-1 text-[11px]">
+      <button onClick={refreshModels} disabled={refreshing||wsState!=='connected'} className={btn}>
+        {refreshing?'Refreshing…':'↻ Refresh models'}
+      </button>
+      <span className="text-[#8b949e]">
+        {cat?.fetched_at?`updated ${relTime(cat.fetched_at)}`
+          :cat?.checked_at?`checked ${relTime(cat.checked_at)}`
+          :'not checked yet'}
+        {cat?.discovered?.length?` · ${cat.discovered.length} from the provider`:''}
+      </span>
+    </div>
+    {cat?.status==='error'&&cat.error&&
+      <p className="text-xs text-[#d29922] px-1">⚠ Model list unavailable — {cat.error}</p>}
+    {cat?.status==='skipped'&&cat.error&&
+      <p className="text-[11px] text-[#8b949e] px-1">{cat.error}; showing the built-in list.</p>}
     <div className="mt-3 rounded-lg border border-[#30363d] p-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-[#e8eaed]">🎯 Model routing</p>

@@ -62,6 +62,9 @@ DEFAULT_SETTINGS: dict = {
         "route_long_chars": 1200,
         "route_reason_chars": 400,
         "route_code_reason_chars": 80,
+        # Live model discovery: ask each provider what it offers and cache it.
+        "catalog_auto": True,
+        "catalog_ttl_days": 7,
         "builtin": {
             "deepseek": {
                 "name": "DeepSeek",
