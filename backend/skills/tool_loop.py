@@ -278,6 +278,11 @@ async def _call_native_tools(provider, messages: list[dict],
             return await _call_prompt_tools(provider, messages, model)
 
         if not result.ok:
+            # Log it. Returning the message only puts it in the chat: a user
+            # reporting "it errors" leaves nothing behind to diagnose, which is
+            # exactly what happened with an OpenRouter 404.
+            log.warning("Provider '%s' failed: %s",
+                        getattr(provider, "provider_id", "?"), result.error)
             return {"response": f"[Provider error: {result.error}]", "tokens": 0}
 
         response_text = result.response or ""
@@ -367,6 +372,8 @@ async def _call_prompt_tools(provider, messages: list[dict],
         )
 
         if not result.ok:
+            log.warning("Provider '%s' failed (prompt tools): %s",
+                        getattr(provider, "provider_id", "?"), result.error)
             return {"response": f"[Provider error: {result.error}]", "tokens": 0}
 
         response_text = result.response

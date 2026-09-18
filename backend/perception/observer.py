@@ -190,8 +190,11 @@ class Observer:
 
                 # ── Global fallback: local Florence-2 via HF ─────────────
                 if not vision_result.ok:
-                    log.debug("Provider vision failed (%s) — trying HF fallback",
-                              vision_result.error)
+                    # Info, not debug: this is the only trace that the cloud
+                    # vision provider refused, and a debug line is invisible in
+                    # a shipped install.
+                    log.info("Vision provider failed (%s) — falling back to "
+                             "local Florence-2", vision_result.error)
                     from backend.providers.hf_vision import hf_vision
                     vision_result = await hf_vision.analyze(
                         result["image_b64"], prompt)

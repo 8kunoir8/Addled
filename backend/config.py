@@ -122,6 +122,9 @@ DEFAULT_SETTINGS: dict = {
                 "name": "Ollama (Local)",
                 "base_url": "http://localhost:11434",
                 "api_key": "",
+                # A local server on loopback: it needs no key, and being marked
+                # otherwise made it look unavailable to the dashboard.
+                "local": True,
                 "default_model": "minicpm-v:8b",
                 "models": ["minicpm-v:8b", "llama3.1:8b", "deepseek-r1:8b", "qwen2.5:7b"],
                 "vision": True,
@@ -130,6 +133,7 @@ DEFAULT_SETTINGS: dict = {
                 "name": "LM Studio (Local)",
                 "base_url": "http://localhost:1234/v1",
                 "api_key": "",
+                "local": True,
                 "default_model": "local-model",
                 "models": ["local-model"],
                 "vision": False,
@@ -161,7 +165,11 @@ DEFAULT_SETTINGS: dict = {
                     "nvidia/nemotron-3-ultra-550b-a55b:free",
                 ],
                 "vision": True,
-                "vision_model": "qwen/qwen3.8-27b:free",
+                # Also not a ":free" model: a blocked vision model means image
+                # attachments and the deep-vision tier fail for accounts whose
+                # privacy settings disallow free-model training, and the local
+                # model cannot fill in because it is text-only.
+                "vision_model": "google/gemini-3.8-flash",
                 "extra_headers": {
                     "HTTP-Referer": "https://github.com/8kunoir8/Addled",
                     "X-Title": "Addled",

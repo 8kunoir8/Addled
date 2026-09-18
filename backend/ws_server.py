@@ -232,6 +232,10 @@ async def _analyze_attachments(provider, attachments: list[dict],
                     f'[Attached image "{name}" — visual model analysis: '
                     f'{str(desc)[:1500]}]')
             else:
+                # Both the provider and the local model failed. Say so in the
+                # log as well as the chat, or the reason is lost.
+                log.warning("Could not analyse attached image '%s' — vision "
+                            "provider and local Florence-2 both failed", name)
                 notes.append(
                     f'[Attached image "{name}" — the visual model could '
                     f'not analyze it.]')

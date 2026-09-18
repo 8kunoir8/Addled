@@ -52,10 +52,23 @@ class LocalProvider(OpenAIProvider):
         )
 
     async def list_models(self) -> list[str]:
+        """The configured name, plus whatever id the server reports.
+
+        llamafile ignores the model field outright — a nonsense id still gets a
+        200 — and it advertises the absolute path of the GGUF file. Returning
+        only that made this provider look like it offered a model its own
+        config had never heard of, which the provider audit flagged.
+        """
+        names = [str(m) for m in (self._config.get("models") or [])]
+        default = str(self._config.get("default_model") or "")
+        if default and default not in names:
+            names.append(default)
         manager = self._manager()
         if manager.is_running():
-            return [manager.model_id()]
-        return self._config.get("models", [])
+            live = str(manager.model_id() or "")
+            if live and live not in names:
+                names.append(live)
+        return names or ["local-model"]
 
     async def validate(self) -> dict:
         manager = self._manager()
