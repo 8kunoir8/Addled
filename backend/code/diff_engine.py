@@ -46,21 +46,30 @@ def generate_diff(original: str, modified: str, filepath: str = "file") -> dict:
     }
 
 
-def apply_content(filepath: str, content: str, backup: bool = True) -> dict:
+def apply_content(filepath: str, content: str, backup: bool = True,
+                  create: bool = False) -> dict:
     """Replace a file's full content (with optional .bak backup).
-    Pure Python — does not depend on the unix `patch` utility."""
+
+    Pure Python — does not depend on the unix `patch` utility. ``create`` lets
+    the editor save a file that does not exist yet; without it a missing path is
+    an error, which is what the diff-review path wants.
+    """
     try:
-        if not os.path.exists(filepath):
+        exists = os.path.exists(filepath)
+        if not exists and not create:
             return {"success": False, "error": f"File not found: {filepath}"}
 
         backup_path = None
-        if backup:
+        if backup and exists:
             backup_path = filepath + ".bak"
             shutil.copy2(filepath, backup_path)
 
+        parent = os.path.dirname(filepath)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(filepath, "w", encoding="utf-8", newline="") as f:
             f.write(content)
-        return {"success": True, "backup": backup_path}
+        return {"success": True, "backup": backup_path, "created": not exists}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

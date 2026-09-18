@@ -1811,6 +1811,13 @@ def _register_default_handlers():
 
     # ---- Phase 5: Code Engine (diff + language detect) -----------------------
 
+    # Generated or vendored directories the file tree hides by default. The page
+    # offers "show everything", so nothing is permanently unreachable.
+    _SKIP_DIRS = {'.git', '.hg', '.svn', 'node_modules', '__pycache__', '.next',
+                  'dist', 'build', 'out', 'venv', '.venv', 'target', 'vendor',
+                  'site-packages', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+                  '.idea', '.vs', '.gradle'}
+
     async def code_bind(params: dict, ws) -> dict:
         folder = params.get("folderPath", "")
         if not folder:
@@ -1819,25 +1826,99 @@ def _register_default_handlers():
         from backend.code.lang_detect import detect
         if not os.path.isdir(folder):
             return {"workspaceId": folder, "files": [], "error": f"Folder not found: {folder}"}
+        limit = 400
+        show_all = bool(params.get("includeIgnored"))
         files = []
+        truncated = False
         try:
             for root, dirs, filenames in os.walk(folder):
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('node_modules','__pycache__','venv','.git','.next')]
-                for f in filenames[:200]:
+                if show_all:
+                    dirs[:] = [d for d in dirs if d != '.git']
+                else:
+                    dirs[:] = [d for d in dirs if not d.startswith('.')
+                               and d not in _SKIP_DIRS]
+                dirs.sort()
+                for f in sorted(filenames):
                     fp = os.path.join(root, f)
-                    files.append({"name": f, "path": os.path.relpath(fp, folder),
-                                  "language": detect(fp), "size": os.path.getsize(fp)})
-                if len(files) >= 200: break
+                    try:
+                        files.append({"name": f,
+                                      "path": os.path.relpath(fp, folder).replace(os.sep, '/'),
+                                      "language": detect(fp),
+                                      "size": os.path.getsize(fp)})
+                    except OSError:
+                        continue
+                    if len(files) >= limit:
+                        truncated = True
+                        break
+                if truncated:
+                    break
         except Exception as e:
             return {"workspaceId": folder, "files": [], "error": str(e)}
-        return {"workspaceId": folder, "files": files}
+        return {"workspaceId": folder, "files": files,
+                "truncated": truncated, "limit": limit}
+
+    async def code_grep(params: dict, ws) -> dict:
+        """Literal (case-insensitive) search across the bound workspace."""
+        import os
+        from backend.code import OutsideWorkspace, resolve_in_workspace
+        wp = str(params.get("workspaceId") or "")
+        needle = str(params.get("query") or "")
+        if not wp:
+            return {"matches": [], "error": "No workspace is bound."}
+        if len(needle) < 2:
+            return {"matches": [], "error": "Use at least two characters."}
+        try:
+            root = resolve_in_workspace(wp, ".")
+        except OutsideWorkspace as e:
+            return {"matches": [], "error": str(e)}
+        limit = max(1, min(int(params.get("limit") or 200), 1000))
+        needle_cf = needle.casefold()
+        matches, scanned, truncated = [], 0, False
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d != '.git'
+                           and d not in _SKIP_DIRS]
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = os.path.join(dirpath, name)
+                try:
+                    if os.path.getsize(path) > 2_000_000:
+                        continue
+                    with open(path, 'r', encoding='utf-8',
+                              errors='replace') as fh:
+                        text = fh.read()
+                except OSError:
+                    continue
+                if '\x00' in text:            # binary, skip
+                    continue
+                scanned += 1
+                rel = os.path.relpath(path, root).replace(os.sep, '/')
+                for n, line in enumerate(text.splitlines(), 1):
+                    if needle_cf in line.casefold():
+                        matches.append({"filePath": rel, "line": n,
+                                        "text": line.strip()[:200]})
+                        if len(matches) >= limit:
+                            truncated = True
+                            break
+                if truncated:
+                    break
+            if truncated:
+                break
+        return {"matches": matches, "scanned": scanned,
+                "truncated": truncated}
 
     async def code_read(params: dict, ws) -> dict:
+        from backend.code import OutsideWorkspace, resolve_in_workspace
         from backend.code.lang_detect import detect
         wp = params.get("workspaceId", "")
         fp = params.get("filePath", "")
-        import os
-        full = os.path.join(wp, fp) if wp else fp
+        # Never join blindly: a ".." chain or an absolute path escapes the bound
+        # workspace, and these methods are reachable from a remote session.
+        if not wp:
+            return {"content": "// No workspace is bound.", "language": "text"}
+        try:
+            full = resolve_in_workspace(wp, fp)
+        except OutsideWorkspace as e:
+            return {"content": f"// Refused: {e}", "language": "text"}
         try:
             with open(full, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
@@ -1857,11 +1938,16 @@ def _register_default_handlers():
             fp = params.get("filePath", "")
             original = ""
             if fp and wp:
-                import os
-                full = os.path.join(wp, fp)
-                if os.path.isfile(full):
-                    with open(full, 'r', encoding='utf-8', errors='replace') as f:
-                        original = f.read()
+                from backend.code import (OutsideWorkspace,
+                                          resolve_in_workspace)
+                try:
+                    full = resolve_in_workspace(wp, fp)
+                except OutsideWorkspace as e:
+                    return {"diffs": [], "status": "refused",
+                            "message": str(e)}
+                if full.is_file():
+                    original = full.read_text(encoding='utf-8',
+                                              errors='replace')
             prompt = f"Given this instruction: '{instruction}'\n\n"
             if original:
                 prompt += f"And this original code:\n```\n{original[:3000]}\n```\n\n"
@@ -1904,10 +1990,23 @@ def _register_default_handlers():
         """Apply a reviewed code edit. Requires explicit content OR a pending
         edit id created by code.edit."""
         from backend.code.diff_engine import apply_content
+        from backend.code import OutsideWorkspace, resolve_in_workspace
         wp = params.get("workspaceId", "")
         fp = params.get("filePath", "")
-        edit_id = params.get("editId") or f"{wp}::{fp}"
 
+        # Contain the path before touching the pending-edit store: a refused
+        # call should not be able to consume an edit the user never approved.
+        if not wp:
+            return {"success": False,
+                    "error": "No workspace is bound; refusing to write."}
+        try:
+            full = resolve_in_workspace(wp, fp)
+        except OutsideWorkspace as e:
+            return {"success": False, "error": str(e)}
+        if not full.is_file():
+            return {"success": False, "error": f"File not found: {fp}"}
+
+        edit_id = params.get("editId") or f"{wp}::{fp}"
         content = params.get("content")
         if content is None:
             content = _pending_edits.get(edit_id)
@@ -1915,14 +2014,42 @@ def _register_default_handlers():
             return {"success": False,
                     "error": "No pending edit or content provided. Run code.edit first or pass 'content'."}
 
-        import os
-        full = os.path.join(wp, fp) if wp else fp
-        if not os.path.isfile(full):
-            return {"success": False, "error": f"File not found: {full}"}
-        result = apply_content(full, content, backup=params.get("backup", True))
+        result = apply_content(str(full), content,
+                               backup=params.get("backup", True))
         if result.get("success"):
             _pending_edits.pop(edit_id, None)
         return result
+
+    async def code_write(params: dict, ws) -> dict:
+        """Save editor contents to a file inside the bound workspace.
+
+        The editor needs a plain save: code.edit goes through a model and
+        code.apply only replays a reviewed edit, so neither could persist an
+        edit made by hand. Creating a file is allowed here — that is what the
+        page's New File button is — and the path is contained first.
+        """
+        from backend.code import (MAX_EDIT_BYTES, OutsideWorkspace,
+                                  resolve_in_workspace)
+        from backend.code.diff_engine import apply_content
+        wp = str(params.get("workspaceId") or "")
+        fp = str(params.get("filePath") or "")
+        content = params.get("content")
+        if not wp:
+            return {"success": False,
+                    "error": "No workspace is bound; refusing to write."}
+        if not fp:
+            return {"success": False, "error": "No file path given."}
+        if content is None:
+            return {"success": False, "error": "No content to write."}
+        try:
+            full = resolve_in_workspace(wp, fp)
+        except OutsideWorkspace as e:
+            return {"success": False, "error": str(e)}
+        if len(str(content)) > MAX_EDIT_BYTES:
+            return {"success": False,
+                    "error": (f"That file is larger than the "
+                              f"{MAX_EDIT_BYTES // 1000} kB editor limit.")}
+        return apply_content(str(full), str(content), backup=True, create=True)
 
     # ---- Phase 5: Swarm Orchestrator -----------------------------------------
 
@@ -2549,6 +2676,8 @@ def _register_default_handlers():
     _server.register("code.read", code_read)
     _server.register("code.edit", code_edit)
     _server.register("code.apply", code_apply)
+    _server.register("code.write", code_write)
+    _server.register("code.grep", code_grep)
 
     # Phase 5 Swarm orchestrator
     _server.register("swarm.spawn", swarm_spawn)

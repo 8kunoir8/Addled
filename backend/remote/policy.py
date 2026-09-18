@@ -46,6 +46,10 @@ REMOTE_FORBIDDEN_METHODS = {
     "mcp.add", "mcp.connect", "mcp.update", "mcp.remove", "mcp.reload",
     "skills.installFrom",
     "forge.create",
+    # Binding decides which folder the code.* writes are contained to. A remote
+    # caller could bind `C:\\` and then write anywhere, so the workspace choice
+    # stays a local decision. The contained methods remain available remotely.
+    "code.bind",
 }
 
 # Action types held back from remote sessions unless deliberately opened.
@@ -87,6 +91,16 @@ def identity(ws) -> str:
 # -- what a remote caller may do ----------------------------------------------
 
 
+# A more accurate reason for the methods above whose generic wording would
+# misdescribe them.
+REMOTE_FORBIDDEN_REASONS = {
+    "code.bind": ("Binding a folder is done on the machine running Addled, "
+                   "because it decides which folder the code tools may then "
+                   "write to. Once it is bound there, the contained code.* "
+                   "calls work normally over remote access."),
+}
+
+
 def remote_refusal(method: str, params: dict | None = None) -> str | None:
     """Why a remote session may not use this, or None if it may.
 
@@ -94,6 +108,9 @@ def remote_refusal(method: str, params: dict | None = None) -> str | None:
     default rather than by remembering to add a check.
     """
     if method in REMOTE_FORBIDDEN_METHODS:
+        specific = REMOTE_FORBIDDEN_REASONS.get(method)
+        if specific:
+            return specific
         return (f"{method} is not available over remote access — it can start "
                 f"a process or install code, which is not something a browser "
                 f"session should be able to do.")

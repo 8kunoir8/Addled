@@ -36,6 +36,7 @@ SUITES = [
     "check_web_search.py",
     "check_skill_market.py",
     "check_mcp_market.py",
+    "check_code_editor.py",
 ]
 
 
