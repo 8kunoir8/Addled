@@ -214,14 +214,111 @@ function SkinsSection({ send, connected }: { send: (m: string, p?: any) => Promi
 }
 
 function ProvidersSection({ settings, update, saving, status }: any) {
-  const p=settings?.providers||{}, builtin=p.builtin||{}, active=p.active||'deepseek';
+  const p=settings?.providers||{}, builtin=p.builtin||{}, active=p.active||'local';
+  const llm=settings?.local_llm||{};
+  const { send, state: wsState }=useWS();
+  const [llmStatus,setLlmStatus]=useState<any>(null);
+  const [busy,setBusy]=useState<string|null>(null);
+
+  const refresh=useCallback(async()=>{
+    if(wsState!=='connected')return;
+    try{ setLlmStatus(await send('localLlm.status',{})); }catch{}
+  },[send,wsState]);
+
+  useEffect(()=>{ refresh(); },[refresh]);
+
+  const act=async(method:string,label:string)=>{
+    if(wsState!=='connected')return;
+    setBusy(label);
+    try{ await send(method,{}); }catch{}
+    await refresh();
+    setBusy(null);
+  };
+
+  const models:string[]=builtin[active]?.models||[];
+  const hf=llmStatus?.hf||null;
+  const llmPct=typeof llmStatus?.progress==='number'?llmStatus.progress:0;
+  const sizeGb=((llm.size_mb||2400)/1024).toFixed(1);
+  const btn='px-3 py-1.5 rounded text-xs font-medium border border-[#30363d] hover:border-[#484f58] text-[#e8eaed] disabled:opacity-40';
+  const btnPrimary='px-3 py-1.5 rounded text-xs font-medium bg-[#3380FF] hover:bg-[#4d94ff] text-white disabled:opacity-40';
+
   return <div className="space-y-1">
     <SettingRow label="Active Provider">
       <select value={active} onChange={e=>update('providers','active',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]">
         {Object.keys(builtin).map(id=><option key={id} value={id}>{builtin[id]?.name||id}</option>)}
       </select>
     </SettingRow>
-    {Object.entries(builtin).map(([id,cfg]:[string,any])=>
+    <SettingRow label="Default Model">
+      {models.length>1?(
+        <select value={builtin[active]?.default_model||''} onChange={e=>{const u={...builtin,[active]:{...builtin[active],default_model:e.target.value}};update('providers','builtin',u)}} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-64">
+          {!!builtin[active]?.default_model&&!models.includes(builtin[active].default_model)&&
+            <option value={builtin[active].default_model}>{builtin[active].default_model}</option>}
+          {models.map(m=><option key={m} value={m}>{m}</option>)}
+        </select>
+      ):(
+        <input type="text" value={builtin[active]?.default_model||''} readOnly className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#8b949e] w-64"/>
+      )}
+    </SettingRow>
+    {active==='openrouter'&&!builtin?.openrouter?.api_key&&
+      <p className="text-xs text-[#d29922] px-1">⚠ OpenRouter needs an API key — paste it below (openrouter.ai/keys).</p>}
+
+    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium text-[#e8eaed]">🧠 Local AI (llamafile)</p>
+        <span className="text-[10px] text-[#8b949e]">
+          {llmStatus?.running?'● running':llmStatus?.installed?'○ stopped':'— not installed'}
+        </span>
+      </div>
+      <p className="mt-1 text-[11px] text-[#8b949e]">
+        <span className="font-mono">{llm.model_file||'model'}</span> · about {sizeGb} GB
+        {llmStatus?.installed_mb?` · on disk ${(llmStatus.installed_mb/1024).toFixed(1)} GB`:''}
+        {llmStatus?` · ${llmStatus.free_mb} MB free`:''}
+      </p>
+      {llmStatus?.downloading&&(
+        <div className="mt-2">
+          <div className="h-1.5 w-full rounded bg-[#21262d] overflow-hidden">
+            <div className="h-full bg-[#3380FF] transition-all" style={{width:`${Math.min(100,llmPct)}%`}}/>
+          </div>
+          <p className="mt-1 text-[10px] text-[#8b949e] truncate">{llmStatus?.detail} · {Math.round(llmPct)}%</p>
+        </div>
+      )}
+      {!!llmStatus?.error&&<p className="mt-1 text-[10px] text-[#f85149] break-words">{llmStatus.error}</p>}
+      <div className="mt-2 flex flex-wrap gap-2">
+        {!llmStatus?.installed&&
+          <button disabled={busy!==null||wsState!=='connected'} onClick={()=>act('localLlm.installApprove','install')} className={btnPrimary}>
+            {busy==='install'?'⏳ starting…':`⬇ Download (${sizeGb} GB)`}
+          </button>}
+        {llmStatus?.installed&&!llmStatus?.running&&
+          <button disabled={busy!==null} onClick={()=>act('localLlm.start','start')} className={btn}>▶ Start</button>}
+        {llmStatus?.running&&
+          <button disabled={busy!==null} onClick={()=>act('localLlm.stop','stop')} className={btn}>■ Stop</button>}
+        {llmStatus?.installed&&
+          <button disabled={busy!==null} onClick={()=>act('localLlm.remove','remove')} className={btn}>🗑 Remove</button>}
+        <button disabled={busy!==null} onClick={refresh} className={btn}>↻ Refresh</button>
+      </div>
+      <p className="mt-2 text-[10px] text-[#484f58] break-all">{llmStatus?.dir||''}</p>
+    </div>
+
+    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium text-[#e8eaed]">🤗 Hugging Face (Local)</p>
+        <span className="text-[10px] text-[#8b949e]">{hf?.deps_ready?'● ready':'— needs torch'}</span>
+      </div>
+      <p className="mt-1 text-[11px] text-[#8b949e]">
+        Runs <span className="font-mono break-all">{hf?.model_id||builtin?.huggingface?.default_model||''}</span> in-process.
+        {hf?.downloaded?' Model is downloaded.':' Model downloads on first use.'}
+      </p>
+      {hf&&!hf.deps_ready&&<p className="mt-1 text-[10px] text-[#d29922] break-words">{hf.error||'torch + transformers are required.'}</p>}
+      <div className="mt-2 flex flex-wrap gap-2">
+        {hf&&!hf.deps_ready&&
+          <button disabled={busy!==null||wsState!=='connected'} onClick={()=>act('localLlm.installHfDeps','hf')} className={btnPrimary}>
+            {busy==='hf'?'⏳ installing…':'⬇ Install torch + transformers'}
+          </button>}
+        <button disabled={busy!==null} onClick={()=>act('hf.unload','unload')} className={btn}>Free RAM</button>
+      </div>
+    </div>
+
+    {Object.entries(builtin).filter(([,cfg]:[string,any])=>!cfg.local).map(([id,cfg]:[string,any])=>
       <SettingRow key={id} label={`${cfg.name} API Key`}>
         <div className="flex items-center gap-2">
           <input type="password" value={cfg.api_key||''} onChange={e=>{const u={...builtin,[id]:{...cfg,api_key:e.target.value}};update('providers','builtin',u)}}
@@ -229,7 +326,6 @@ function ProvidersSection({ settings, update, saving, status }: any) {
           {cfg.api_key&&<span className="text-xs text-[#3fb950]">✓ Set</span>}
         </div>
       </SettingRow>)}
-    <SettingRow label="Default Model"><input type="text" value={builtin[active]?.default_model||''} readOnly className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#8b949e] w-48"/></SettingRow>
   </div>;
 }
 

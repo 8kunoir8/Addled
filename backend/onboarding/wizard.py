@@ -30,6 +30,12 @@ PROVIDER_TEXT = """<h2>Choose Your AI Provider</h2>
 <p>Addled works with local and cloud AI providers.</p>
 <p>You can add more providers later in Settings.</p>"""
 
+LOCAL_AI_TEXT = """<h2>Local AI Model</h2>
+<p>Addled can run its own AI model on your PC — no account, no API key, and it
+keeps working offline.</p>
+<p style='color:#8b949e;font-size:12px;'>Nothing is downloaded until you agree.
+The model is about 2.4 GB and is fetched after setup finishes.</p>"""
+
 CHARACTER_TEXT = """<h2>Customize Your Companion</h2>
 <p>Choose how Addled appears on your screen.</p>"""
 
@@ -143,7 +149,9 @@ class ProviderPage(StyledPage):
 
         self.provider_combo = QComboBox()
         self.provider_combo.addItems([
-            "DeepSeek (recommended)",
+            "Addled Local — no API key needed (recommended)",
+            "OpenRouter (free models)",
+            "DeepSeek",
             "OpenAI (GPT-4o)",
             "Anthropic Claude",
             "Google Gemini",
@@ -171,6 +179,48 @@ class ProviderPage(StyledPage):
 
     def api_key(self) -> str:
         return self.key_input.text().strip()
+
+
+# ── Page 2b: Local AI model (ask before downloading) ─────────────────────────
+
+class LocalAIPage(StyledPage):
+    """Consent step for the ~2.4 GB local model download."""
+
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Local AI Model")
+        layout = QVBoxLayout(self)
+
+        label = QLabel(LOCAL_AI_TEXT)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        self.download_radio = QRadioButton("Download now (recommended)")
+        self.skip_radio = QRadioButton(
+            "Not now — I'll use a cloud provider instead")
+        self.download_radio.setChecked(True)
+        layout.addWidget(self.download_radio)
+        layout.addWidget(self.skip_radio)
+
+        from backend.local_models import paths
+        try:
+            from backend.config import config as app_config
+            size_mb = int(app_config.get("local_llm", "size_mb", default=2400) or 2400)
+        except Exception:
+            size_mb = 2400
+
+        note = QLabel(
+            "<span style='color:#8b949e;font-size:11px;'>"
+            f"About {size_mb} MB (runtime + weights) · "
+            f"{paths.disk_free_mb()} MB free on this drive · "
+            f"saved to {paths.LLAMAFILE_DIR}</span>"
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch()
+
+    def download_approved(self) -> bool:
+        return self.download_radio.isChecked()
 
 
 # ── Page 3: Character ────────────────────────────────────────────────────────
@@ -334,7 +384,9 @@ class OnboardingWizard(QWizard):
     """First-run setup wizard."""
 
     PROVIDER_MAP = {
-        "DeepSeek (recommended)": "deepseek",
+        "Addled Local — no API key needed (recommended)": "local",
+        "OpenRouter (free models)": "openrouter",
+        "DeepSeek": "deepseek",
         "OpenAI (GPT-4o)": "openai",
         "Anthropic Claude": "claude",
         "Google Gemini": "gemini",
@@ -378,6 +430,7 @@ class OnboardingWizard(QWizard):
 
         self._welcome = WelcomePage()
         self._provider = ProviderPage()
+        self._local = LocalAIPage()
         self._character = CharacterPage()
         self._voice = VoicePage()
         self._wake = WakePage()
@@ -385,6 +438,7 @@ class OnboardingWizard(QWizard):
 
         self.addPage(self._welcome)
         self.addPage(self._provider)
+        self.addPage(self._local)
         self.addPage(self._character)
         self.addPage(self._voice)
         self.addPage(self._wake)
@@ -392,10 +446,16 @@ class OnboardingWizard(QWizard):
 
     def get_settings(self) -> dict:
         """Collect all user choices as a config dict."""
+        approved = self._local.download_approved()
         return {
             "providers": {
                 "active": self.PROVIDER_MAP.get(
-                    self._provider.selected_provider(), "deepseek"),
+                    self._provider.selected_provider(), "local"),
+            },
+            "local_llm": {
+                "asked": True,
+                "download_approved": approved,
+                "declined": not approved,
             },
             "character": {
                 "name": self._character.companion_name(),

@@ -49,7 +49,7 @@ def llm_available() -> bool:
     global _last_llm_error
     from backend.config import config
     pid = config.active_provider
-    if pid in ("ollama", "lmstudio"):
+    if pid in ("ollama", "lmstudio", "local", "huggingface"):
         return True
     try:
         cfg = config.provider_config(pid)
@@ -74,12 +74,21 @@ def _make_llm():
     when none work (the router treats that as unavailable)."""
     from backend.config import config
     pid = config.active_provider
-    if pid not in ("deepseek", "openai", "ollama", "lmstudio"):
+    if pid not in ("deepseek", "openai", "ollama", "lmstudio", "openrouter",
+                   "local"):
         return None
     try:
         cfg = config.provider_config(pid)
     except Exception:
         return None
+    if pid == "local":
+        # The llamafile server may have landed on a different port.
+        try:
+            from backend.local_llm.manager import local_llm
+            cfg = {**cfg, "base_url": local_llm.api_base(),
+                   "default_model": local_llm.model_id(), "api_key": "sk-local"}
+        except Exception:
+            pass
     kwargs = {
         "model": cfg.get("default_model", ""),
         "api_key": cfg.get("api_key", "") or "local",

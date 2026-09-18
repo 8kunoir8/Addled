@@ -2,7 +2,7 @@
 
 > An AI desktop companion with a floating animated character, full web dashboard,  
 > voice interaction (wake word + speech), 30 built-in skills, self-extending  
-> capability forge, 7 AI provider backends, live screen awareness, long-term  
+> capability forge, 10 AI provider backends, live screen awareness, long-term  
 > memory, and a full safety suite.  
 > Built with Python 3.14 + PyQt6 + Electron 28 + Next.js 16.
 >
@@ -38,6 +38,8 @@ launch.bat
 > dependencies — no Python install needed on the target PC.
 > Optional extras: local vision (`torch` + `transformers`, ~400 MB) and
 > browser automation (`pip install playwright && playwright install chromium`).
+> The **local AI model** (llamafile + Qwen3-4B, ~2.4 GB) is downloaded on demand
+> after you approve it — never bundled.
 > Voice models are fetched by `scripts/fetch_voice_models.py` (~650 MB:
 > Silero VAD + Kokoro TTS). STT uses faster-whisper (downloads on first use;
 > SenseVoice auto-activates if funasr is installed).
@@ -64,7 +66,7 @@ launch.bat
 │  │      Python Backend Service        │  │
 │  │  Engine • 36 WS Handlers           │  │
 │  │  30 Skills • Skill Forge           │  │
-│  │  7 AI Providers • Goals • Code     │  │
+│  │  10 AI Providers • Goals • Code    │  │
 │  │  Swarm • Calendar • Email • Browser│  │
 │  │  Character • Safety • Memory •     │  │
 │  │  Observer • Voice • Onboarding     │  │
@@ -100,9 +102,12 @@ Upload any animated GIF or a ZIP of per-state GIFs in Settings → Character and
 ### 💬 AI Chat
 Full chat UI with streaming responses, markdown rendering, conversation history. **Attachments**: images are analyzed by the visual model (local Florence-2 or provider vision) and described to the main model; text files are inlined; drag & drop supported. Proactive insights arrive as 💡 messages in chat and bubbles on the character. Works with any configured AI provider. Supports skill-based tool calling across all providers.
 
-### 🔌 7 AI Providers
+### 🔌 10 AI Providers
 | Provider | Type | Vision | Streaming |
 |----------|------|--------|-----------|
+| **Addled Local (llamafile)** | Local | — | ✅ |
+| **OpenRouter** | Cloud | ✅ | ✅ |
+| **Hugging Face (Local)** | Local | — | — |
 | DeepSeek | Cloud | — | ✅ |
 | OpenAI (GPT-4o) | Cloud | ✅ | ✅ |
 | Claude | Cloud | ✅ | ✅ |
@@ -111,8 +116,17 @@ Full chat UI with streaming responses, markdown rendering, conversation history.
 | Ollama | Local | — | ✅ |
 | LM Studio | Local | — | ✅ |
 
+**Local by default**: with no API key configured, Addled runs **Qwen3-4B-Instruct-2507**
+(3-bit GGUF) through **llamafile** on `127.0.0.1` — fully offline, no account. The
+model is **not** bundled with the installer: Addled asks once (setup wizard and a
+dashboard prompt) before downloading ~2.4 GB, and the download resumes if it is
+interrupted. Decline and Addled falls back to **OpenRouter**
+(`nvidia/nemotron-3-ultra-550b-a55b:free`) — paste a key in Settings → Providers.
+`Hugging Face (Local)` runs any Hugging Face chat model in-process with
+`transformers` (optional install from Settings).
+
 ### 🛠️ 30 Built-in Skills (Provider-Agnostic)
-All 7 AI providers can invoke any skill — no provider lock-in.
+All 10 AI providers can invoke any skill — no provider lock-in.
 
 | Category | Skills |
 |----------|--------|
@@ -177,7 +191,7 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 ## WebSocket API (74 handlers)
 
 ### Core
-`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set`
+`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
 
 ### Goals
 `goal.create` `goal.list` `goal.start` `goal.cancel`
@@ -241,7 +255,9 @@ Addled/
 │   ├── config.py            # Portable JSON settings
 │   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
 │   ├── ws_server.py         # 48 JSON-RPC 2.0 handlers + server pushes
-│   ├── providers/           # 7 AI providers (base + registry) + local Florence-2 vision
+│   ├── providers/           # 10 AI providers (base + registry + selector) + local Florence-2 vision
+│   ├── local_llm/           # llamafile runtime manager (ask-first download, start/stop, idle unload)
+│   ├── local_models/        # Resumable model downloads + storage paths
 │   ├── skills/              # Skill registry + tool loop + forge
 │   ├── character/           # States, shapes, movement, animation, avatar, particles
 │   ├── actions/             # 55+ action executor (input, windows, files, system, terminal, excel)

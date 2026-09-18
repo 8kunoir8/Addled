@@ -51,8 +51,9 @@ DEFAULT_SETTINGS: dict = {
         "skin": "",
     },
     "providers": {
-        "active": "deepseek",
-        "priority": ["deepseek", "claude", "openai", "copilot", "gemini", "ollama", "lmstudio"],
+        "active": "local",
+        "smart_default": True,
+        "priority": ["local", "openrouter", "huggingface", "deepseek", "claude", "openai", "copilot", "gemini", "ollama", "lmstudio"],
         "builtin": {
             "deepseek": {
                 "name": "DeepSeek",
@@ -112,8 +113,79 @@ DEFAULT_SETTINGS: dict = {
                 "models": ["local-model"],
                 "vision": False,
             },
+            "local": {
+                "name": "Addled Local (llamafile)",
+                "base_url": "http://127.0.0.1:8090/v1",
+                "api_key": "sk-local",
+                "default_model": "qwen3-4b-instruct-2507",
+                "models": ["qwen3-4b-instruct-2507"],
+                "vision": False,
+                "local": True,
+            },
+            "openrouter": {
+                "name": "OpenRouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "",
+                "default_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "models": [
+                    "nvidia/nemotron-3-ultra-550b-a55b:free",
+                    "qwen/qwen3.8-27b:free",
+                    "deepseek/deepseek-v4.1-flash",
+                    "openrouter/auto",
+                ],
+                "vision": True,
+                "vision_model": "qwen/qwen3.8-27b:free",
+                "extra_headers": {
+                    "HTTP-Referer": "https://github.com/8kunoir8/Addled",
+                    "X-Title": "Addled",
+                },
+            },
+            "huggingface": {
+                "name": "Hugging Face (Local)",
+                "base_url": "",
+                "api_key": "",
+                "default_model": "Qwen/Qwen3-4B-Instruct-2507",
+                "models": [
+                    "Qwen/Qwen3-4B-Instruct-2507",
+                    "microsoft/Phi-4-mini-instruct",
+                    "Qwen/Qwen3-1.7B",
+                ],
+                "vision": False,
+                "local": True,
+                "device": "auto",
+                "dtype": "auto",
+                "load_in_4bit": False,
+                "max_new_tokens": 1024,
+                "model_root": "",
+            },
         },
         "custom": [],
+    },
+    "local_llm": {
+        "enabled": False,
+        "backend": "llamafile",
+        "runtime_version": "0.10.6",
+        "runtime_url": "https://github.com/mozilla-ai/llamafile/releases/download/0.10.6/llamafile-0.10.6",
+        "runtime_name": "llamafile.exe",
+        "runtime_sha256": "d579f61dcd3a306f518e6d90e599d77793ed5f09543023d09c96ad35fcfa63f0",
+        "model_repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+        "model_file": "Qwen3-4B-Instruct-2507-Q3_K_M.gguf",
+        "model_url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q3_K_M.gguf",
+        "model_sha256": "",
+        "model_name": "qwen3-4b-instruct-2507",
+        "size_mb": 2400,
+        "host": "127.0.0.1",
+        "port": 8090,
+        "ctx": 8192,
+        "gpu": "auto",
+        "threads": 0,
+        "extra_args": [],
+        "idle_unload_min": 15,
+        "autostart": True,
+        "prompt_on_first_run": True,
+        "asked": False,
+        "download_approved": False,
+        "declined": False,
     },
     "chat": {
         "max_tokens": 4096,
@@ -328,7 +400,21 @@ class _Config:
 
     @property
     def active_provider(self) -> str:
-        return self.get("providers", "active", default="deepseek")
+        """Provider used at runtime — honours the smart-default policy.
+
+        Falls back (local → OpenRouter) when the explicit choice cannot run yet,
+        e.g. the local model has not been downloaded or an API key is missing.
+        """
+        try:
+            from backend.providers.selector import resolve_default_provider
+            return resolve_default_provider()
+        except Exception:
+            return self.get("providers", "active", default="local")
+
+    @property
+    def selected_provider(self) -> str:
+        """The user's explicit choice in Settings (may be unusable right now)."""
+        return self.get("providers", "active", default="local")
 
     @active_provider.setter
     def active_provider(self, value: str):

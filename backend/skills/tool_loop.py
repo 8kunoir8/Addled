@@ -16,7 +16,7 @@ from backend.skills.registry import skill_registry, SkillResult
 
 log = logging.getLogger("addled.tool_loop")
 
-NATIVE_TOOL_PROVIDERS = {"openai", "deepseek", "gemini"}
+NATIVE_TOOL_PROVIDERS = {"openai", "deepseek", "gemini", "openrouter"}
 MAX_TOOL_ROUNDS = 8
 
 

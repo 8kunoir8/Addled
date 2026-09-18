@@ -170,6 +170,29 @@ def main():
     from backend.ws_server import set_engine
     set_engine(engine)
 
+    # ---- local model (llamafile) — ask-then-download + lazy boot -------------
+    try:
+        from backend.local_llm.manager import local_llm
+
+        def _background(coro, name: str):
+            def _done(fut):
+                try:
+                    err = fut.exception()
+                except Exception:
+                    return
+                if err:
+                    log.warning("%s failed: %s", name, err)
+
+            handle = asyncio.run_coroutine_threadsafe(coro, _ws_loop)
+            handle.add_done_callback(_done)
+            return handle
+
+        _background(local_llm.start_if_configured(), "local model boot")
+        _background(local_llm.watchdog_loop(), "local model watchdog")
+        log.info("Local model manager armed (port %s)", local_llm.port())
+    except Exception as e:
+        log.warning("Local model manager unavailable: %s", e)
+
     # ---- scheduler (tasks, calendar reminders, housekeeping) ------------------
     try:
         from backend.tasks.scheduler import scheduler
@@ -460,6 +483,14 @@ def main():
     voice_listener.stop()
     kill_switch.stop()
     engine.stop()
+
+    # Stop the local model server so it does not outlive the app
+    try:
+        from backend.local_llm.manager import local_llm
+        fut = asyncio.run_coroutine_threadsafe(local_llm.stop(), _ws_loop)
+        fut.result(timeout=15)
+    except Exception as e:
+        log.debug("Local model shutdown: %s", e)
 
     # Summarize the session into long-term memory before the loops stop
     try:

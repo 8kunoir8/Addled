@@ -23,10 +23,17 @@ export interface Provider {
   name: string;
   is_builtin: boolean;
   is_active: boolean;
+  is_selected?: boolean;
   has_key: boolean;
   vision: boolean;
   base_url: string;
   models: string[];
+  /** Local runtimes (llamafile / Hugging Face) need no API key. */
+  local?: boolean;
+  requires_key?: boolean;
+  installed?: boolean;
+  running?: boolean;
+  needs_download?: boolean;
 }
 
 // Chat
@@ -101,6 +108,18 @@ export interface AppSettings {
   providers: {
     active: string;
     priority: string[];
+    smart_default?: boolean;
+    builtin?: Record<string, {
+      name?: string;
+      base_url?: string;
+      api_key?: string;
+      default_model?: string;
+      models?: string[];
+      vision?: boolean;
+      local?: boolean;
+      [key: string]: unknown;
+    }>;
+    custom?: unknown[];
   };
   chat: {
     max_tokens: number;

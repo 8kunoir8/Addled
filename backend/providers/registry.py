@@ -14,19 +14,36 @@ def list_available() -> list[dict]:
     builtin = config.get("providers", "builtin") or {}
     custom = config.get("providers", "custom") or []
     active = config.active_provider
+    selected = config.selected_provider
+
+    local_status: dict = {}
+    try:
+        from backend.local_llm.manager import local_llm
+        local_status = local_llm.status()
+    except Exception:
+        local_status = {}
 
     result = []
     for pid, pdata in builtin.items():
-        result.append({
+        is_local = bool(pdata.get("local", False))
+        entry = {
             "id": pid,
             "name": pdata.get("name", pid),
             "is_builtin": True,
             "is_active": pid == active,
+            "is_selected": pid == selected,
             "has_key": bool(pdata.get("api_key", "")),
             "vision": pdata.get("vision", False),
             "base_url": pdata.get("base_url", ""),
             "models": pdata.get("models", []),
-        })
+            "local": is_local,
+            "requires_key": not is_local and pid != "copilot",
+        }
+        if pid == "local" and local_status:
+            entry["installed"] = bool(local_status.get("installed"))
+            entry["running"] = bool(local_status.get("running"))
+            entry["needs_download"] = not bool(local_status.get("installed"))
+        result.append(entry)
     for c in custom:
         pid = c.get("id", "unknown")
         result.append({
@@ -66,6 +83,17 @@ def get_provider(provider_id: str | None = None):
         return OllamaProvider(cfg)
     elif pid == "lmstudio":
         return LMStudioProvider(cfg)
+    elif pid == "local":
+        from backend.providers.local_provider import LocalProvider
+        return LocalProvider(cfg)
+    elif pid == "openrouter":
+        from backend.providers.openrouter_provider import OpenRouterProvider
+        return OpenRouterProvider(cfg)
+    elif pid == "huggingface":
+        from backend.providers.huggingface_local_provider import (
+            HuggingFaceLocalProvider,
+        )
+        return HuggingFaceLocalProvider(cfg)
     elif pid == "copilot":
         from backend.providers.copilot_provider import CopilotProvider
         return CopilotProvider(cfg)

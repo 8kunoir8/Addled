@@ -565,8 +565,13 @@ def _register_default_handlers():
         }
 
     async def system_get_providers(params: dict, ws) -> dict:
+        from backend.config import config
         from backend.providers.registry import list_available
-        return {"providers": list_available()}
+        return {
+            "providers": list_available(),
+            "active": config.active_provider,
+            "selected": config.selected_provider,
+        }
 
     async def system_rtk_status(params: dict, ws) -> dict:
         """Whether the RTK token-saver binary is available."""
@@ -1308,6 +1313,56 @@ def _register_default_handlers():
         from backend.browser.auto_install import approve
         return await approve(str(params.get("backend", "")))
 
+    # ---- Local model (llamafile) — ask-then-download flow -------------------
+
+    async def localllm_status(params: dict, ws) -> dict:
+        from backend.local_llm.manager import local_llm
+        data = await asyncio.to_thread(local_llm.status)
+        try:
+            data["hf"] = await asyncio.to_thread(local_llm.hf_status)
+        except Exception as exc:
+            data["hf"] = {"deps_ready": False, "error": str(exc)}
+        return data
+
+    async def localllm_install(params: dict, ws) -> dict:
+        """User approved the download — start it (resumable)."""
+        from backend.local_llm.manager import local_llm
+        local_llm.approve()
+        return await local_llm.install()
+
+    async def localllm_decline(params: dict, ws) -> dict:
+        """User said no — fall back to OpenRouter and ask for an API key."""
+        from backend.local_llm.manager import local_llm
+        return local_llm.decline()
+
+    async def localllm_start(params: dict, ws) -> dict:
+        from backend.local_llm.manager import local_llm
+        ok, problem = await local_llm.start()
+        return {"success": ok, "error": problem, "status": local_llm.status()}
+
+    async def localllm_stop(params: dict, ws) -> dict:
+        from backend.local_llm.manager import local_llm
+        await local_llm.stop()
+        return {"success": True, "status": local_llm.status()}
+
+    async def localllm_remove(params: dict, ws) -> dict:
+        from backend.local_llm.manager import local_llm
+        return await local_llm.remove()
+
+    async def localllm_hf_install(params: dict, ws) -> dict:
+        """Install the optional torch + transformers pair for HF (Local)."""
+        from backend.local_llm.manager import local_llm
+        return await local_llm.install_hf_deps()
+
+    async def hf_unload(params: dict, ws) -> dict:
+        """Free RAM by dropping the in-process Hugging Face model."""
+        from backend.providers import huggingface_local_provider as hf
+        try:
+            await asyncio.to_thread(hf.unload)
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+        return {"success": True}
+
     # ---- Skill Forge — self-extending capabilities --------------------------
 
     async def forge_create(params: dict, ws) -> dict:
@@ -1568,6 +1623,14 @@ def _register_default_handlers():
     _server.register("browser.status", browser_status)
     _server.register("browser.task", browser_task)
     _server.register("browser.installApprove", browser_install_approve)
+    _server.register("localLlm.status", localllm_status)
+    _server.register("localLlm.installApprove", localllm_install)
+    _server.register("localLlm.installDecline", localllm_decline)
+    _server.register("localLlm.start", localllm_start)
+    _server.register("localLlm.stop", localllm_stop)
+    _server.register("localLlm.remove", localllm_remove)
+    _server.register("localLlm.installHfDeps", localllm_hf_install)
+    _server.register("hf.unload", hf_unload)
 
     # Skill Forge
     _server.register("forge.create", forge_create)

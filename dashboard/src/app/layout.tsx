@@ -40,6 +40,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [desktopPrompt, setDesktopPrompt] = useState(false);
   const [browserPrompt, setBrowserPrompt] = useState<string | null>(null);
+  const [localPrompt, setLocalPrompt] = useState<any>(null);
+  const [localProgress, setLocalProgress] = useState<any>(null);
 
   // Desktop-control permission request from the backend
   useEffect(() => onNotification('desktop.permissionRequest', () => {
@@ -50,6 +52,32 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   useEffect(() => onNotification('browser.installRequest', (p: any) => {
     setBrowserPrompt(p?.backend || 'playwright');
   }), [onNotification]);
+
+  // Local model download request (ask before downloading ~2.4 GB)
+  useEffect(() => onNotification('local.llmInstallRequest', (p: any) => {
+    setLocalPrompt(p || {});
+  }), [onNotification]);
+
+  // Local model download progress
+  useEffect(() => onNotification('local.llmProgress', (p: any) => {
+    const phase = p?.phase || 'downloading';
+    if (phase === 'done') { setLocalProgress(null); return; }
+    setLocalProgress({ phase, pct: p?.pct ?? 0, detail: p?.detail || '' });
+  }), [onNotification]);
+
+  // The prompt must survive a missed broadcast (e.g. app started before the
+  // dashboard was open) — re-check status whenever we connect.
+  useEffect(() => {
+    if (wsState !== 'connected') return;
+    send('localLlm.status', {}).then((r: any) => {
+      if (r?.should_ask) {
+        setLocalPrompt({ size_mb: r.size_mb, model_file: r.model_file });
+      }
+      if (r?.downloading) {
+        setLocalProgress({ phase: 'downloading', pct: r.progress ?? 0, detail: r.detail || '' });
+      }
+    }).catch(() => {});
+  }, [wsState, send]);
 
   // Backend-initiated navigation (e.g. character right-click → Settings)
   useEffect(() => onNotification('ui.navigate', (p: any) => {
@@ -155,6 +183,55 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 Not now
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Local model download prompt — nothing downloads without consent */}
+        {localPrompt && (
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[#8957e5] bg-[#161b22] p-4 shadow-xl">
+            <p className="text-sm font-semibold text-[#e8eaed]">🧠 Download the local AI model?</p>
+            <p className="text-xs text-[#8b949e] mt-1">
+              Addled can run{' '}
+              <span className="font-mono text-[#58a6ff]">{localPrompt.model_file || 'a local model'}</span>{' '}
+              on this PC with llamafile — no API key and it works offline. About{' '}
+              {localPrompt.size_mb ? `${(localPrompt.size_mb / 1024).toFixed(1)} GB` : '~2.4 GB'} to download.
+            </p>
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={() => { send('localLlm.installApprove', {}).catch(() => {}); setLocalPrompt(null); }}
+                className="flex-1 bg-[#3380FF] hover:bg-[#4d94ff] text-white rounded-md py-1.5 text-sm font-medium">
+                Download
+              </button>
+              <button
+                onClick={() => { send('localLlm.installDecline', {}).catch(() => {}); setLocalPrompt(null); }}
+                className="flex-1 bg-[#21262d] hover:bg-[#30363d] text-[#8b949e] rounded-md py-1.5 text-sm font-medium">
+                No thanks
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Local model download progress */}
+        {localProgress && (
+          <div className="fixed bottom-4 right-4 z-40 w-72 rounded-lg border border-[#30363d] bg-[#161b22] p-3 shadow-xl">
+            <p className="text-xs font-semibold text-[#e8eaed]">
+              {localProgress.phase === 'failed' ? '⚠ Download failed'
+                : localProgress.phase === 'cancelled' ? 'Download cancelled'
+                : '⬇ Downloading local model'}
+            </p>
+            <div className="mt-2 h-1.5 w-full rounded bg-[#21262d] overflow-hidden">
+              <div className="h-full bg-[#3380FF] transition-all"
+                   style={{ width: `${Math.min(100, Math.max(0, localProgress.pct))}%` }} />
+            </div>
+            <p className="mt-1.5 text-[10px] text-[#8b949e] truncate">
+              {localProgress.detail} · {Math.round(localProgress.pct)}%
+            </p>
+            {(localProgress.phase === 'failed' || localProgress.phase === 'cancelled') && (
+              <button onClick={() => setLocalProgress(null)}
+                      className="mt-2 text-[10px] text-[#8b949e] hover:text-[#e8eaed]">
+                Dismiss
+              </button>
+            )}
           </div>
         )}
       </body>
