@@ -239,6 +239,47 @@ def run():
         other = match.find("")
         check("an empty task matches nothing", other == [], str(other))
         check("describe() is safe to call", isinstance(store.describe(), dict), "")
+
+        # ---- 14. the tool-loop hook really reaches the store --------------
+        # Everything above tests the store; this tests that a finished turn is
+        # wired to it, which a rename or a typo at the call site would break
+        # silently.
+        from backend.skills.tool_loop import _learn_procedure
+        for sop in store.list_all():
+            store.delete(sop["id"])
+        _learn_procedure(
+            [{"role": "user", "content": "read the config then write the new value"}],
+            [{"tool": "read_file", "success": True},
+             {"tool": "write_file", "success": True}])
+        check("a successful turn leaves a procedure behind",
+              len(store.list_all()) == 1,
+              f"{len(store.list_all())} stored — the hook is not reaching the store")
+
+        for sop in store.list_all():
+            store.delete(sop["id"])
+        _learn_procedure([{"role": "user", "content": "read then write"}],
+                         [{"tool": "read_file", "success": False},
+                          {"tool": "write_file", "success": False}])
+        check("a failed turn leaves nothing behind", store.list_all() == [], "")
+
+        _learn_procedure([], [])
+        check("an empty turn is harmless", store.list_all() == [], "")
+        _learn_procedure([{"role": "user", "content": "x"}],
+                         [{"tool": "a", "success": True}])
+        check("a single-tool turn is not recorded", store.list_all() == [], "")
+
+        # ---- 15. the prompt block is wired into the chat pipeline ---------
+        source = open(os.path.join(ROOT, "backend", "ws_server.py"),
+                      encoding="utf-8").read()
+        check("the chat pipeline asks for a procedure block",
+              "build_sop_context" in source,
+              "nothing in the pipeline calls build_sop_context, so no procedure "
+              "would ever reach the model")
+        check("and the tool loop asks for learning",
+              "_learn_procedure" in source
+              or "_learn_procedure" in open(
+                  os.path.join(ROOT, "backend", "skills", "tool_loop.py"),
+                  encoding="utf-8").read(), "")
     finally:
         config._data["sop"] = original_sop
         shutil.rmtree(tmp, ignore_errors=True)
