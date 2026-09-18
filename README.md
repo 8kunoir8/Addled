@@ -1,7 +1,7 @@
 # Addled
 
 > An AI desktop companion with a floating animated character, full web dashboard,  
-> voice interaction (wake word + speech), 30 built-in skills, self-extending  
+> voice interaction (wake word + speech), 60 built-in skills, self-extending  
 > capability forge, 10 AI provider backends, live screen awareness, long-term  
 > memory, and a full safety suite.  
 > Built with Python 3.14 + PyQt6 + Electron 28 + Next.js 16.
@@ -53,7 +53,7 @@ launch.bat
 │           Electron Shell                │
 │  ┌───────────────┐  ┌────────────────┐  │
 │  │Next.js Dashboard│  │ Bot Bridges    │  │
-│  │10 pages        │  │Telegram/WA/    │  │
+│  │13 pages        │  │Telegram/WA/    │  │
 │  │Chat/Goals/Code │  │ Discord        │  │
 │  │Swarm/Browser/  │  │                │  │
 │  │Calendar/Bots/  │  │                │  │
@@ -64,8 +64,8 @@ launch.bat
 │          ▼                   ▼           │
 │  ┌────────────────────────────────────┐  │
 │  │      Python Backend Service        │  │
-│  │  Engine • 36 WS Handlers           │  │
-│  │  30 Skills • Skill Forge           │  │
+│  │  Engine • 160 WS Handlers          │  │
+│  │  60 Skills • Skill Forge           │  │
 │  │  10 AI Providers • Goals • Code    │  │
 │  │  Swarm • Calendar • Email • Browser│  │
 │  │  Character • Safety • Memory •     │  │
@@ -87,7 +87,7 @@ launch.bat
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
 | Desktop Shell | Electron 28, system tray, auto-updater, backend auto-respawn | ✅ Built |
 | Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
-| Communication | WebSocket JSON-RPC 2.0 (126 handlers) | ✅ Built |
+| Communication | WebSocket JSON-RPC 2.0 (160 handlers) | ✅ Built |
 
 ---
 
@@ -205,7 +205,7 @@ not per server, and a *Trusted* switch on the server skips the prompt. A server
 that is missing, slow or crashed records an error and returns a readable tool
 failure rather than hanging the conversation.
 
-### 🛠️ 56 Built-in Skills (Provider-Agnostic)
+### 🛠️ 60 Built-in Skills (Provider-Agnostic)
 All 10 AI providers can invoke any skill — no provider lock-in.
 
 | Category | Skills |
@@ -223,6 +223,10 @@ All 10 AI providers can invoke any skill — no provider lock-in.
 
 Plus the MCP-bridged skills from any connected server, registered dynamically as `mcp__<server>__<tool>`.
 
+The table above groups them by area rather than listing every one. **Settings → Guide**
+lists the live catalogue — all 60, with each skill's own description and whether it is
+currently switched on.
+
 ### 🔨 Skill Forge — Self-Extending Agent
 When the agent encounters a task it can't handle, it automatically:
 1. **Searches** the web for a solution
@@ -235,13 +239,13 @@ When the agent encounters a task it can't handle, it automatically:
 LLM-based goal decomposition into sequential steps, background execution with checkpointing, retry with fallback, cancellation, JSON persistence. Wired into engine tick for autonomous processing.
 
 ### 💻 Code Engine
-Workspace folder binding with file tree, language detection (40+ languages), unified diff generation/apply/revert, LLM-powered code editing with diff preview.
+Workspace folder binding with a real editor (tabs, syntax highlighting, save with Ctrl+S, workspace-wide search), language detection for 32 languages across 42 extensions, unified diff generation/apply/revert, and LLM-powered code editing where you review the diff before it is applied. Every read and write is **confined to the bound folder** — a path that tries to leave it is refused, including for remote callers.
 
 ### 🐝 Agent Swarm
 7 agent types (coder, writer, analyst, planner, researcher, devops, general) with unique system prompts and tool access. Parallel execution via asyncio. Dashboard spawn/stop/task controls.
 
 ### 🌐 Browser Automation
-Playwright-powered Chromium browser when installed — navigate, click, type, extract text, screenshot, history navigation. **Without Playwright, navigation automatically falls back to a lightweight HTTP fetch** (browser-like headers, HTML→text), and blocked sites are re-discovered through search results. Web search uses DuckDuckGo with automatic Bing fallback (some networks block DDG) and snippet extraction.
+Playwright-powered Chromium browser when installed — navigate, click, type, extract text, screenshot, history navigation. **Without Playwright, navigation automatically falls back to a lightweight HTTP fetch** (browser-like headers, HTML→text), and blocked sites are re-discovered through search results. Web search asks Google News RSS and the MediaWiki API first, then Bing News RSS, then scrapes Bing and DuckDuckGo with a relevance gate, and falls back to the browser — so it keeps working on networks where a single engine is unreachable.
 
 ### 📅 Calendar, Tasks & Scheduling
 Local calendar with Google Calendar OAuth sync — and a **tick-driven task scheduler** (no cron/APScheduler): one-shot and recurring tasks (daily / weekly / monthly) with `notify` (reminder: bubble + spoken TTS) and `chat` (run a prompt later) actions. Calendar events fire reminders before they start; relative dates like "tomorrow 3pm" are normalized on add. Tasks are created from the **Calendar page** (day-click sidebar with edit/pause/delete), from **chat** via the `task_schedule` skill, and from **voice** — including a heuristic parser fallback that works when the LLM provider is down. Memory-maintenance housekeeping jobs run through the same scheduler. IMAP/SMTP email — fetch unread, send, search.
@@ -255,7 +259,7 @@ A persistent **mood & emotion engine** (valence + energy, decays over time) driv
 ### � Remote access (Tailscale)
 Reach Addled from your phone or another machine, in a browser, over Tailscale — status, sign-in and `tailscale serve` sharing are all managed from the **Remote** page, which can also run the official Tailscale installer when you ask it to (nothing installs on its own).
 
-The WebSocket API has **no authentication of its own**, and several of its 138 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
+The WebSocket API has **no authentication of its own**, and several of its 160 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
 
 - It serves the login page and the dashboard, and only bridges a WebSocket to `127.0.0.1:9876` **after** validating a session. It binds loopback only; Tailscale terminates TLS and proxies to it, so the browser gets a real `https://<machine>.<tailnet>.ts.net` URL and `wss://` works without Addled handling a certificate.
 - The **password is scrypt-hashed** (`settings.json`), sessions are **in-memory only** (a restart logs everyone out), login attempts are **rate-limited per address**, and the session cookie is `HttpOnly` + `SameSite=Lax` (+ `Secure` over HTTPS).
@@ -283,20 +287,20 @@ A **Karpathy-pattern wiki** instead of another chat transcript: markdown pages u
 **Voice input**: wake word → command → chat → spoken reply. **Silero VAD** segments real speech for turn detection (RMS fallback). STT: **faster-whisper** (local, offline; tiny/small selectable) with **SenseVoice** auto-activating when funasr is available. **TTS**: **Kokoro** neural voices fully offline (local 82M ONNX) with **edge-tts** online fallback — engine selectable in Settings → Voice, with an **Auto TTS toggle** so dashboard chat and character prompts speak replies out loud. **Voice pickers** list what is actually available rather than asking you to type a voice name: the installed Kokoro pack is read straight out of `voices-v1.0.bin` (54 voices, offline, without loading the model) and the Edge voices come from the service, cached for a day with a curated offline fallback. Both are grouped by language and follow the **Language** setting, and where an engine simply cannot speak the chosen language — Kokoro has no Indonesian voice — Addled says so and routes to one that can. Speech input is local & offline; Edge TTS is the only network-dependent part. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
 
 ### � Skills & Market
-33 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
+60 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
 
 ### 🌐 Browser & Desktop
 Four browser backends with **task-based routing**: your running Chrome/Edge via CDP (read-only by default, opt-in), Playwright's own Chromium, the **browser-use** AI framework for open-ended tasks (used only when installed AND an LLM is available), and an always-on HTTP fallback. Missing backends can **auto-install on demand** (`ask` / `off` / `auto` policy with a dashboard approval banner). **Desktop control** (mouse/keyboard) is first-class but off by default: session grants via dashboard prompt, screen-bounds checks, typing caps, hotkey whitelist, pyautogui FAILSAFE, and egress logging.
 
 ### �📦 Installer & Auto-Update
-Windows NSIS + portable installer via electron-builder. **Weekly auto-update** against the latest GitHub release (version discovery via the GitHub API; delta updates via latest.yml + blockmap). If the repo is private, the check degrades gracefully and resumes automatically once it's public. Manual "Check for Updates" in the tray. First-run PyQt6 onboarding wizard (6 steps).
+Windows NSIS + portable installer via electron-builder. **Weekly auto-update** against the latest GitHub release (version discovery via the GitHub API; delta updates via latest.yml + blockmap). If the repo is private, the check degrades gracefully and resumes automatically once it's public. Manual "Check for Updates" in the tray. First-run PyQt6 onboarding wizard (7 steps).
 
 ---
 
-## WebSocket API (126 handlers)
+## WebSocket API (160 handlers)
 
 ### Core
-`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
+`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `guide.status` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
 
 ### Goals
 `goal.create` `goal.list` `goal.start` `goal.cancel`
@@ -361,7 +365,7 @@ Addled/
 │   ├── main.py              # Entry point + onboarding + single-instance lock + kill switch + voice
 │   ├── config.py            # Portable JSON settings
 │   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
-│   ├── ws_server.py         # 126 JSON-RPC 2.0 handlers + server pushes
+│   ├── ws_server.py         # 160 JSON-RPC 2.0 handlers + server pushes
 │   ├── providers/           # 10 AI providers (base + registry + selector + router)
 │   │                        #   + live model catalog + local Florence-2 vision
 │   ├── mcp_client/          # MCP client (stdio + streamable HTTP) → tools as skills
@@ -370,7 +374,7 @@ Addled/
 │   ├── local_models/        # Resumable model downloads + storage paths
 │   ├── skills/              # Skill registry + tool loop + forge
 │   ├── character/           # States, shapes, movement, animation, avatar, particles
-│   ├── actions/             # 55+ action executor (input, windows, files, system, terminal, excel)
+│   ├── actions/             # 39 actions (input, windows, files, system, terminal, excel)
 │   ├── safety/              # Prompt guard, presence guard, destruction gate, kill switch,
 │   │                       #   clipboard filter, egress monitor, privacy zones
 │   ├── perception/          # 3-tier observer (light/medium/deep) + snapshot hook
@@ -382,7 +386,7 @@ Addled/
 │   ├── code/                # Diff engine (apply with backup), language detection
 │   ├── swarm/               # Agent orchestrator
 │   ├── integrations/        # Calendar (Google OAuth), Email (IMAP/SMTP)
-│   ├── onboarding/          # PyQt6 setup wizard (6 pages)
+│   ├── onboarding/          # PyQt6 setup wizard (7 pages)
 │   └── cognition/           # Decision engine
 ├── dashboard/
 │   └── src/app/
@@ -439,7 +443,8 @@ gh release upload vX.Y.Z dist\Addled-X.Y.Z-x64.exe dist\Addled-X.Y.Z-portable.ex
 gh release edit vX.Y.Z --draft=false
 ```
 > Upload small assets first, then the two large exes (more reliable).
-> The auto-updater polls GitHub Releases every 4 hours.
+> The auto-updater checks GitHub Releases weekly, with a daily gate re-check and a
+> manual check from the tray.
 
 > **Self-contained**: the installer bundles Python 3.14.7 + all core
 > dependencies — no Python install needed on the target PC.

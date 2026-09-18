@@ -2051,6 +2051,168 @@ def _register_default_handlers():
                               f"{MAX_EDIT_BYTES // 1000} kB editor limit.")}
         return apply_content(str(full), str(content), backup=True, create=True)
 
+    async def guide_status(params: dict, ws) -> dict:
+        """Which features are actually usable on this machine.
+
+        The Guide page shows a "needs setup" badge on each feature, and a badge
+        has to reflect this machine rather than a guess. Every check below is a
+        real import or a real look on PATH, not a version comparison or a
+        hopeful default.
+
+        Deliberately nothing but booleans and integers, at a flat top level: no
+        strings, no paths, no names. This method is reachable from a remote
+        session, so it must not become another way to read configuration back
+        out of the machine. `scripts/check_guide.py` asserts that property, and
+        also that every flag the Guide page references exists here — so a typo
+        in the dashboard fails the suite instead of silently showing a badge
+        that never appears.
+        """
+        import importlib.util
+        import shutil
+
+        from backend.config import config
+
+        def module_present(name: str) -> bool:
+            try:
+                return importlib.util.find_spec(name) is not None
+            except Exception:
+                return False
+
+        def on_path(name: str) -> bool:
+            try:
+                return shutil.which(name) is not None
+            except Exception:
+                return False
+
+        def setting(section: str, key: str, default=None):
+            try:
+                return config.get(section, key, default=default)
+            except Exception:
+                return default
+
+        out: dict = {}
+
+        # ---- models and providers -------------------------------------
+        providers_total = 0
+        providers_configured = 0
+        local_installed = local_running = False
+        try:
+            from backend.providers.registry import list_available
+            for entry in list_available():
+                providers_total += 1
+                if entry.get("has_key"):
+                    providers_configured += 1
+                if entry.get("local"):
+                    local_installed = bool(entry.get("installed"))
+                    local_running = bool(entry.get("running"))
+        except Exception:
+            pass
+        out["providers_total"] = providers_total
+        out["providers_configured"] = providers_configured
+        out["local_model_installed"] = local_installed
+        out["local_model_running"] = local_running
+        out["any_model_ready"] = bool(providers_configured or local_running)
+        out["smart_routing_on"] = bool(setting("providers", "auto_route", False))
+
+        # ---- skills --------------------------------------------------
+        try:
+            from backend.skills.registry import skill_registry
+            out["skills_total"] = len(skill_registry.list_all())
+        except Exception:
+            out["skills_total"] = 0
+
+        # ---- workspace confinement -----------------------------------
+        try:
+            from backend.workspace import describe
+            view = describe()
+            out["workspace_configured"] = bool(view.get("configured"))
+            out["workspace_enforced"] = bool(view.get("enforced"))
+        except Exception:
+            out["workspace_configured"] = False
+            out["workspace_enforced"] = False
+
+        # ---- MCP -----------------------------------------------------
+        mcp_enabled = False
+        mcp_servers = mcp_connected = mcp_tools = mcp_untrusted = 0
+        try:
+            from backend.mcp_client.manager import mcp_manager
+            view = mcp_manager.status()
+            servers = view.get("servers") or []
+            mcp_enabled = bool(view.get("enabled"))
+            mcp_servers = len(servers)
+            mcp_tools = int(view.get("tool_count") or 0)
+            for server in servers:
+                if str(server.get("state")) == "connected":
+                    mcp_connected += 1
+                if not server.get("trusted"):
+                    mcp_untrusted += 1
+        except Exception:
+            pass
+        out["mcp_enabled"] = mcp_enabled
+        out["mcp_servers"] = mcp_servers
+        out["mcp_connected"] = mcp_connected
+        out["mcp_tools"] = mcp_tools
+        out["mcp_untrusted"] = mcp_untrusted
+
+        # ---- desktop control -----------------------------------------
+        out["desktop_input_allowed"] = bool(setting("desktop", "allow_input", False))
+        out["desktop_approval_required"] = bool(
+            setting("desktop", "require_session_approval", True))
+
+        # ---- remote access -------------------------------------------
+        out["remote_enabled"] = bool(setting("remote", "enabled", False))
+        tailscale = False
+        try:
+            from backend.tailscale.manager import installed as ts_installed
+            tailscale = bool(ts_installed())
+        except Exception:
+            pass
+        out["tailscale_installed"] = tailscale
+
+        # ---- runtimes the optional tools need ------------------------
+        out["browser_automation"] = module_present("playwright")
+        out["node_available"] = on_path("node")
+        out["npx_available"] = on_path("npx")
+        out["uvx_available"] = on_path("uvx")
+
+        # ---- voice ---------------------------------------------------
+        # Mirrors what the engines actually import, so the flag cannot claim
+        # voice works when the import would fail.
+        tts_engine = str(setting("voice", "tts_engine", "edge") or "edge")
+        tts = False
+        try:
+            from backend.voice.tts import engine_available
+            tts = bool(engine_available(tts_engine))
+        except Exception:
+            pass
+        out["tts_available"] = tts
+        out["stt_available"] = (module_present("sounddevice")
+                                and module_present("faster_whisper"))
+        out["stt_sensevoice"] = module_present("funasr")
+
+        # ---- bots ----------------------------------------------------
+        bots_ready = 0
+        try:
+            from backend.bots import manager as bots
+            platforms = (bots.status() or {}).get("platforms") or {}
+            for name in ("telegram", "discord", "whatsapp"):
+                info = platforms.get(name) or {}
+                ready = bool(info.get("ready"))
+                out[f"{name}_ready"] = ready
+                out[f"{name}_configured"] = bool(info.get("has_token")) or (
+                    name == "whatsapp" and ready)
+                out[f"{name}_running"] = bool(info.get("running"))
+                if ready:
+                    bots_ready += 1
+        except Exception:
+            for name in ("telegram", "discord", "whatsapp"):
+                out[f"{name}_ready"] = False
+                out[f"{name}_configured"] = False
+                out[f"{name}_running"] = False
+        out["bots_ready"] = bots_ready
+
+        return out
+
     # ---- Phase 5: Swarm Orchestrator -----------------------------------------
 
     async def swarm_spawn(params: dict, ws) -> dict:
@@ -2678,6 +2840,9 @@ def _register_default_handlers():
     _server.register("code.apply", code_apply)
     _server.register("code.write", code_write)
     _server.register("code.grep", code_grep)
+
+    # Guide page: which features are usable here (no strings, no secrets)
+    _server.register("guide.status", guide_status)
 
     # Phase 5 Swarm orchestrator
     _server.register("swarm.spawn", swarm_spawn)

@@ -3,13 +3,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useWS } from '@/lib/useWS';
+import { APP_VERSION } from '@/lib/guide-content';
+import GuideSection from './guide-section';
 
 type SettingsData = Record<string, any>;
 
 const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
   notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️', guidelines: '📐',
-  mcp: '🧰', wiki: '📖', workspace: '📁', remote: '📡',
+  mcp: '🧰', wiki: '📖', workspace: '📁', remote: '📡', guide: '📘',
 };
 
 export default function SettingsPage() {
@@ -24,6 +26,14 @@ export default function SettingsPage() {
       send('settings.get', {}).then(r => setSettings(r?.settings || {})).catch(() => {});
     }
   }, [wsState, send]);
+
+  // Deep links: the Guide, and any error message elsewhere, links to
+  // /settings?section=<tab>. Read from the URL rather than useSearchParams so
+  // the static export does not need a Suspense boundary.
+  useEffect(() => {
+    const wanted = new URLSearchParams(window.location.search).get('section');
+    if (wanted && SECTION_ICONS[wanted]) setActiveSection(wanted);
+  }, []);
 
   const updateSetting = async (section: string, key: string, value: any) => {
     if (wsState !== 'connected') return;
@@ -40,7 +50,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['providers','character','voice','workspace','safety','remote','notifications','observation','memory','wiki','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
+  const sections = ['guide','providers','character','voice','workspace','safety','remote','notifications','observation','memory','wiki','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -60,6 +70,7 @@ export default function SettingsPage() {
       </div>
       <div className="flex-1 overflow-y-auto p-6">
         <h2 className="text-lg font-semibold mb-6">{SECTION_ICONS[activeSection]} {activeSection.charAt(0).toUpperCase()+activeSection.slice(1)}</h2>
+        {activeSection==='guide'&&<GuideSection send={send} connected={wsState==='connected'}/>}
         {activeSection==='providers'&&<ProvidersSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='character'&&<CharacterSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='character'&&<SkinsSection send={send} connected={wsState==='connected'}/>}
@@ -1300,7 +1311,7 @@ function AppearanceSection() {
 
 function AboutSection() {
   return <div className="space-y-4">
-    <div className="text-center py-8"><div className="text-4xl mb-3">△</div><h3 className="text-lg font-semibold">Addled</h3><p className="text-sm text-[#8b949e] mt-1">AI Desktop Companion</p><p className="text-xs text-[#484f58] mt-1">Version 1.0.0</p></div>
+    <div className="text-center py-8"><div className="text-4xl mb-3">△</div><h3 className="text-lg font-semibold">Addled</h3><p className="text-sm text-[#8b949e] mt-1">AI Desktop Companion</p><p className="text-xs text-[#484f58] mt-1">Version {APP_VERSION}</p></div>
     <div className="space-y-1">
       <SettingRow label="Repository"><a href="https://github.com/8kunoir8/Addled" target="_blank" rel="noopener noreferrer" className="text-sm text-[#3380FF] hover:underline">github.com/8kunoir8/Addled</a></SettingRow>
       <SettingRow label="License"><span className="text-sm text-[#8b949e]">MIT</span></SettingRow>

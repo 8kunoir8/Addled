@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -220,8 +221,19 @@ async def run():
         "enabled": True, "hostname": "", "auto_share": False,
         "serve_port": 443, "funnel": False, "poll_seconds": 20, "auth_key": "",
     }
+    # A free port rather than the real 9878. `apply_policy` starts the gateway
+    # before it will share anything, so a running Addled holding the real port
+    # made this suite fail while the app was open — a test that fails because
+    # the product is running is a test that lies. Nothing here asserts the port
+    # number, only that the gateway came up.
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", 0))
+        free_port = int(probe.getsockname()[1])
+    finally:
+        probe.close()
     config._data["remote"] = {
-        "enabled": True, "port": 9878, "password_hash": "",
+        "enabled": True, "port": free_port, "password_hash": "",
         "session_hours": 12, "idle_timeout_minutes": 60, "max_sessions": 8,
         "allow_shell": False, "allow_desktop_input": False,
         "allow_funnel": False, "trusted_origins": [],
