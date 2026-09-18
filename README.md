@@ -253,7 +253,7 @@ Telegram (grammY with 6 commands), WhatsApp (Baileys multi-device with QR pairin
 A persistent **mood & emotion engine** (valence + energy, decays over time) drives the character's visual tint, movement energy and **voice emotion** (Kokoro speech speed follows the mood). **Barge-in**: start talking while Addled speaks and it stops mid-sentence. **Initiative cadence**: return greetings + a daily check-in. An **episodic timeline** journals every day (nightly summaries) and a learned **user model** (preferences, rituals, hours) is injected into every chat — the agent references its own past naturally. **Project awareness**: index your code workspace (semantic search, chat injection). **Predictive proactivity**: weekly rhythms mined from tasks/calendar → gentle suggestions. **Reflection loop**: per-skill telemetry + weekly self-review.
 
 ### � Remote access (Tailscale)
-Reach Addled from your phone or another machine, in a browser, over Tailscale — it manages an existing Tailscale install (status, sign-in, `tailscale serve` sharing) and never installs Tailscale itself.
+Reach Addled from your phone or another machine, in a browser, over Tailscale — status, sign-in and `tailscale serve` sharing are all managed from the **Remote** page, which can also run the official Tailscale installer when you ask it to (nothing installs on its own).
 
 The WebSocket API has **no authentication of its own**, and several of its 138 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
 

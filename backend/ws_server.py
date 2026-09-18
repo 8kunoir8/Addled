@@ -1517,6 +1517,18 @@ def _register_default_handlers():
             log.debug("remote.status tailscale part failed: %s", e)
             out["tailscale"] = {"installed": False, "blockers": [str(e)]}
             out["remote_url"] = ""
+        # Whether to offer the install button. A remote session must not start
+        # an elevated install on a machine nobody is sitting at.
+        out["remote_session"] = bool(
+            (getattr(ws, "addled", None) or {}).get("remote"))
+        try:
+            from backend.tailscale.installer import installer
+            out["installer"] = installer.status()
+        except Exception as e:
+            log.debug("remote.status installer part failed: %s", e)
+            out["installer"] = {"phase": "idle", "running": False,
+                                "winget": False, "preferred": "download",
+                                "can_install": False}
         # Never send the gateway's own bind address as if it were the URL.
         out.setdefault("remote_url", "")
         return out
@@ -1613,6 +1625,30 @@ def _register_default_handlers():
     async def tailscale_disable_serve(params: dict, ws) -> dict:
         from backend.tailscale.manager import tailscale
         return await tailscale.disable_serve(funnel=bool(params.get("funnel")))
+
+    async def tailscale_install_status(params: dict, ws) -> dict:
+        from backend.tailscale.installer import installer
+        return {"success": True, **installer.status()}
+
+    async def tailscale_install(params: dict, ws) -> dict:
+        """Run the official Tailscale installer, on the user's click.
+
+        The remote check is the important part: the install raises a UAC prompt
+        on this machine, and nobody is sitting at it to accept a prompt raised
+        from a remote session. This also refuses unless it is a deliberate call —
+        nothing installs on its own.
+        """
+        from backend.tailscale.installer import installer
+        remote = bool((getattr(ws, "addled", None) or {}).get("remote"))
+        method = str(params.get("method") or "")
+        if not method:
+            try:
+                from backend.config import config
+                method = str(config.get("tailscale", "install_method",
+                                        default="auto") or "auto")
+            except Exception:  # noqa: BLE001
+                method = "auto"
+        return await installer.install(method=method, remote=remote)
 
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
@@ -2584,6 +2620,8 @@ def _register_default_handlers():
     _server.register("tailscale.down", tailscale_down)
     _server.register("tailscale.enableServe", tailscale_enable_serve)
     _server.register("tailscale.disableServe", tailscale_disable_serve)
+    _server.register("tailscale.installStatus", tailscale_install_status)
+    _server.register("tailscale.install", tailscale_install)
 
     # Sprite skins
     _server.register("character.skinsList", character_skins_list)

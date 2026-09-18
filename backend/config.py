@@ -394,6 +394,9 @@ DEFAULT_SETTINGS: dict = {
         "serve_port": 443,
         "funnel": False,
         "poll_seconds": 20,
+        # How to install Tailscale when the user asks: "auto" uses winget when it
+        # is available and the official download otherwise.
+        "install_method": "auto",
         # Optional pre-auth key for a headless node. Never returned to the UI.
         "auth_key": "",
     },

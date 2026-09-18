@@ -595,6 +595,14 @@ def main():
     except Exception as e:
         log.debug("Tailscale shutdown: %s", e)
 
+    # Stop a half-finished Tailscale install from outliving the app
+    try:
+        from backend.tailscale.installer import installer
+        fut = asyncio.run_coroutine_threadsafe(installer.stop(), _ws_loop)
+        fut.result(timeout=10)
+    except Exception as e:
+        log.debug("Tailscale installer shutdown: %s", e)
+
     # Summarize the session into long-term memory before the loops stop
     try:
         from backend.memory.session_summary import summarize_session

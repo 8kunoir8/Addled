@@ -968,8 +968,16 @@ function RemoteSection({ settings, update, saving, status }: any) {
     <Toggle label="Publish to the public internet" desc="Allow Tailscale Funnel. Anyone with the URL reaches the login page, not just your tailnet" group="remote" cfg={r} skey="allow_funnel"/>
 
     <div className="border-t border-[#30363d] my-3"/>
-    <p className="text-xs text-[#8b949e] mb-2">Addled manages an existing Tailscale install — status, sign-in and sharing. It never installs Tailscale itself.</p>
+    <p className="text-xs text-[#8b949e] mb-2">Addled manages Tailscale — status, sign-in and sharing — and can run the official installer when you press the button on the Remote page. Nothing installs on its own.</p>
     <Toggle label="Manage Tailscale" desc="Read status and reconcile the share on startup" group="tailscale" cfg={t} skey="enabled"/>
+    <SettingRow label="Install method" description="winget is the vendor's own published package; the download is checked against Tailscale's signature before it is run.">
+      <select value={t.install_method||'auto'} onChange={e=>update('tailscale','install_method',e.target.value)}
+        className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]">
+        <option value="auto">Automatic</option>
+        <option value="winget">winget</option>
+        <option value="download">Download from tailscale.com</option>
+      </select>
+    </SettingRow>
     <SettingRow label="Node name" description="The name this machine takes on your tailnet. Blank uses the computer's name.">
       <input type="text" value={t.hostname||''} placeholder="addled"
         onChange={e=>update('tailscale','hostname',e.target.value)}

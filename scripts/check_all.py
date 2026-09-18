@@ -27,6 +27,7 @@ SUITES = [
     "check_remote_gateway.py",
     "check_remote_policy.py",
     "check_tailscale.py",
+    "check_tailscale_install.py",
     "check_wiring.py",
     "check_routing.py",
     "check_mcp.py",

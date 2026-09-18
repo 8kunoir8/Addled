@@ -39,6 +39,19 @@ interface Tailscale {
   cli?: string;
 }
 
+interface Installer {
+  phase?: string;
+  pct?: number;
+  detail?: string;
+  error?: string;
+  method?: string;
+  preferred?: string;
+  running?: boolean;
+  installed?: boolean;
+  winget?: boolean;
+  can_install?: boolean;
+}
+
 interface RemoteStatus {
   enabled?: boolean;
   running?: boolean;
@@ -50,9 +63,11 @@ interface RemoteStatus {
   bridges?: number;
   dashboard_found?: boolean;
   remote_url?: string;
+  remote_session?: boolean;
   blockers?: string[];
   error?: string;
   tailscale?: Tailscale;
+  installer?: Installer;
 }
 
 const DOT = (tone: 'ok' | 'warn' | 'off') =>
@@ -92,6 +107,11 @@ export default function RemotePage() {
   const [authKey, setAuthKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [loginUrl, setLoginUrl] = useState('');
+  const [confirmInstall, setConfirmInstall] = useState(false);
+  const [installPhase, setInstallPhase] = useState('');
+  const [installPct, setInstallPct] = useState(0);
+  const [installDetail, setInstallDetail] = useState('');
+  const [installError, setInstallError] = useState('');
 
   const load = useCallback(async () => {
     if (wsState !== 'connected') return;
@@ -124,6 +144,29 @@ export default function RemotePage() {
   }), [onNotification]);
   useEffect(() => onNotification('tailscale.status', () => { load(); }), [load, onNotification]);
 
+  // The install runs in the background on the backend, so progress arrives as a
+  // push rather than as the reply to the click that started it.
+  useEffect(() => onNotification('tailscale.installProgress', (p: any) => {
+    if (!p) return;
+    setInstallPhase(p.phase || '');
+    setInstallPct(p.pct ?? 0);
+    setInstallDetail(p.detail || '');
+    if (p.phase === 'failed') setInstallError(p.error || 'The install failed.');
+    if (p.phase === 'done') { setConfirmInstall(false); setInstallError(''); }
+  }), [onNotification]);
+
+  // A page opened mid-install should show where things got to.
+  const installState = status?.installer;
+  useEffect(() => {
+    if (!installState?.phase) return;
+    setInstallPhase(installState.phase);
+    setInstallPct(installState.pct ?? 0);
+    setInstallDetail(installState.detail || '');
+    if (installState.phase === 'failed') {
+      setInstallError(installState.error || 'The install failed.');
+    }
+  }, [installState?.phase, installState?.pct, installState?.detail, installState?.error]);
+
   const act = async (label: string, method: string, params?: any) => {
     setBusy(label); setError(''); setNote('');
     try {
@@ -152,10 +195,34 @@ export default function RemotePage() {
     if (r?.password) setFreshPassword(r.password);
   };
 
+  const startInstall = async () => {
+    setInstallError('');
+    setInstallPhase('checking');
+    setInstallPct(0);
+    setInstallDetail('');
+    setConfirmInstall(false);
+    try {
+      const r = await send('tailscale.install', {});
+      if (r && r.success === false) {
+        setInstallError(r.error || 'Could not start the install.');
+        setInstallPhase('');
+      }
+    } catch (e: any) {
+      setInstallError(e.message);
+      setInstallPhase('');
+    }
+    load();
+  };
+
   const ts = status?.tailscale || {};
   const serve = ts.serve || {};
   const blockers: string[] = [...(status?.blockers || []), ...(ts.blockers || [])];
   const url = status?.remote_url || serve.url || '';
+  const installer = status?.installer || {};
+  const isRemoteSession = status?.remote_session === true;
+  const installUsesWinget = installer.preferred === 'winget';
+  const installing = !!installer.running ||
+    ['checking', 'downloading', 'verifying', 'launching', 'waiting'].includes(installPhase);
 
   const stateTone: 'ok' | 'warn' | 'off' =
     status?.running && serve.configured ? 'ok'
@@ -327,12 +394,76 @@ export default function RemotePage() {
         )}
 
         {!ts.installed && (
-          <div className="py-3 text-xs text-[#8b949e]">
-            Addled manages Tailscale but does not install it — that needs admin
-            rights and a background service, so it stays your decision.{' '}
-            <a href="https://tailscale.com/download/windows" target="_blank" rel="noreferrer"
-               className="text-[#3380FF] hover:underline">Download Tailscale</a>,
-            then reopen this page.
+          <div className="py-3">
+            {installing ? (
+              <>
+                <div className="text-xs text-[#8b949e] mb-2">{installDetail || 'Working…'}</div>
+                <div className="h-1.5 w-full bg-[#21262d] rounded overflow-hidden">
+                  <div className="h-full bg-[#1f6feb] transition-all"
+                       style={{ width: `${installPct}%` }} />
+                </div>
+                <div className="text-xs text-[#8b949e] mt-2">
+                  {installPhase === 'launching'
+                    ? 'A Windows administrator prompt has appeared on the machine — accept it to continue.'
+                    : installPhase === 'waiting'
+                      ? 'Finish the Tailscale setup window on the machine.'
+                      : 'This can take a minute.'}
+                </div>
+              </>
+            ) : !confirmInstall ? (
+              <>
+                <div className="text-xs text-[#8b949e] mb-2">
+                  Tailscale is not installed on this machine, so there is nothing
+                  for Addled to connect to yet.
+                </div>
+                {isRemoteSession ? (
+                  <div className="text-xs text-[#d29922]">
+                    Installing has to be done on the machine itself — it raises a
+                    Windows administrator prompt there.
+                  </div>
+                ) : (
+                  <button onClick={() => setConfirmInstall(true)}
+                    className="px-3 py-1.5 rounded bg-[#1f6feb] text-white text-xs">
+                    Install Tailscale
+                  </button>
+                )}
+              </>
+            ) : (
+              <div className="rounded border border-[#30363d] bg-[#0d1117] p-3">
+                <div className="text-xs text-[#e8eaed] mb-2">
+                  Addled will {installUsesWinget ? (
+                    <>run <code className="text-[#8b949e]">winget install Tailscale.Tailscale</code></>
+                  ) : (
+                    <>download the installer from <code className="text-[#8b949e]">pkgs.tailscale.com</code> and check its signature</>
+                  )}, then hand it to Windows.
+                </div>
+                <div className="text-xs text-[#8b949e] mb-3">
+                  A Windows administrator prompt will appear on this machine and
+                  you will complete the Tailscale setup window yourself.
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={startInstall}
+                    className="px-3 py-1.5 rounded bg-[#1f6feb] text-white text-xs">
+                    Yes, install it
+                  </button>
+                  <button onClick={() => setConfirmInstall(false)}
+                    className="px-3 py-1.5 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {installError && (
+              <div className="mt-2 text-xs text-[#f85149]">{installError}</div>
+            )}
+            {!installError && !installing && (
+              <div className="mt-3 text-xs text-[#8b949e]">
+                Prefer to do it yourself?{' '}
+                <a href="https://tailscale.com/download/windows" target="_blank" rel="noreferrer"
+                   className="text-[#3380FF] hover:underline">Download Tailscale</a>
+                {' '}and reopen this page.
+              </div>
+            )}
           </div>
         )}
       </Card>
