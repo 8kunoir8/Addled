@@ -319,15 +319,21 @@ def main():
         async def _weekly_refresh():
             """Refresh slow-moving remote data held in the local cache.
 
-            Currently the model catalog (which models each provider offers).
-            The job also fires at startup, so the staleness check inside
-            refresh_if_stale() is what keeps that first pass a no-op.
+            Currently the model catalog (which models each provider offers) and
+            the guideline packs (ponytail, Karpathy). The job also fires at
+            startup, so the staleness checks are what keep that first pass a
+            no-op.
             """
             try:
                 from backend.providers import model_catalog
                 await model_catalog.refresh_if_stale()
             except Exception as e:
                 log.debug("model catalog refresh failed: %s", e)
+            try:
+                from backend.guidelines import store as guidelines_store
+                await guidelines_store.refresh_if_stale()
+            except Exception as e:
+                log.debug("guideline pack refresh failed: %s", e)
 
         scheduler.register_housekeeping("weekly_refresh",
                                         _weekly_refresh, interval_s=604800)

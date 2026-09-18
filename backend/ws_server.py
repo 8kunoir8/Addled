@@ -174,6 +174,23 @@ def get_server() -> WSServer:
     return _server
 
 
+def _extract_code(text: str) -> str:
+    """Pull the code out of a model reply.
+
+    Handles the two shapes models actually return: a bare code block, and a
+    fenced block preceded by commentary. Returns "" only when there is nothing
+    usable, so callers can avoid diffing against an empty result.
+    """
+    if not text:
+        return ""
+    body = text.strip()
+    import re
+    match = re.search(r"```[^\n]*\n(.*?)```", body, re.DOTALL)
+    if match:
+        return match.group(1).strip("\n")
+    return body
+
+
 async def _analyze_attachments(provider, attachments: list[dict],
                               vision_model: str | None = None) -> list[str]:
     """Route attachments to the right model:
@@ -517,6 +534,18 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
 
         user_messages.append({"role": "user", "content": message})
 
+        # Optional guideline packs (ponytail / Karpathy). They apply to
+        # code-shaped requests unless a pack is set to scope "always".
+        try:
+            from backend.guidelines import inject as guidelines
+            gblock = guidelines.system_block(code_task=code_hint)
+            if gblock:
+                sys_prompt = f"{sys_prompt}\n\n{gblock}"
+                log.debug("Injected %d chars of working guidelines",
+                          len(gblock))
+        except Exception as e:
+            log.debug("guideline injection failed: %s", e)
+
         # Task-aware model routing. "default_model" stays the baseline, so an
         # unconfigured provider behaves exactly as it did before routing.
         role, route_model = "chat", None
@@ -641,6 +670,31 @@ def _register_default_handlers():
         from backend.actions.desktop_control import desktop_control
         desktop_control.revoke()
         return {"success": True, "granted": False}
+
+    async def guidelines_state(params: dict, ws) -> dict:
+        """Guideline pack status for the Settings panel."""
+        from backend.guidelines import inject as guidelines
+        try:
+            return guidelines.describe()
+        except Exception as e:
+            log.debug("guidelines.state failed: %s", e)
+            return {"enabled": False, "packs": {}, "error": str(e)}
+
+    async def guidelines_refresh(params: dict, ws) -> dict:
+        """Re-download the enabled guideline packs from upstream."""
+        from backend.guidelines import inject as guidelines
+        from backend.guidelines import store as guidelines_store
+        try:
+            out = await guidelines_store.refresh_if_stale(force=True)
+            return {"success": True, **(out or {}),
+                    "state": guidelines.describe()}
+        except Exception as e:
+            log.debug("guidelines.refresh failed: %s", e)
+            try:
+                state = guidelines.describe()
+            except Exception:
+                state = {}
+            return {"success": False, "error": str(e), "state": state}
 
     async def models_catalog(params: dict, ws) -> dict:
         """Cached model lists per provider (what Settings shows)."""
@@ -1071,6 +1125,16 @@ def _register_default_handlers():
             if original:
                 prompt += f"And this original code:\n```\n{original[:3000]}\n```\n\n"
             prompt += "Return ONLY the complete modified code. No explanations."
+            # Working guidelines apply to code generation too. The strict
+            # output contract still comes last, and the reply is parsed
+            # tolerantly below, so a chatty model cannot corrupt the diff.
+            try:
+                from backend.guidelines import inject as guidelines
+                gblock = guidelines.system_block(code_task=True)
+                if gblock:
+                    prompt = f"{gblock}\n\n{prompt}"
+            except Exception as e:
+                log.debug("code.edit guideline injection failed: %s", e)
             # Editing code is the canonical reasoning-role task.
             try:
                 from backend.providers import router
@@ -1083,15 +1147,13 @@ def _register_default_handlers():
                 [{"role": "user", "content": prompt}],
                 model=_model, max_tokens=4000, temperature=0.3)
             if result.ok and original:
-                modified = result.response.strip()
-                if modified.startswith("```"):
-                    lines = modified.split("\n")
-                    modified = "\n".join(lines[1:-1]) if len(lines) > 2 else modified
-                diff = generate_diff(original, modified, fp)
-                _pending_edits[f"{wp}::{fp}"] = modified
-                return {"diffs": [diff], "status": "pending",
-                        "editId": f"{wp}::{fp}",
-                        "message": "Edit ready for review. Approve with code.apply."}
+                modified = _extract_code(result.response)
+                if modified:
+                    diff = generate_diff(original, modified, fp)
+                    _pending_edits[f"{wp}::{fp}"] = modified
+                    return {"diffs": [diff], "status": "pending",
+                            "editId": f"{wp}::{fp}",
+                            "message": "Edit ready for review. Approve with code.apply."}
         except Exception:
             pass
         return {"diffs": [{"instruction": instruction, "status": "pending",
@@ -1668,6 +1730,8 @@ def _register_default_handlers():
     _server.register("models.routes", models_routes)
     _server.register("models.catalog", models_catalog)
     _server.register("models.refresh", models_refresh)
+    _server.register("guidelines.state", guidelines_state)
+    _server.register("guidelines.refresh", guidelines_refresh)
 
     # Phase 5 Goals engine
     _server.register("goal.create", goal_create)

@@ -239,6 +239,19 @@ DEFAULT_SETTINGS: dict = {
         "market_sim_threshold": 0.45,
         "allow_script_skills": False,
     },
+    # External rulesets Addled can follow (ponytail, Karpathy). Fetched from
+    # upstream, cached under backend/memory/guidelines/, refreshed weekly.
+    # "scope" is the default: "code" injects only for code-related requests.
+    "guidelines": {
+        "enabled": True,
+        "scope": "code",
+        "max_chars": 6000,
+        "ttl_days": 7,
+        "packs": {
+            "ponytail": {"enabled": True, "level": "full", "scope": "code"},
+            "karpathy": {"enabled": True, "level": "full", "scope": "code"},
+        },
+    },
     "browser": {
         "user_browser": False,
         "cdp_port": 9222,

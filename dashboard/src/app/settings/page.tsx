@@ -8,7 +8,7 @@ type SettingsData = Record<string, any>;
 const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
   notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',
-  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️',
+  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️', guidelines: '📐',
 };
 
 export default function SettingsPage() {
@@ -39,7 +39,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['providers','character','voice','safety','notifications','observation','memory','tools','browser','desktop','integrations','appearance','about'];
+  const sections = ['providers','character','voice','safety','notifications','observation','memory','tools','guidelines','browser','desktop','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -68,6 +68,7 @@ export default function SettingsPage() {
         {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='memory'&&<MemorySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='tools'&&<ToolsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
+        {activeSection==='guidelines'&&<GuidelinesSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='browser'&&<BrowserSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='desktop'&&<DesktopSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='integrations'&&<IntegrationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
@@ -229,6 +230,125 @@ function relTime(iso?:string){
   const m=Math.floor(s/60); if(m<60)return `${m} min ago`;
   const h=Math.floor(m/60); if(h<24)return `${h} h ago`;
   return `${Math.floor(h/24)} d ago`;
+}
+
+function GuidelinesSection({settings,update,saving,status}: any){
+  const g=settings?.guidelines||{};
+  const packs:any=g.packs||{};
+  const {send,state:wsState}=useWS();
+  const [docs,setDocs]=useState<any>(null);
+  const [busy,setBusy]=useState(false);
+
+  const load=useCallback(async()=>{
+    if(wsState!=='connected')return;
+    try{ setDocs(await send('guidelines.state',{})); }catch{}
+  },[send,wsState]);
+
+  useEffect(()=>{ load(); },[load]);
+
+  const refreshAll=async()=>{
+    if(wsState!=='connected')return;
+    setBusy(true);
+    try{
+      const out=await send('guidelines.refresh',{});
+      if(out?.state)setDocs(out.state);
+      else await load();
+    }catch{}
+    setBusy(false);
+  };
+
+  const setPack=(id:string,patch:any)=>{
+    update('guidelines','packs',{...packs,[id]:{...(packs[id]||{}),...patch}});
+  };
+
+  const btn='px-3 py-1.5 rounded text-xs font-medium border border-[#30363d] hover:border-[#484f58] text-[#e8eaed] disabled:opacity-40';
+  const sel='bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]';
+  const packDocs:any=docs?.packs||{};
+  // Prefer the live state, but fall back to the configured packs so the panel
+  // still renders if the status call fails.
+  const ids:string[]=Object.keys(packDocs).length?Object.keys(packDocs):Object.keys(packs);
+
+  return <div className="space-y-1 max-w-3xl">
+    <p className="text-xs text-[#8b949e] px-1 pb-2">
+      Addled can follow external coding rulesets. The text is downloaded from the
+      upstream repository on first use, cached locally, and refreshed weekly —
+      nothing is bundled with Addled, so upstream updates arrive on their own.
+    </p>
+    <SettingRow label="Follow guidelines">
+      <input type="checkbox" checked={g.enabled!==false}
+        onChange={e=>update('guidelines','enabled',e.target.checked)}/>
+    </SettingRow>
+    <SettingRow label="Apply to">
+      <select value={g.scope||'code'} onChange={e=>update('guidelines','scope',e.target.value)} className={sel}>
+        <option value="code">Code tasks only</option>
+        <option value="always">Every chat</option>
+      </select>
+    </SettingRow>
+    <SettingRow label="Max characters per pack">
+      <input type="number" min={200} step={200} value={g.max_chars??6000}
+        onChange={e=>update('guidelines','max_chars',Number(e.target.value))}
+        className={`${sel} w-28`}/>
+    </SettingRow>
+    <div className="flex items-center gap-2 px-1 pt-1 text-[11px]">
+      <button onClick={refreshAll} disabled={busy||wsState!=='connected'} className={btn}>
+        {busy?'Refreshing…':'↻ Refresh from upstream'}
+      </button>
+      <span className="text-[#8b949e]">
+        {g.enabled!==false
+          ? `${ids.length} pack(s) · ${(g.scope||'code')==='always'?'every chat':'code tasks only'}`
+          : 'guidelines are off'}
+      </span>
+    </div>
+
+    {ids.map((id:string)=>{
+      const d:any=packDocs[id]||{};
+      const pc:any=packs[id]||{};
+      const level=pc.level||d.default_level||'full';
+      const levels:string[]=d.levels?.length?d.levels:['lite','full','ultra'];
+      return <div key={id} className="mt-3 rounded-lg border border-[#30363d] p-3">
+        <div className="flex items-start justify-between gap-3">
+          <p className="text-sm font-medium text-[#e8eaed]">
+            {d.title||id}
+            {d.subtitle?<span className="font-normal text-[#8b949e]"> — {d.subtitle}</span>:null}
+          </p>
+          <label className="flex shrink-0 items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+            <input type="checkbox" checked={pc.enabled!==false}
+              onChange={e=>setPack(id,{enabled:e.target.checked})}/>
+            Enabled
+          </label>
+        </div>
+        {d.summary&&<p className="mt-1 text-[11px] text-[#8b949e]">{d.summary}</p>}
+        <div className="mt-2 flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-[11px] text-[#8b949e]">Level
+            <select value={level} onChange={e=>setPack(id,{level:e.target.value})} className={sel}>
+              {levels.map((l:string)=><option key={l} value={l}>{l}</option>)}
+              <option value="off">off</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 text-[11px] text-[#8b949e]">Scope
+            <select value={pc.scope||g.scope||'code'}
+              onChange={e=>setPack(id,{scope:e.target.value})} className={sel}>
+              <option value="code">code tasks</option>
+              <option value="always">every chat</option>
+            </select>
+          </label>
+        </div>
+        <div className="mt-2 space-y-0.5 text-[10px] text-[#8b949e]">
+          <p>{d.cached?`${d.chars} characters · updated ${relTime(d.fetched_at)}`
+                     :'not downloaded yet'}</p>
+          {d.source_url&&<p className="truncate" title={d.source_url}>source: {d.source_url}</p>}
+          {d.home&&<p className="truncate">
+            <a href={d.home} target="_blank" rel="noreferrer"
+              className="text-[#4d94ff] hover:underline">{d.home}</a>
+            {d.license?` · ${d.license}`:''}
+          </p>}
+          {d.path&&<p className="truncate" title={d.path}>cached at {d.path}</p>}
+          {d.error&&<p className="text-[#d29922]">⚠ {d.error}</p>}
+          {!d.cached&&!d.error&&<p>Press Refresh to download it.</p>}
+        </div>
+      </div>;
+    })}
+  </div>;
 }
 
 function ProvidersSection({ settings, update, saving, status }: any) {

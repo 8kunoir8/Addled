@@ -269,6 +269,14 @@ class SkillRegistry:
             log.exception("Skill %s failed", name)
             return SkillResult(False, name, error=str(e))
 
+    def _register_guideline_skills(self):
+        """External guideline packs (ponytail review, status)."""
+        try:
+            from backend.skills.guidelines import register
+            register(self)
+        except Exception as e:
+            log.debug("guideline skills unavailable: %s", e)
+
     def _register_all(self):
         """Register all 55+ agent skills."""
         self._register_system_skills()
@@ -279,6 +287,7 @@ class SkillRegistry:
         self._register_calendar_skills()
         self._register_web_skills()
         self._register_meta_skills()
+        self._register_guideline_skills()
 
     # ── System ───────────────────────────────────────────────────────────
 
