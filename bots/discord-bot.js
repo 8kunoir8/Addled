@@ -67,9 +67,17 @@ async function main() {
       case 'chat': {
         await interaction.deferReply();
         const message = interaction.options.getString('message', true);
+        // A reply can take minutes on a local model, so show that it is still
+        // working rather than a frozen deferred reply.
+        let elapsed = 0;
+        const ticker = setInterval(() => {
+          elapsed += 15;
+          interaction.editReply(`\uD83E\uDD14 Thinking... (${elapsed}s)`).catch(() => {});
+        }, 15000);
         try {
           const r = await ws.send('chat.send', { message });
           const response = r?.response || 'No response';
+          clearInterval(ticker);
           if (response.length <= 2000) {
             await interaction.editReply(response);
           } else {
@@ -80,6 +88,7 @@ async function main() {
             }
           }
         } catch (e) {
+          clearInterval(ticker);
           await interaction.editReply(`\u2757 Error: ${e.message}`);
         }
         break;

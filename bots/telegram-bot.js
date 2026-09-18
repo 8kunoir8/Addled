@@ -127,9 +127,18 @@ async function main() {
     if (text.startsWith('/')) return; // Commands handled above
 
     const sent = await ctx.reply('🤔 Thinking...');
+    // A reply can take minutes on a local model, so show that it is still
+    // working rather than a frozen "Thinking...".
+    let elapsed = 0;
+    const ticker = setInterval(() => {
+      elapsed += 15;
+      ctx.api.editMessageText(sent.chat.id, sent.message_id,
+        `🤔 Thinking... (${elapsed}s)`).catch(() => {});
+    }, 15000);
     try {
       const r = await ws.send('chat.send', { message: text });
       const response = r?.response || 'No response';
+      clearInterval(ticker);
       // Split long messages for Telegram's 4096 char limit
       if (response.length <= 4000) {
         await ctx.api.editMessageText(sent.chat.id, sent.message_id, response);
@@ -140,6 +149,7 @@ async function main() {
         }
       }
     } catch (e) {
+      clearInterval(ticker);
       await ctx.api.editMessageText(sent.chat.id, sent.message_id, `❌ Error: ${e.message}`);
     }
   });

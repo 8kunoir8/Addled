@@ -10,6 +10,7 @@ though the raw turns fall out of the short-term window.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -21,8 +22,49 @@ ROLLING_PATH = Path(__file__).parent / "rolling_summary.json"
 MAX_ENTRIES = 10
 PROVIDER_BACKOFF_S = 15 * 60
 
+# Compaction summarizes with the *same* provider chat uses. A local model serves
+# one generation at a time, so summarizing while the user was mid-conversation
+# put their next message behind a large summarization prompt — the bot bridge
+# saw that as "Request chat.send timed out" on the second message. Background
+# work yields to the user: a turn marks activity, and compaction waits for a
+# quiet gap before spending the model.
+QUIET_WINDOW_S = 15.0
+QUIET_WAIT_MAX_S = 600.0
+# Cap what a single summarization sends. The chunk used to be a third of the
+# whole backlog, which on a long conversation is thousands of tokens of prompt
+# on a CPU model; folding it in smaller pieces keeps each job short.
+MAX_CHUNK = 20
+
 _locked = False           # single-flight guard
 _last_provider_error = 0.0
+_last_activity = 0.0
+
+
+def note_activity() -> None:
+    """Record an interactive turn so compaction keeps out of the way."""
+    global _last_activity
+    _last_activity = time.time()
+
+
+def _idle_for() -> float:
+    return time.time() - _last_activity
+
+
+async def _wait_for_quiet(max_wait: float | None = None) -> bool:
+    """Wait until no interactive turn has run for QUIET_WINDOW_S seconds.
+
+    The window and the cap are read from the module at call time (not bound as
+    defaults) so a test can shorten them instead of waiting out the real ones.
+    """
+    if max_wait is None:
+        max_wait = QUIET_WAIT_MAX_S
+    deadline = time.time() + max_wait
+    while _idle_for() < QUIET_WINDOW_S:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(1.0, remaining))
+    return True
 
 
 def _load() -> dict:
@@ -122,7 +164,20 @@ async def maybe_compact() -> bool:
         if len(pending) < threshold:
             return False  # only the fresh tail remains — nothing stale to fold
 
-        chunk = pending[: max(1, len(pending) // 3)]
+        # Everything above is cheap. Only now is it worth spending the model,
+        # so wait for a gap in the conversation first.
+        if not await _wait_for_quiet():
+            log.debug("compaction skipped: conversation never went quiet")
+            return False
+
+        # The user may have chatted while we waited — re-read and re-check.
+        all_msgs = chat_history.get_context(max_messages=100000)
+        summarized = int(state.get("summarized", 0))
+        pending = all_msgs[summarized:]
+        if len(pending) < threshold:
+            return False
+
+        chunk = pending[: min(MAX_CHUNK, max(1, len(pending) // 3))]
         summary = await _summarize_chunk(chunk)
         if not summary:
             return False

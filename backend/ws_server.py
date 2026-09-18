@@ -338,6 +338,15 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
     params = params or {}
     from backend.config import config
 
+    # Compaction shares the provider with chat. Mark the turn so that
+    # background summarization yields instead of making the user's next message
+    # queue behind it on a single-generation local model.
+    try:
+        from backend.memory.compaction import note_activity
+        note_activity()
+    except Exception:
+        pass
+
     # Character shows the THINKING animation while the LLM works
     if _engine_ref is not None:
         _engine_ref._chat_busy = True

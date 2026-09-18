@@ -32,6 +32,7 @@ SUITES = [
     "check_routing.py",
     "check_mcp.py",
     "check_ws_methods.py",
+    "check_bot_chat.py",
 ]
 
 

@@ -3,6 +3,23 @@
 
 const WebSocket = require('ws');
 
+// Every request used to share one 30s cap. The backend's slowest path — a local
+// model, tool rounds, and the background compaction job it runs after a turn —
+// legitimately takes minutes, and the dashboard allows 180s for *every* call
+// for exactly that reason (dashboard/src/lib/useWS.ts). A 30s cap therefore
+// abandoned work the backend was still doing and threw the finished answer
+// away, which reached the user as "Request chat.send timed out".
+const DEFAULT_TIMEOUT_MS = 30000;
+// Chat gets its own, much longer budget. Override with
+// ADDLED_BOT_CHAT_TIMEOUT_MS if a slow machine needs even longer.
+const CHAT_TIMEOUT_MS = Number(process.env.ADDLED_BOT_CHAT_TIMEOUT_MS) || 600000;
+const LONG_METHODS = new Set(['chat.send']);
+
+function timeoutFor(method, override) {
+  if (Number(override) > 0) return Number(override);
+  return LONG_METHODS.has(method) ? CHAT_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+}
+
 class AddledWSClient {
   constructor(url = 'ws://127.0.0.1:9876') {
     this.url = url;
@@ -27,6 +44,9 @@ class AddledWSClient {
       this.ws.on('close', () => {
         console.log('[Bot Bridge] Disconnected from Addled backend');
         this.ws = null;
+        // Fail in-flight requests now. Leaving them pending made each one sit
+        // out the full timeout and then report a timeout, hiding the cause.
+        this._failPending('Disconnected from Addled backend');
         this._scheduleReconnect();
       });
 
@@ -69,7 +89,7 @@ class AddledWSClient {
     }, this.reconnectDelay);
   }
 
-  send(method, params = {}) {
+  send(method, params = {}, opts = {}) {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('Not connected'));
@@ -77,15 +97,30 @@ class AddledWSClient {
       }
 
       const id = `bot-${++this.idCounter}`;
+      const timeout = timeoutFor(method, opts.timeout);
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Request ${method} timed out`));
-      }, 30000);
+        // Sub-second budgets are used by the checks, and "after 0s" reads as a
+        // bug rather than as a deliberate override.
+        const secs = timeout >= 10000
+          ? `${Math.round(timeout / 1000)}s`
+          : `${(timeout / 1000).toFixed(1)}s`;
+        reject(new Error(`Request ${method} timed out after ${secs}`));
+      }, timeout);
 
       this.pending.set(id, { resolve, reject, timer });
 
       this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
     });
+  }
+
+  /** Settle everything waiting on a connection that is gone. */
+  _failPending(reason) {
+    for (const p of this.pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(new Error(reason));
+    }
+    this.pending.clear();
   }
 
   onNotification(method, handler) {
@@ -97,7 +132,8 @@ class AddledWSClient {
       this.ws.close();
       this.ws = null;
     }
+    this._failPending('Disconnected');
   }
 }
 
-module.exports = { AddledWSClient };
+module.exports = { AddledWSClient, CHAT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS };
