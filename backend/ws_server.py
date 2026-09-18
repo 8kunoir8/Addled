@@ -1700,6 +1700,57 @@ def _register_default_handlers():
         from backend.memory.user_profile import get_profile
         return {"profile": get_profile()}
 
+    async def profile_update(params: dict, ws) -> dict:
+        """Edit the learned profile.
+
+        `update_profile()` has always existed and its docstring says
+        "(dashboard)", but no handler was ever registered — the Memory page
+        could display the profile and never change it.
+        """
+        from backend.memory.user_profile import update_profile
+        fields = params.get("fields")
+        if not isinstance(fields, dict) or not fields:
+            return {"success": False,
+                    "error": "Pass 'fields' with one or more of: tone, hours, "
+                             "rituals, preferences"}
+        try:
+            return {"success": True, "profile": update_profile(fields)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ---- Bot bridges ---------------------------------------------------------
+
+    async def bots_status(params: dict, ws) -> dict:
+        """What the Bots page needs: checks, not assumed state."""
+        try:
+            from backend.bots import manager as bots
+            return {"success": True, **bots.status()}
+        except Exception as e:
+            log.debug("bots.status failed: %s", e)
+            return {"success": False, "error": str(e), "platforms": {}}
+
+    async def bots_set_token(params: dict, ws) -> dict:
+        from backend.bots import manager as bots
+        platform = str(params.get("platform") or "").strip().lower()
+        token = str(params.get("token") or "").strip()
+        if platform not in bots.PLATFORMS:
+            return {"success": False,
+                    "error": f"Unknown bot '{platform}'. Known: "
+                             + ", ".join(bots.PLATFORMS)}
+        if not bots.set_token(platform, token):
+            return {"success": False, "error": "Could not save the token"}
+        return {"success": True, "saved": bool(token)}
+
+    async def bots_start(params: dict, ws) -> dict:
+        from backend.bots import manager as bots
+        platform = str(params.get("platform") or "").strip().lower()
+        return await bots.start(platform)
+
+    async def bots_stop(params: dict, ws) -> dict:
+        from backend.bots import manager as bots
+        platform = str(params.get("platform") or "").strip().lower()
+        return await bots.stop(platform)
+
     async def project_search(params: dict, ws) -> dict:
         from backend.project.indexer import search_project
         results = search_project(str(params.get("query", "")),
@@ -2105,6 +2156,11 @@ def _register_default_handlers():
     _server.register("journal.list", journal_list)
     _server.register("journal.today", journal_today)
     _server.register("profile.get", profile_get)
+    _server.register("profile.update", profile_update)
+    _server.register("bots.status", bots_status)
+    _server.register("bots.setToken", bots_set_token)
+    _server.register("bots.start", bots_start)
+    _server.register("bots.stop", bots_stop)
     _server.register("project.search", project_search)
     _server.register("project.patterns", project_patterns)
     _server.register("project.status", project_status)

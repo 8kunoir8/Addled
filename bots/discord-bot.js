@@ -2,7 +2,7 @@
 // Forwards messages between Discord and the Addled Python backend via discord.js.
 
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { AddledWSClient } = require('../shared/ws-client');
+const { AddledWSClient } = require('./shared/ws-client');
 
 const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const WS_URL = process.env.ADDLED_WS_URL || 'ws://127.0.0.1:9876';

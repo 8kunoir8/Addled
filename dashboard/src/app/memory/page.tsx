@@ -32,6 +32,9 @@ export default function MemoryPage() {
   const [triples, setTriples] = useState<any[]>([]);
   const [journalDays, setJournalDays] = useState<any[]>([]);
   const [profile, setProfile] = useState<any>({});
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [profileDraft, setProfileDraft] = useState<any>({});
+  const [profileError, setProfileError] = useState('');
   const [linkStats, setLinkStats] = useState<any>({});
   const [files, setFiles] = useState<any[]>([]);
   const [relKind, setRelKind] = useState('fact');
@@ -153,6 +156,22 @@ export default function MemoryPage() {
       const r = await send('memory.pruneLinks', {});
       if (r?.success) load();
     } catch { /* ignore */ }
+  };
+
+  const saveProfile = async () => {
+    const fields = {
+      tone: String(profileDraft.tone || '').trim(),
+      hours: { start: profileDraft.start || '', end: profileDraft.end || '' },
+      rituals: String(profileDraft.rituals || '').split(',')
+        .map(s => s.trim()).filter(Boolean),
+      preferences: String(profileDraft.preferences || '').split('\n')
+        .map(s => s.trim()).filter(Boolean),
+    };
+    try {
+      const r = await send('profile.update', { fields });
+      if (r?.success) { setProfile(r.profile); setEditingProfile(false); setProfileError(''); }
+      else setProfileError(r?.error || 'Could not save the profile');
+    } catch (e: any) { setProfileError(e?.message || 'Could not save the profile'); }
   };
 
   const clearAll = async () => {
@@ -395,19 +414,75 @@ export default function MemoryPage() {
           <h2 className="text-xs font-semibold uppercase tracking-wide text-[#8b949e] mb-2">
             Timeline & User model
           </h2>
-          {profile?.preferences?.length > 0 && (
-            <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-3 mb-3">
-              <p className="text-[10px] uppercase tracking-wide text-[#8b949e] mb-1">Learned profile</p>
-              <p className="text-xs text-[#e8eaed]">
-                {profile.tone && <span>Tone: {profile.tone} · </span>}
-                {profile.hours?.start && <span>Around {profile.hours.start}–{profile.hours.end} · </span>}
-                {profile.preferences?.length > 0 && <span>{profile.preferences.length} preferences</span>}
-              </p>
-              {profile.rituals?.length > 0 && (
-                <p className="text-[11px] text-[#8b949e] mt-1">Rituals: {profile.rituals.join(' · ')}</p>
-              )}
+          {/* Previously hidden unless it had preferences, and there was no way
+              to change it at all — the handler did not exist. */}
+          <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-3 mb-3">
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-[10px] uppercase tracking-wide text-[#8b949e]">Learned profile</p>
+              <button
+                onClick={() => {
+                  setProfileDraft({
+                    tone: profile.tone || '',
+                    start: profile.hours?.start || '',
+                    end: profile.hours?.end || '',
+                    rituals: (profile.rituals || []).join(', '),
+                    preferences: (profile.preferences || []).join('\n'),
+                  });
+                  setEditingProfile(e => !e);
+                  setProfileError('');
+                }}
+                className="text-[11px] text-[#8b949e] hover:text-[#e8eaed]">
+                {editingProfile ? 'Cancel' : 'Edit'}
+              </button>
             </div>
-          )}
+            {!editingProfile ? (
+              <>
+                <p className="text-xs text-[#e8eaed]">
+                  {profile.tone && <span>Tone: {profile.tone} · </span>}
+                  {profile.hours?.start && <span>Around {profile.hours.start}–{profile.hours.end} · </span>}
+                  <span>{profile.preferences?.length || 0} preferences</span>
+                </p>
+                {profile.rituals?.length > 0 && (
+                  <p className="text-[11px] text-[#8b949e] mt-1">Rituals: {profile.rituals.join(' · ')}</p>
+                )}
+                {profile.preferences?.length > 0 && (
+                  <ul className="mt-1 space-y-0.5">
+                    {profile.preferences.slice(0, 6).map((p: string, i: number) => (
+                      <li key={i} className="text-[11px] text-[#8b949e]">· {p}</li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            ) : (
+              <div className="space-y-2 mt-2">
+                <label className="block text-[11px] text-[#8b949e]">Tone
+                  <input value={profileDraft.tone || ''} onChange={e => setProfileDraft((d: any) => ({ ...d, tone: e.target.value }))}
+                    className="mt-0.5 w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]" />
+                </label>
+                <div className="flex items-center gap-2">
+                  <label className="text-[11px] text-[#8b949e] flex-1">Active from
+                    <input type="time" value={profileDraft.start || ''} onChange={e => setProfileDraft((d: any) => ({ ...d, start: e.target.value }))}
+                      className="mt-0.5 w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]" />
+                  </label>
+                  <label className="text-[11px] text-[#8b949e] flex-1">to
+                    <input type="time" value={profileDraft.end || ''} onChange={e => setProfileDraft((d: any) => ({ ...d, end: e.target.value }))}
+                      className="mt-0.5 w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]" />
+                  </label>
+                </div>
+                <label className="block text-[11px] text-[#8b949e]">Rituals (comma separated)
+                  <input value={profileDraft.rituals || ''} onChange={e => setProfileDraft((d: any) => ({ ...d, rituals: e.target.value }))}
+                    className="mt-0.5 w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]" />
+                </label>
+                <label className="block text-[11px] text-[#8b949e]">Preferences (one per line)
+                  <textarea value={profileDraft.preferences || ''} onChange={e => setProfileDraft((d: any) => ({ ...d, preferences: e.target.value }))} rows={4}
+                    className="mt-0.5 w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]" />
+                </label>
+                {profileError && <p className="text-[11px] text-[#f85149]">{profileError}</p>}
+                <button onClick={saveProfile}
+                  className="bg-[#3380FF] hover:bg-[#4d94ff] text-white rounded px-3 py-1 text-xs font-medium">Save profile</button>
+              </div>
+            )}
+          </div>
           {journalDays.length === 0 ? (
             <p className="text-sm text-[#8b949e]">No journal days yet — the timeline fills in as you chat.</p>
           ) : (

@@ -264,6 +264,11 @@ DEFAULT_SETTINGS: dict = {
         "inject_top_k": 3,
         "max_chars": 4000,
     },
+    # Bot bridges (the Node scripts under bots/). Addled stores their tokens and
+    # can start/stop the processes; the bots themselves talk to the WS server.
+    "bots": {
+        "tokens": {},
+    },
     "tools": {
         "rtk_enabled": True,
     },

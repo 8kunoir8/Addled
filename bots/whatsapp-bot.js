@@ -3,7 +3,7 @@
 
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
-const { AddledWSClient } = require('../shared/ws-client');
+const { AddledWSClient } = require('./shared/ws-client');
 const path = require('path');
 const fs = require('fs');
 

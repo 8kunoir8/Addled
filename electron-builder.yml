@@ -15,6 +15,18 @@ files:
   - '!**/*.pyc'
   - '!**/.git'
 
+# The bot bridges are Node scripts launched by an external `node`, which cannot
+# read app.asar. Unpack them and the dependencies they require, or the Bots page
+# can only ever report "the bot scripts are not on disk".
+asarUnpack:
+  - bots/**
+  - node_modules/grammy/**
+  - node_modules/discord.js/**
+  - node_modules/@discordjs/**
+  - node_modules/@whiskeysockets/**
+  - node_modules/@hapi/**
+  - node_modules/ws/**
+
 extraResources:
   - from: backend
     to: backend

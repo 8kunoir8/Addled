@@ -14,6 +14,9 @@ export default function CodePage() {
   const [instruction, setInstruction] = useState('');
   const [bound, setBound] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [pending, setPending] = useState<{editId:string; filePath:string; diff:any}|null>(null);
+  const [diffError, setDiffError] = useState('');
+  const [applied, setApplied] = useState('');
 
   const handleBind = async () => {
     if (!workspacePath.trim() || wsState !== 'connected') return;
@@ -32,6 +35,64 @@ export default function CodePage() {
       const r = await send('code.read', { workspaceId: workspacePath, filePath: file.path });
       setFileContent(r?.content || '(Empty file)');
     } catch { setFileContent('// Error loading file'); }
+  };
+
+  // ---- edit → review → apply -------------------------------------------------
+  // code.edit only creates something code.apply can use when it is given the
+  // target file: without it the backend has no original to diff and stores no
+  // pending edit. The page used to send no filePath, so nothing was ever
+  // applicable, and it replaced the file view with a "coming in Phase 5" note.
+  const handleEdit = async () => {
+    if (!instruction.trim() || wsState !== 'connected' || !selectedFile) return;
+    setLoading(true); setDiffError(''); setApplied(''); setPending(null);
+    try {
+      const r = await send('code.edit', {
+        workspaceId: workspacePath,
+        filePath: selectedFile.path,
+        instruction: instruction.trim(),
+      });
+      if (r?.editId && r?.diffs?.length) {
+        setPending({ editId: r.editId, filePath: selectedFile.path, diff: r.diffs[0] });
+        setInstruction('');
+      } else if (r?.diffs?.length) {
+        setDiffError(r?.message || r?.diffs?.[0]?.message || 'The edit could not be prepared for this file.');
+      } else {
+        setDiffError('The model returned no change.');
+      }
+    } catch (e: any) { setDiffError(e?.message || 'Edit failed'); }
+    finally { setLoading(false); }
+  };
+
+  const handleApply = async () => {
+    if (!pending) return;
+    setLoading(true); setDiffError('');
+    try {
+      const r = await send('code.apply', {
+        workspaceId: workspacePath,
+        filePath: pending.filePath,
+        editId: pending.editId,
+      });
+      if (r?.success) {
+        setApplied(`Applied${r.backup ? ` — backup kept at ${r.backup}` : ''}`);
+        setPending(null);
+        const fresh = await send('code.read', { workspaceId: workspacePath, filePath: pending.filePath });
+        setFileContent(fresh?.content || '(Empty file)');
+      } else {
+        setDiffError(r?.error || 'Apply failed');
+      }
+    } catch (e: any) { setDiffError(e?.message || 'Apply failed'); }
+    finally { setLoading(false); }
+  };
+
+  const renderDiff = (diff: any) => {
+    const raw = String(diff?.raw_diff || '').split('\n').filter(Boolean);
+    if (!raw.length) return <span className="text-[#8b949e]">{diff?.message || 'No diff available.'}</span>;
+    return raw.map((line: string, i: number) => (
+      <div key={i} className={
+        line.startsWith('+') && !line.startsWith('+++') ? 'text-[#3fb950]'
+        : line.startsWith('-') && !line.startsWith('---') ? 'text-[#f85149]'
+        : line.startsWith('@@') ? 'text-[#58a6ff]' : 'text-[#8b949e]'}>{line}</div>
+    ));
   };
 
   const getLanguageColor = (lang: string) => {
@@ -84,23 +145,37 @@ export default function CodePage() {
             <div className="flex-1 overflow-auto">
               <pre className="p-4 text-xs font-mono text-[#e8eaed] whitespace-pre-wrap"><code>{fileContent}</code></pre>
             </div>
+            {pending && (
+              <div className="border-t border-[#30363d] bg-[#161b22] max-h-64 overflow-y-auto">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-[#21262d]">
+                  <span className="text-xs text-[#8b949e]">
+                    Proposed change to {pending.filePath}
+                    <span className="text-[#3fb950]"> +{pending.diff?.added ?? 0}</span>
+                    <span className="text-[#f85149]"> −{pending.diff?.removed ?? 0}</span>
+                  </span>
+                  <div className="flex gap-2">
+                    <button onClick={handleApply} disabled={loading}
+                      className="text-xs px-2 py-1 rounded bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white">
+                      {loading?'Applying…':'Apply'}
+                    </button>
+                    <button onClick={()=>{setPending(null); setDiffError('');}}
+                      className="text-xs px-2 py-1 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed]">
+                      Discard
+                    </button>
+                  </div>
+                </div>
+                <pre className="p-3 text-xs font-mono whitespace-pre-wrap">{renderDiff(pending.diff)}</pre>
+              </div>
+            )}
+            {(diffError||applied)&&(
+              <p className={`px-3 py-2 text-xs ${diffError?'text-[#f85149]':'text-[#3fb950]'}`}>{diffError||applied}</p>
+            )}
             <div className="border-t border-[#30363d] p-3 flex gap-2">
               <input value={instruction} onChange={e=>setInstruction(e.target.value)} placeholder="Ask Addled to edit this file..."
                 className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-xs text-[#e8eaed] placeholder-[#484f58]"/>
               <button
-                onClick={async () => {
-                  if (!instruction.trim() || wsState !== 'connected') return;
-                  setLoading(true);
-                  try {
-                    const r = await send('code.edit', { workspaceId: workspacePath, instruction: instruction.trim() });
-                    if (r?.diffs?.length) {
-                      setFileContent(`// Diffs generated (${r.diffs.length} changes). Full diff viewer coming in Phase 5.\n// Original file: ${selectedFile?.path}\n`);
-                    }
-                    setInstruction('');
-                  } catch (e: any) { setFileContent(`// Edit error: ${e.message}`); }
-                  setLoading(false);
-                }}
-                disabled={!instruction.trim()||wsState!=='connected'}
+                onClick={handleEdit}
+                disabled={!instruction.trim()||wsState!=='connected'||loading}
                 className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1.5 text-xs font-medium">
                 {loading?'Editing...':'Edit'}
               </button>

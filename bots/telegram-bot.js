@@ -2,7 +2,9 @@
 // Forwards messages between Telegram and the Addled Python backend via grammY.
 
 const { Bot } = require('grammy');
-const { AddledWSClient } = require('../shared/ws-client');
+// './shared' — these files live in bots/, so '../shared' resolved to
+// <root>/shared/ws-client and every bot died on require with MODULE_NOT_FOUND.
+const { AddledWSClient } = require('./shared/ws-client');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const WS_URL = process.env.ADDLED_WS_URL || 'ws://127.0.0.1:9876';

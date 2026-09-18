@@ -246,11 +246,50 @@ def run_error_tests():
           "503" in detail, detail)
 
 
+def run_bot_tests():
+    """The bot bridges must be able to load.
+
+    All three required '../shared/ws-client' from inside bots/, which resolves
+    to <root>/shared and does not exist — so every bot died on require and the
+    dashboard page could never have worked.
+    """
+    from pathlib import Path
+
+    root = Path(ROOT) / "bots"
+    shared = root / "shared" / "ws-client.js"
+    check("bots/shared/ws-client.js exists", shared.is_file(), str(shared))
+
+    for name in ("telegram-bot.js", "discord-bot.js", "whatsapp-bot.js"):
+        script = root / name
+        check(f"{name} exists", script.is_file(), str(script))
+        if not script.is_file():
+            continue
+        text = script.read_text(encoding="utf-8")
+        check(f"{name} requires ./shared/ws-client",
+              "require('./shared/ws-client')" in text,
+              "still using a path that resolves outside bots/")
+        check(f"{name} does not use ../shared",
+              "require('../shared/" not in text,
+              "this path cannot resolve from inside bots/")
+
+    from backend.bots import manager as bots
+    check("the manager knows all three platforms",
+          set(bots.PLATFORMS) == {"telegram", "discord", "whatsapp"},
+          str(sorted(bots.PLATFORMS)))
+    reported = bots.status()["platforms"]
+    for pid, info in reported.items():
+        check(f"{pid}: the script is locatable", info["script_found"],
+              info["script_path"])
+        check(f"{pid}: blockers are a list", isinstance(info["blockers"], list),
+              str(info["blockers"]))
+
+
 def main():
     run_catalogue_tests()
     run_parser_tests()
     run_budget_tests()
     run_error_tests()
+    run_bot_tests()
     print()
     print(f"{'FAIL' if fails else 'PASS'}: {len(fails)} failure(s)")
     for f in fails:
