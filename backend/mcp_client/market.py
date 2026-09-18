@@ -25,6 +25,12 @@ import urllib.request
 log = logging.getLogger("addled.mcp.market")
 
 REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers"
+# Smithery's own registry: public, key-free and keyword searchable, which is not
+# true of the other directories people ask about. Glama's API answers 401
+# without a key, mcp.so answers 500, PulseMCP retired its API (410 Gone) and now
+# publishes into the official registry instead, and MCP Market and FreeMCPLab
+# serve no API at all - only HTML, which is not something to build on.
+SMITHERY_URL = "https://registry.smithery.ai/servers"
 UA = {"User-Agent": "Addled/1.0 (mcp market)", "Accept": "application/json"}
 TIMEOUT = 15.0
 
@@ -71,6 +77,30 @@ def _pick_package(entry: dict) -> dict | None:
     return None
 
 
+def _finish(candidate: dict, hint: str = "") -> dict:
+    """Decide whether an entry can be used, and say why not if it cannot."""
+    reasons: list[str] = []
+    if hint:
+        reasons.append(hint)
+    elif candidate.get("transport") == "stdio":
+        launcher = str(candidate.get("command") or "")
+        if not launcher:
+            reasons.append("no launch command published")
+        elif not _runtime_available(launcher):
+            reasons.append(
+                f"needs '{launcher}' on PATH"
+                + (" (install Node.js)" if launcher == "npx"
+                   else " (install uv)" if launcher == "uvx" else ""))
+    if candidate.get("requires_env"):
+        reasons.append("needs " + ", ".join(candidate["requires_env"]))
+    if candidate.get("requires_headers"):
+        reasons.append("needs an API key for "
+                       + ", ".join(candidate["requires_headers"]))
+    candidate["blocked_reason"] = "; ".join(reasons)
+    candidate["runnable"] = not reasons
+    return candidate
+
+
 def normalise(raw: dict) -> dict | None:
     """Turn one registry entry into a candidate Addled can present.
 
@@ -86,6 +116,7 @@ def normalise(raw: dict) -> dict | None:
 
     candidate = {
         "name": name,
+        "source": "registry",
         "title": str(entry.get("title") or "").strip(),
         "description": " ".join(str(entry.get("description") or "").split()),
         "version": str(entry.get("version") or ""),
@@ -137,22 +168,7 @@ def normalise(raw: dict) -> dict | None:
         return None
 
     # Why it cannot be used yet, if it cannot.
-    reasons: list[str] = []
-    if candidate["transport"] == "stdio":
-        launcher = candidate["command"]
-        if not _runtime_available(launcher):
-            reasons.append(
-                f"needs '{launcher}' on PATH"
-                + (" (install Node.js)" if launcher == "npx"
-                   else " (install uv)" if launcher == "uvx" else ""))
-    if candidate["requires_env"]:
-        reasons.append("needs " + ", ".join(candidate["requires_env"]))
-    if candidate["requires_headers"]:
-        reasons.append("needs an API key for "
-                       + ", ".join(candidate["requires_headers"]))
-    candidate["blocked_reason"] = "; ".join(reasons)
-    candidate["runnable"] = not reasons
-    return candidate
+    return _finish(candidate)
 
 
 def to_spec(candidate: dict, *, trusted: bool = False,
@@ -201,37 +217,145 @@ def _fetch(query: str, limit: int) -> list[dict]:
     return payload.get("servers") or []
 
 
-async def search(query: str, limit: int = 12) -> list[dict]:
-    """Candidate servers matching a query. Returns [] rather than raising."""
-    query = (query or "").strip()
-    if not query:
-        return []
-    try:
-        raw = await asyncio.get_running_loop().run_in_executor(
-            None, _fetch, query, limit)
-    except Exception as e:  # noqa: BLE001
-        log.debug("MCP registry search failed for %r: %s", query, e)
-        return []
-
-    candidates: dict[str, dict] = {}
-    for item in raw:
+def _registry_candidates(query: str, limit: int) -> list[dict]:
+    """Registry entries for a query, one candidate per server."""
+    best: dict[str, dict] = {}
+    for item in _fetch(query, limit):
         candidate = normalise(item)
         if candidate is None:
             continue
         name = candidate["name"]
-        kept = candidates.get(name)
+        kept = best.get(name)
         if kept is None:
-            candidates[name] = candidate
+            best[name] = candidate
         elif candidate["latest"] and not kept["latest"]:
             # The registry lists every published version. Keeping whichever
             # came back first installed a release that crashed on startup while
             # a fixed one existed, so the version the registry marks as latest
             # wins, and the highest number breaks ties.
-            candidates[name] = candidate
+            best[name] = candidate
         elif candidate["latest"] == kept["latest"] and \
                 _version_key(candidate["version"]) > _version_key(kept["version"]):
-            candidates[name] = candidate
-    return list(candidates.values())
+            best[name] = candidate
+    return list(best.values())
+
+
+def _fetch_smithery(query: str, limit: int) -> list[dict]:
+    url = (f"{SMITHERY_URL}?q={urllib.parse.quote(query)}"
+           f"&pageSize={max(1, min(50, limit))}")
+    request = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        import json
+
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    return payload.get("servers") or []
+
+
+_LAUNCH_COMMANDS = ("npx", "uvx", "node", "python", "python3")
+
+
+def _command_from_text(text: object) -> tuple[str, list[str], list[str]]:
+    """Pull a launch command out of a listing that embeds one.
+
+    Smithery publishes the client config inside the description - literally
+    ``"command": "npx", "args": ["-y", "reportflow-mcp"]``, sometimes followed
+    by "no env vars, no API keys". Returns (command, args, required_env); an
+    empty command means nothing usable was published, and the entry is then
+    reported as needing manual setup rather than being given an invented
+    launcher.
+    """
+    import re
+
+    block = str(text or "").replace("\\n", "\n")
+    found = re.search(r'"command"\s*:\s*"([^"]+)"', block)
+    if not found:
+        return "", [], []
+    command = found.group(1).strip()
+    if command not in _LAUNCH_COMMANDS:
+        return "", [], []
+
+    args: list[str] = []
+    args_block = re.search(r'"args"\s*:\s*\[([^\]]*)\]', block)
+    if args_block:
+        args = [a for a in re.findall(r'"([^"]*)"', args_block.group(1))
+                if a.strip()]
+
+    env: list[str] = []
+    env_block = re.search(r'"env"\s*:\s*\{([^}]*)\}', block)
+    if env_block:
+        env = [k for k in re.findall(r'"([^"]+)"\s*:', env_block.group(1))
+               if k.strip()]
+    return command, args, env
+
+
+def _smithery_normalise(item: dict) -> dict | None:
+    """Turn one Smithery listing into a candidate."""
+    if not isinstance(item, dict):
+        return None
+    name = str(item.get("qualifiedName") or "").strip()
+    if not name:
+        return None
+    command, args, required_env = _command_from_text(item.get("description"))
+    # Most Smithery servers are hosted on their gateway and reached with a
+    # Smithery key, and their listings say so only by being remote. Saying that
+    # is more use than "no launch command published".
+    hint = ""
+    if not command and item.get("remote"):
+        hint = "hosted by Smithery; needs their API key"
+    return _finish({
+        "name": name,
+        "source": "smithery",
+        "title": str(item.get("displayName") or "").strip(),
+        "description": " ".join(str(item.get("description") or "").split())[:400],
+        "version": "",
+        "repository": str(item.get("homepage") or ""),
+        "transport": "stdio",
+        "command": command,
+        "args": args,
+        "url": "",
+        "requires_env": sorted(required_env),
+        "requires_headers": [],
+        "runtime": command,
+        "verified": bool(item.get("verified")),
+        "uses": int(item.get("useCount") or 0),
+        "latest": True,
+    }, hint)
+
+
+def _smithery_candidates(query: str, limit: int) -> list[dict]:
+    out: dict[str, dict] = {}
+    for item in _fetch_smithery(query, limit):
+        candidate = _smithery_normalise(item)
+        if candidate is not None:
+            out.setdefault(candidate["name"], candidate)
+    return list(out.values())
+
+
+async def search(query: str, limit: int = 12,
+                 sources: tuple[str, ...] = ("registry", "smithery")) -> list[dict]:
+    """Candidate servers matching a query, from every source that has one."""
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    loop = asyncio.get_running_loop()
+    jobs = []
+    if "registry" in sources:
+        jobs.append(loop.run_in_executor(None, _registry_candidates, query, limit))
+    if "smithery" in sources:
+        jobs.append(loop.run_in_executor(None, _smithery_candidates, query, limit))
+    batches = await asyncio.gather(*jobs, return_exceptions=True)
+
+    merged: dict[str, dict] = {}
+    for batch in batches:
+        if isinstance(batch, Exception):
+            log.debug("MCP market source failed for %r: %s", query, batch)
+            continue
+        for candidate in batch:
+            # First source listed wins a name clash, so the official registry
+            # stays authoritative when both carry the same server.
+            merged.setdefault(candidate["name"], candidate)
+    return list(merged.values())
 
 
 async def suggest(task: str, limit: int = 8) -> list[dict]:

@@ -435,8 +435,9 @@ function McpSection({settings,update,saving,status}: any){
                 {c.name}{c.version?` · v${c.version}`:''}
               </p>
             </div>
-            <span className="shrink-0 rounded bg-[#21262d] px-2 py-0.5 text-[10px] text-[#8b949e]">
-              {c.transport}
+            <span className="shrink-0 rounded bg-[#21262d] px-2 py-0.5 text-[10px] text-[#8b949e]"
+              title={`found via ${c.source||'the official registry'}`}>
+              {c.transport}{c.source&&c.source!=='registry'?` · ${c.source}`:''}
             </span>
           </div>
           {c.description&&<p className="mt-1 text-[11px] text-[#8b949e]">{c.description}</p>}

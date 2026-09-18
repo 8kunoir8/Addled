@@ -364,15 +364,111 @@ def stderr_checks() -> None:
           (out.get("server") or {}).get("state"))
 
 
+LISTING = ('Add this to your config: {"command": "npx", "args": ["-y", '
+           '"reportflow-mcp"]} That is the whole setup. No env vars, no API '
+           'keys, no secrets to manage.')
+
+
+def _smithery_entry(market, payload: dict, available: bool = True):
+    with mock.patch.object(market, "_runtime_available",
+                           lambda launcher: available):
+        return market._smithery_normalise(payload)
+
+
+def smithery_checks(market) -> None:
+    """The one other directory with a usable, key-free API.
+
+    Glama answers 401 without a key, mcp.so answers 500, PulseMCP retired its
+    API, and MCP Market and FreeMCPLab publish none - so this is the only other
+    source there is. Its listings often embed the launch command; when one does
+    not, the entry has to say so rather than be given a guessed launcher.
+    """
+    command, args, env = market._command_from_text(LISTING)
+    check("a launch command is read out of the listing",
+          command == "npx" and args == ["-y", "reportflow-mcp"], (command, args))
+    check("prose about API keys does not invent an env requirement",
+          env == [], env)
+    check("an unrelated command is not accepted as a launcher",
+          market._command_from_text('{"command": "curl", "args": []}')[0] == "")
+    usable = _smithery_entry(market, {"qualifiedName": "acme/tool",
+                                      "displayName": "Tool",
+                                      "description": LISTING,
+                                      "verified": True, "useCount": 12})
+    check("a Smithery listing with a command is runnable",
+          usable and usable["runnable"] is True
+          and usable["source"] == "smithery",
+          usable and usable.get("blocked_reason"))
+    check("and carries its title and popularity",
+          usable and usable["title"] == "Tool" and usable["uses"] == 12,
+          usable)
+
+    vague = _smithery_entry(market, {"qualifiedName": "acme/vague",
+                                     "displayName": "Vague",
+                                     "description": "No config published."})
+    check("a listing with no command is blocked, not guessed at",
+          vague and vague["runnable"] is False
+          and "no launch command" in vague["blocked_reason"],
+          vague and vague["blocked_reason"])
+
+    keyed = _smithery_entry(market, {
+        "qualifiedName": "acme/keyed", "displayName": "Keyed",
+        "description": '{"command": "npx", "args": ["x"], '
+                       '"env": {"ACME_KEY": "..."}}'})
+    check("an env the listing declares blocks it",
+          keyed and keyed["runnable"] is False
+          and keyed["requires_env"] == ["ACME_KEY"],
+          keyed and keyed["blocked_reason"])
+
+    hosted = _smithery_entry(market, {"qualifiedName": "acme/hosted",
+                                     "displayName": "Hosted",
+                                     "description": "No config here.",
+                                     "remote": True})
+    check("a hosted Smithery entry says why it cannot be used",
+          hosted and hosted["runnable"] is False
+          and "hosted" in hosted["blocked_reason"]
+          and "API key" in hosted["blocked_reason"],
+          hosted and hosted["blocked_reason"])
+
+    # The value of a second source is the servers only it has...
+    with mock.patch.object(market, "_fetch", lambda q, l: []), \
+         mock.patch.object(market, "_fetch_smithery",
+                           lambda q, l: [{"qualifiedName": "smi/only",
+                                          "displayName": "Only",
+                                          "description": LISTING}]), \
+         mock.patch.object(market, "_runtime_available", lambda launcher: True):
+        only = asyncio.run(market.search("thing", limit=10))
+    check("a server only Smithery has is still offered",
+          len(only) == 1 and only[0]["source"] == "smithery",
+          [c["source"] for c in only])
+
+    # ...and never overriding the official registry on the same name.
+    with mock.patch.object(market, "_fetch",
+                           lambda q, l: [npm_entry(name="same/name")]), \
+         mock.patch.object(market, "_fetch_smithery",
+                           lambda q, l: [{"qualifiedName": "same/name",
+                                          "displayName": "Same",
+                                          "description": LISTING}]), \
+         mock.patch.object(market, "_runtime_available", lambda launcher: True):
+        both = asyncio.run(market.search("thing", limit=10))
+    check("the registry wins when both carry the same server",
+          len(both) == 1 and both[0]["source"] == "registry",
+          [c["source"] for c in both])
+
+
 def main() -> int:
     from backend.mcp_client import market
 
-    normalise_checks(market)
-    search_checks(market)
-    suggest_checks(market)
-    install_checks(market)
-    sweep_checks()
-    stderr_checks()
+    # Nothing here may touch the network: the sources are stubbed, and the
+    # checks that are about a source patch it themselves.
+    with mock.patch.object(market, "_fetch", lambda q, l: []), \
+         mock.patch.object(market, "_fetch_smithery", lambda q, l: []):
+        normalise_checks(market)
+        search_checks(market)
+        suggest_checks(market)
+        install_checks(market)
+        sweep_checks()
+        stderr_checks()
+    smithery_checks(market)
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")
