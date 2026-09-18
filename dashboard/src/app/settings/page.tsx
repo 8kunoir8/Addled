@@ -9,7 +9,7 @@ type SettingsData = Record<string, any>;
 const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
   notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️', guidelines: '📐',
-  mcp: '🧰', wiki: '📖', workspace: '📁',
+  mcp: '🧰', wiki: '📖', workspace: '📁', remote: '📡',
 };
 
 export default function SettingsPage() {
@@ -40,7 +40,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['providers','character','voice','workspace','safety','notifications','observation','memory','wiki','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
+  const sections = ['providers','character','voice','workspace','safety','remote','notifications','observation','memory','wiki','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -66,6 +66,7 @@ export default function SettingsPage() {
         {activeSection==='voice'&&<VoiceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='workspace'&&<WorkspaceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='safety'&&<SafetySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
+        {activeSection==='remote'&&<RemoteSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='notifications'&&<NotificationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='memory'&&<MemorySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
@@ -936,6 +937,52 @@ function WorkspaceSection({ settings, update, saving, status, send, connected }:
       </div>
       {info.configured&&info.mode==='unrestricted'&&<div className="text-[#d29922]">The folder is set but Unrestricted mode means it is not being enforced.</div>}
     </div>}
+  </div>;
+}
+
+function RemoteSection({ settings, update, saving, status }: any) {
+  const r=settings?.remote||{};
+  const t=settings?.tailscale||{};
+  const Toggle=({label,desc,group,cfg,skey}:any)=><SettingRow label={label} description={desc}>
+    <button onClick={()=>update(group,skey,!cfg[skey])} className={`w-10 h-5 rounded-full transition-colors ${cfg[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}>
+      <div className={`w-4 h-4 bg-white rounded-full transition-transform ${cfg[skey]?'translate-x-5':'translate-x-0.5'}`}/>
+    </button>
+  </SettingRow>;
+  const Num=({label,desc,group,cfg,skey,min,max}:any)=><SettingRow label={label} description={desc}>
+    <input type="number" min={min} max={max} value={cfg[skey] ?? ''}
+      onChange={(e)=>update(group,skey,Number(e.target.value))}
+      className="w-20 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] focus:outline-none focus:border-[#3380FF]"/>
+  </SettingRow>;
+  return <div className="space-y-1">
+    <p className="text-xs text-[#8b949e] mb-2">Other machines reach this Addled through Tailscale. The gateway binds loopback only; Tailscale terminates HTTPS and proxies to it. See the Remote page for status and sign-in.</p>
+    <Toggle label="Remote access" desc="Start the authenticated gateway" group="remote" cfg={r} skey="enabled"/>
+    <Num label="Gateway port" desc="Loopback only — never exposed directly" group="remote" cfg={r} skey="port" min={1024} max={65535}/>
+    <Num label="Session length (hours)" desc="How long a signed-in device stays signed in" group="remote" cfg={r} skey="session_hours" min={1} max={720}/>
+    <Num label="Idle timeout (minutes)" desc="Sign out after this long without use" group="remote" cfg={r} skey="idle_timeout_minutes" min={5} max={1440}/>
+    <Num label="Maximum sessions" desc="Older sessions are dropped beyond this" group="remote" cfg={r} skey="max_sessions" min={1} max={50}/>
+
+    <div className="border-t border-[#30363d] my-3"/>
+    <p className="text-xs text-[#8b949e] mb-2">A signed-in browser is not automatically root. These hold back the two things that would turn a stolen session into full control of this machine.</p>
+    <Toggle label="Allow remote shell" desc="Let a remote session run commands. This is remote code execution — leave it off unless you need it" group="remote" cfg={r} skey="allow_shell"/>
+    <Toggle label="Allow remote input" desc="Let a remote session move the mouse and type. This can drive any window on this machine" group="remote" cfg={r} skey="allow_desktop_input"/>
+    <Toggle label="Publish to the public internet" desc="Allow Tailscale Funnel. Anyone with the URL reaches the login page, not just your tailnet" group="remote" cfg={r} skey="allow_funnel"/>
+
+    <div className="border-t border-[#30363d] my-3"/>
+    <p className="text-xs text-[#8b949e] mb-2">Addled manages an existing Tailscale install — status, sign-in and sharing. It never installs Tailscale itself.</p>
+    <Toggle label="Manage Tailscale" desc="Read status and reconcile the share on startup" group="tailscale" cfg={t} skey="enabled"/>
+    <SettingRow label="Node name" description="The name this machine takes on your tailnet. Blank uses the computer's name.">
+      <input type="text" value={t.hostname||''} placeholder="addled"
+        onChange={e=>update('tailscale','hostname',e.target.value)}
+        className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-44 font-mono"/>
+    </SettingRow>
+    <Num label="Share port" desc="The HTTPS port Tailscale serves on" group="tailscale" cfg={t} skey="serve_port" min={443} max={8443}/>
+    <Num label="Status poll (seconds)" desc="How often to ask the Tailscale CLI for its status" group="tailscale" cfg={t} skey="poll_seconds" min={5} max={600}/>
+    <Toggle label="Share on startup" desc="Re-apply the share when Addled starts" group="tailscale" cfg={t} skey="serve_enabled"/>
+    <Toggle label="Public sharing (Funnel)" desc="Off by default. Only turn this on together with the permission above" group="tailscale" cfg={t} skey="funnel"/>
+    <SettingRow label="Auth key" description="Optional, for headless sign-in. Stored locally and never sent to a browser.">
+      <span className="text-xs text-[#8b949e]">{t.auth_key ? 'Stored' : 'Not set'}</span>
+    </SettingRow>
+    <SettingRow label="Open remote access"><Link href="/remote" className="text-xs text-[#3380FF] hover:underline">Go to the Remote page →</Link></SettingRow>
   </div>;
 }
 

@@ -18,6 +18,7 @@ const NAV_ITEMS = [
   { href: '/browser', label: 'Browser', icon: '🌐' },
   { href: '/calendar', label: 'Calendar', icon: '📅' },
   { href: '/bots', label: 'Bots', icon: '🤖' },
+  { href: '/remote', label: 'Remote', icon: '📡' },
   { href: '/settings', label: 'Settings', icon: '⚙️' },
 ];
 

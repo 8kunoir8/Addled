@@ -59,6 +59,24 @@ function rejectAllPending(reason: string) {
   pending.clear();
 }
 
+/**
+ * Where the socket lives.
+ *
+ * Inside the Electron shell the dashboard is served from 127.0.0.1:3001 and the
+ * API is a separate port, so 9876 is the default. When Addled's remote gateway
+ * serves this page it injects __ADDLED_WS_URL__, and the socket becomes
+ * same-origin — which is what carries the session cookie, and what makes an
+ * https page upgrade to wss: automatically.
+ */
+function wsUrl(): string {
+  const injected = (globalThis as any).__ADDLED_WS_URL__;
+  if (typeof injected === 'string' && injected) {
+    const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${scheme}//${window.location.host}${injected}`;
+  }
+  return 'ws://127.0.0.1:9876';
+}
+
 function connect() {
   if (
     sharedSocket &&
@@ -69,7 +87,7 @@ function connect() {
   }
 
   setSharedState('connecting');
-  const ws = new WebSocket('ws://127.0.0.1:9876');
+  const ws = new WebSocket(wsUrl());
   sharedSocket = ws;
 
   ws.onopen = () => {

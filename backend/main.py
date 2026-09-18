@@ -193,6 +193,35 @@ def main():
     except Exception as e:
         log.warning("Local model manager unavailable: %s", e)
 
+    # ---- remote access gateway + Tailscale -----------------------------------
+    try:
+        from backend.remote.gateway import gateway
+        from backend.tailscale.manager import tailscale
+
+        def _remote_background(coro, name: str):
+            def _done(fut):
+                try:
+                    err = fut.exception()
+                except Exception:
+                    return
+                if err:
+                    log.warning("%s failed: %s", name, err)
+
+            handle = asyncio.run_coroutine_threadsafe(coro, _ws_loop)
+            handle.add_done_callback(_done)
+            return handle
+
+        # Neither opens anything on its own: the gateway refuses to start
+        # without a password, and Tailscale is only reconciled with what the
+        # user already chose. A fresh install therefore stays closed.
+        _remote_background(gateway.boot(), "remote gateway boot")
+        _remote_background(tailscale.boot(), "tailscale boot")
+        _remote_background(tailscale.watchdog_loop(), "tailscale watchdog")
+        log.info("Remote access armed (gateway %s)",
+                 "on" if gateway.enabled() else "off")
+    except Exception as e:
+        log.warning("Remote access manager unavailable: %s", e)
+
     # ---- MCP servers (third-party tool servers) ------------------------------
     try:
         from backend.mcp_client.manager import mcp_manager
@@ -548,6 +577,23 @@ def main():
         fut.result(timeout=15)
     except Exception as e:
         log.debug("MCP shutdown: %s", e)
+
+    # Stop the remote gateway. This also drops every remote session, so closing
+    # Addled logs remote devices out rather than leaving a live cookie behind.
+    try:
+        from backend.remote.gateway import gateway
+        fut = asyncio.run_coroutine_threadsafe(gateway.stop(), _ws_loop)
+        fut.result(timeout=10)
+    except Exception as e:
+        log.debug("Remote gateway shutdown: %s", e)
+
+    # Cancel any sign-in still waiting on a browser
+    try:
+        from backend.tailscale.manager import tailscale
+        fut = asyncio.run_coroutine_threadsafe(tailscale.stop(), _ws_loop)
+        fut.result(timeout=10)
+    except Exception as e:
+        log.debug("Tailscale shutdown: %s", e)
 
     # Summarize the session into long-term memory before the loops stop
     try:

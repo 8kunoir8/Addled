@@ -286,18 +286,61 @@ async function createWindow() {
 
     if (fs.existsSync(outDir)) {
       // Simple static file server for Next.js export
+      const root = path.resolve(outDir);
+      const isInside = (candidate) =>
+        candidate === root || candidate.startsWith(root + path.sep);
+
       const server = http.createServer((req, res) => {
-        let urlPath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
-        let filePath = path.join(outDir, urlPath);
+        const rawPath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+
+        // Decode, resolve, then verify containment. `path.join` silently
+        // collapses '..', so without this check a request for
+        // /../../backend/memory/settings.json escapes the build directory and
+        // is served — that file holds every API key this app has.
+        let urlPath = rawPath;
+        try {
+          urlPath = decodeURIComponent(rawPath);
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end('Bad request');
+          return;
+        }
+
+        let filePath = path.resolve(root, '.' + urlPath);
+        if (!isInside(filePath)) {
+          console.warn(`[Dashboard] Refused a path outside the build: ${urlPath}`);
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          res.end('Not found');
+          return;
+        }
+
         if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
           // trailing-slash export → dir/index.html; else Next puts file.html
           // at the top level (e.g. /settings → settings.html)
           const idx = path.join(filePath, 'index.html');
           filePath = fs.existsSync(idx) ? idx : filePath + '.html';
         }
-        if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-          filePath = path.join(outDir, 'index.html');
+
+        const missing = !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory();
+        if (missing) {
+          // A missing asset is a 404. Only a route (no file extension) falls
+          // back to the app shell — answering 200 with index.html for anything
+          // missing hides real breakage.
+          const leaf = urlPath.split('/').pop() || '';
+          if (leaf.includes('.')) {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('Not found');
+            return;
+          }
+          filePath = path.join(root, 'index.html');
         }
+
+        if (!isInside(filePath)) {
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          res.end('Not found');
+          return;
+        }
+
         const ext = path.extname(filePath).toLowerCase();
         const mimeTypes = {
           '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css',
@@ -306,11 +349,15 @@ async function createWindow() {
         };
         try {
           const data = fs.readFileSync(filePath);
-          res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'text/plain' });
+          res.writeHead(200, {
+            'Content-Type': mimeTypes[ext] || 'text/plain',
+            'X-Content-Type-Options': 'nosniff',
+          });
           res.end(data);
-        } catch {
-          res.writeHead(200, { 'Content-Type': 'text/html' });
-          res.end(fs.readFileSync(path.join(outDir, 'index.html')));
+        } catch (err) {
+          console.error(`[Dashboard] Could not read ${filePath}: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('Internal error');
         }
       });
       server.listen(servePort, '127.0.0.1');

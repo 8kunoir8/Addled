@@ -365,6 +365,38 @@ DEFAULT_SETTINGS: dict = {
         "max_per_category": 40,
         "dir": "",
     },
+    # Remote access: an authenticated gateway, so other machines can use the
+    # dashboard in a browser. The gateway itself binds loopback only; Tailscale
+    # Serve terminates TLS and proxies to it.
+    "remote": {
+        "enabled": False,
+        "port": 9878,
+        # scrypt hash. Empty means remote access cannot be opened at all.
+        "password_hash": "",
+        "session_hours": 12,
+        "idle_timeout_minutes": 60,
+        "max_sessions": 8,
+        # The two highest-risk categories stay local unless deliberately opened.
+        # A logged-in remote session is not automatically root.
+        "allow_shell": False,
+        "allow_desktop_input": False,
+        # Public internet exposure via Tailscale Funnel. Off, and not a switch
+        # to flip casually.
+        "allow_funnel": False,
+        "trusted_origins": [],
+    },
+    # Tailscale: Addled manages an existing install — status, login, serve,
+    # funnel. It never installs Tailscale itself.
+    "tailscale": {
+        "enabled": False,
+        "hostname": "",
+        "serve_enabled": False,
+        "serve_port": 443,
+        "funnel": False,
+        "poll_seconds": 20,
+        # Optional pre-auth key for a headless node. Never returned to the UI.
+        "auth_key": "",
+    },
     "voice": {
         "tts_engine": "edge",
         "tts_voice": "en-US-JennyNeural",

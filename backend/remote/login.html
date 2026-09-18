@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Addled — Remote access</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    background: #0d1117; color: #e8eaed;
+    font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 380px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+    padding: 28px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  p.sub { margin: 0 0 22px; color: #8b949e; font-size: 13px; }
+  label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 6px; }
+  input {
+    width: 100%; padding: 10px 12px; font-size: 15px; font-family: inherit;
+    color: #e8eaed; background: #0d1117;
+    border: 1px solid #30363d; border-radius: 8px;
+  }
+  input:focus { outline: none; border-color: #1f6feb; }
+  button {
+    width: 100%; margin-top: 16px; padding: 11px;
+    font-size: 15px; font-family: inherit; font-weight: 500;
+    color: #fff; background: #1f6feb; border: 0; border-radius: 8px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  .msg { margin-top: 14px; font-size: 13px; min-height: 18px; }
+  .msg.err { color: #f85149; }
+  .msg.ok { color: #3fb950; }
+  .hint {
+    margin-top: 20px; padding-top: 16px; border-top: 1px solid #30363d;
+    font-size: 12px; color: #8b949e;
+  }
+  code { background: #0d1117; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+  <form class="card" id="form" autocomplete="off">
+    <h1>Addled</h1>
+    <p class="sub" id="sub">Enter your remote access password.</p>
+
+    <label for="pw">Password</label>
+    <input id="pw" name="password" type="password" autocomplete="current-password"
+           autofocus required>
+
+    <button id="go" type="submit">Unlock</button>
+    <div class="msg" id="msg" role="status" aria-live="polite"></div>
+
+    <div class="hint">
+      The password is shown in Addled under <strong>Remote</strong>. It is stored
+      only as a hash, so it cannot be recovered — if it is lost, generate a new
+      one there.
+    </div>
+  </form>
+
+<script>
+(function () {
+  var form = document.getElementById('form');
+  var pw = document.getElementById('pw');
+  var go = document.getElementById('go');
+  var msg = document.getElementById('msg');
+
+  function say(text, cls) {
+    msg.textContent = text;
+    msg.className = 'msg ' + (cls || '');
+  }
+
+  form.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    if (!pw.value) { return; }
+    go.disabled = true;
+    say('Checking\u2026');
+
+    try {
+      // The password travels in a header, not a body: the gateway sits on
+      // websockets' HTTP handshake path, which does not parse request bodies.
+      var res = await fetch('/api/session', {
+        method: 'POST',
+        headers: { 'X-Addled-Password': pw.value },
+        cache: 'no-store',
+        credentials: 'same-origin'
+      });
+
+      if (res.ok) {
+        say('Unlocked. Loading\u2026', 'ok');
+        // replace(), so Back does not return to the login form.
+        location.replace('/');
+        return;
+      }
+
+      var detail = '';
+      try { detail = (await res.json()).error || ''; } catch (e) { /* not json */ }
+      if (res.status === 429) {
+        say(detail || 'Too many attempts. Wait a moment and try again.', 'err');
+      } else if (res.status === 503) {
+        say(detail || 'Remote access is not configured.', 'err');
+      } else {
+        say(detail || 'That password is not right.', 'err');
+      }
+      pw.value = '';
+      pw.focus();
+    } catch (e) {
+      say('Could not reach Addled: ' + e.message, 'err');
+    }
+    go.disabled = false;
+  });
+})();
+</script>
+</body>
+</html>

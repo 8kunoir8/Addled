@@ -252,7 +252,22 @@ Telegram (grammY with 6 commands), WhatsApp (Baileys multi-device with QR pairin
 ### 💗 Lifelike companion (mood, timeline, presence)
 A persistent **mood & emotion engine** (valence + energy, decays over time) drives the character's visual tint, movement energy and **voice emotion** (Kokoro speech speed follows the mood). **Barge-in**: start talking while Addled speaks and it stops mid-sentence. **Initiative cadence**: return greetings + a daily check-in. An **episodic timeline** journals every day (nightly summaries) and a learned **user model** (preferences, rituals, hours) is injected into every chat — the agent references its own past naturally. **Project awareness**: index your code workspace (semantic search, chat injection). **Predictive proactivity**: weekly rhythms mined from tasks/calendar → gentle suggestions. **Reflection loop**: per-skill telemetry + weekly self-review.
 
-### 🛡️ Safety
+### � Remote access (Tailscale)
+Reach Addled from your phone or another machine, in a browser, over Tailscale — it manages an existing Tailscale install (status, sign-in, `tailscale serve` sharing) and never installs Tailscale itself.
+
+The WebSocket API has **no authentication of its own**, and several of its 138 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
+
+- It serves the login page and the dashboard, and only bridges a WebSocket to `127.0.0.1:9876` **after** validating a session. It binds loopback only; Tailscale terminates TLS and proxies to it, so the browser gets a real `https://<machine>.<tailnet>.ts.net` URL and `wss://` works without Addled handling a certificate.
+- The **password is scrypt-hashed** (`settings.json`), sessions are **in-memory only** (a restart logs everyone out), login attempts are **rate-limited per address**, and the session cookie is `HttpOnly` + `SameSite=Lax` (+ `Secure` over HTTPS).
+- **The gateway refuses to start without a password**, and sharing refuses too. There is no way to publish an unauthenticated dashboard.
+- A logged-in remote session is **not automatically root**: running commands and controlling the mouse/keyboard are blocked for it unless you turn them on in Settings → Remote, on the machine itself. `mcp.add`/`mcp.connect` and `skills.installFrom` stay blocked regardless — they spawn processes or install code, which no browser session needs.
+- Secrets are **redacted from `settings.get`** for remote connections, so one request can no longer return every API key and refresh token.
+- The WebSocket handshake now checks the **`Origin`** header. Before this, any page in any browser on the machine could open `ws://127.0.0.1:9876` and drive the API — loopback stops the network, not the user's own browser.
+- Tailscale **Funnel** (public internet) is off by default and needs an explicit opt-in.
+
+Run it: **Remote** page → generate a password → sign in to Tailscale → share to your tailnet. Defaults the whole feature off.
+
+### �🛡️ Safety
 Prompt guard (15 injection + 5 exfiltration patterns), presence guard (meeting/gaming/away auto-sleep), rate limiter, destruction gate with approval workflow (`action.approve` / `action.deny`), **global kill-switch hotkey** (Ctrl+Shift+Alt+K, configurable), **clipboard secret filter** (API keys, tokens, passwords, private keys redacted before the agent sees them), **egress monitor** (logs + scrubs every outbound payload), and **privacy zones** (screen blackout regions + excluded apps actually applied to screenshots).
 
 ### 🧠 Memory

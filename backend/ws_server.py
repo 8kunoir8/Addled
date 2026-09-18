@@ -58,10 +58,15 @@ class WSServer:
 
     async def start(self, host: str = "127.0.0.1", port: int = 9876):
         """Start the WebSocket server."""
+        from backend.remote.policy import allowed_origins
         self._loop = asyncio.get_running_loop()
         self._server = await websockets.serve(
             self._handle_connection, host, port,
             max_size=64 * 1024 * 1024,  # 64MB — room for base64 image attachments
+            # Without this, any page in any browser on this machine could open a
+            # socket and drive the API. Loopback stops the network, not the
+            # user's own browser.
+            origins=allowed_origins(),
         )
         log.info("WebSocket server listening on ws://%s:%d", host, port)
 
@@ -95,11 +100,45 @@ class WSServer:
         asyncio.run_coroutine_threadsafe(
             self.broadcast(method, params), self._loop)
 
+    def _note_remote(self, ws: WebSocketServerProtocol) -> dict:
+        """Attach the remote context to a connection, if the gateway set one.
+
+        The gateway connects from loopback, so the peer address cannot tell a
+        remote caller from a local one — the headers it injects are the only
+        signal, and they are read here once so nothing downstream has to.
+        """
+        context = {"remote": False, "session": "", "addr": "",
+                   "tailscale_user": "", "tailscale_device": ""}
+        try:
+            request = getattr(ws, "request", None)
+            headers = getattr(request, "headers", None)
+            if headers is not None and headers.get("X-Addled-Remote"):
+                context = {
+                    "remote": True,
+                    "session": str(headers.get("X-Addled-Session") or ""),
+                    "addr": str(headers.get("X-Forwarded-For") or ""),
+                    "tailscale_user": str(headers.get("Tailscale-User-Login") or ""),
+                    "tailscale_device": str(headers.get("Tailscale-Node-Name") or ""),
+                }
+        except Exception as e:  # noqa: BLE001
+            log.debug("Could not read remote context: %s", e)
+        try:
+            ws.addled = context
+        except Exception:  # noqa: BLE001
+            pass
+        return context
+
     async def _handle_connection(self, ws: WebSocketServerProtocol):
         """Handle a single WebSocket connection."""
         self._connections.add(ws)
+        context = self._note_remote(ws)
         peer = ws.remote_address
-        log.info("Client connected: %s", peer)
+        if context["remote"]:
+            log.info("Remote client connected: session=%s via %s from %s",
+                     context["session"] or "?", peer,
+                     context["addr"] or "?")
+        else:
+            log.info("Client connected: %s", peer)
 
         try:
             async for raw in ws:
@@ -135,6 +174,31 @@ class WSServer:
         # Notifications have no id — don't respond
         is_notification = msg_id is None and method != ""
 
+        # Read the remote flag straight off the connection so this works even
+        # if the policy module cannot be imported. Failing closed matters here:
+        # a broken import must not silently unlock a remote session.
+        remote = bool((getattr(ws, "addled", None) or {}).get("remote"))
+        sid = str((getattr(ws, "addled", None) or {}).get("session") or "")
+
+        refuser = None
+        if remote:
+            try:
+                from backend.remote.policy import remote_refusal
+                refuser = remote_refusal
+            except Exception as e:  # noqa: BLE001
+                log.error("Remote policy unavailable (%s) — refusing '%s'",
+                          e, method)
+                if is_notification:
+                    return None
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32002,
+                              "message": "Remote access is misconfigured on the "
+                                         "machine running Addled; this call was "
+                                         "refused."},
+                }
+
         handler = self._handlers.get(method)
         if handler is None:
             if is_notification:
@@ -146,9 +210,27 @@ class WSServer:
             }
 
         try:
+            # One gate for every remote restriction. A handler added later is
+            # covered by default rather than by remembering to check.
+            if refuser is not None:
+                refusal = refuser(method, params)
+                if refusal:
+                    log.warning("Remote session %s refused '%s'", sid or "?", method)
+                    if is_notification:
+                        return None
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {"code": -32001, "message": refusal},
+                    }
+
             result = await handler(params, ws)
             if is_notification:
                 return None
+            if remote:
+                # Local calls stay unlogged: they are the dashboard polling
+                # itself, and logging them would bury the ones that matter.
+                log.info("Remote session %s: %s -> ok", sid or "?", method)
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
@@ -887,12 +969,21 @@ def _register_default_handlers():
 
     async def settings_get(params: dict, ws) -> dict:
         from backend.config import config
+        from backend.remote.policy import is_remote, redact_settings
         section = params.get("section")
         if section:
-            return {"settings": {section: config.get(section, default={})}}
-        # Ensure config is loaded before accessing private _data
-        config._ensure_loaded()
-        return {"settings": dict(config._data)}
+            data = {section: config.get(section, default={})}
+        else:
+            # Ensure config is loaded before accessing private _data
+            config._ensure_loaded()
+            data = dict(config._data)
+        if is_remote(ws):
+            # With no section this returns the whole settings tree, which holds
+            # every provider key, the Google refresh token, the email password
+            # and the bot tokens. A remote browser gets the shape of the
+            # settings, not the secrets.
+            data = redact_settings(data)
+        return {"settings": data}
 
     async def settings_set(params: dict, ws) -> dict:
         from backend.config import config
@@ -912,6 +1003,28 @@ def _register_default_handlers():
                 await local_llm.apply_policy()
             except Exception as exc:
                 log.debug("Local model policy after settings change: %s", exc)
+        # Remote access and Tailscale take effect immediately rather than on the
+        # next restart, because the user's next action is usually to try them.
+        if section in ("remote", "tailscale"):
+            warning = ""
+            try:
+                from backend.remote.gateway import gateway
+                if gateway.enabled() and not gateway.is_running():
+                    _ok, _error = await gateway.start()
+                    warning = _error
+                elif not gateway.enabled() and gateway.is_running():
+                    await gateway.stop()
+            except Exception as exc:
+                log.debug("Remote gateway policy failed: %s", exc)
+                warning = str(exc)
+            try:
+                from backend.tailscale.manager import tailscale
+                await tailscale.apply_policy()
+            except Exception as exc:
+                log.debug("Tailscale policy failed: %s", exc)
+            if warning:
+                # Surfaced so the Remote page can explain why nothing opened.
+                return {"success": True, "warning": warning}
         return {"success": True}
 
     async def workspace_status(params: dict, ws) -> dict:
@@ -1380,6 +1493,126 @@ def _register_default_handlers():
         except Exception as e:
             log.debug("sop.reseed failed: %s", e)
             return {"success": False, "error": str(e)}
+
+    # ---- Remote access ------------------------------------------------------
+
+    async def remote_status(params: dict, ws) -> dict:
+        """What the Remote page needs: the gateway, the sessions, the tailnet."""
+        out: dict = {"success": True}
+        try:
+            from backend.remote.gateway import gateway
+            out.update(gateway.status())
+        except Exception as e:
+            log.debug("remote.status gateway part failed: %s", e)
+            out.update({"enabled": False, "running": False, "sessions": [],
+                        "blockers": [f"Remote access is unavailable: {e}"],
+                        "error": str(e)})
+        try:
+            from backend.tailscale.manager import tailscale
+            ts = tailscale.status()
+            out["tailscale"] = ts
+            # The URL to hand to another device, if the tailnet is serving us.
+            out["remote_url"] = tailscale.url()
+        except Exception as e:
+            log.debug("remote.status tailscale part failed: %s", e)
+            out["tailscale"] = {"installed": False, "blockers": [str(e)]}
+            out["remote_url"] = ""
+        # Never send the gateway's own bind address as if it were the URL.
+        out.setdefault("remote_url", "")
+        return out
+
+    async def remote_set_password(params: dict, ws) -> dict:
+        """Set the remote password. Only callable from a local connection."""
+        from backend.remote import auth
+        # A remote session must not be able to change the password that guards
+        # it — that would turn one compromised session into permanent access.
+        if getattr(ws, "addled", {}).get("remote"):
+            return {"success": False,
+                    "error": "The remote password can only be changed on the "
+                             "machine running Addled."}
+        return auth.set_password(str(params.get("password") or ""))
+
+    async def remote_generate_password(params: dict, ws) -> dict:
+        """Set a strong password and return it once, for the user to copy."""
+        from backend.remote import auth
+        if getattr(ws, "addled", {}).get("remote"):
+            return {"success": False,
+                    "error": "The remote password can only be changed on the "
+                             "machine running Addled."}
+        password = auth.generate_password()
+        result = auth.set_password(password)
+        if not result.get("success"):
+            return result
+        return {"success": True, "password": password,
+                "sessionsDropped": result.get("sessionsDropped", 0)}
+
+    async def remote_sessions(params: dict, ws) -> dict:
+        from backend.remote import auth
+        return {"success": True, "sessions": auth.sessions.list()}
+
+    async def remote_revoke(params: dict, ws) -> dict:
+        from backend.remote import auth
+        session_id = str(params.get("id") or "")
+        if not session_id:
+            return {"success": False, "error": "Pass the session 'id'."}
+        removed = auth.sessions.revoke(session_id)
+        return {"success": removed, "sessions": auth.sessions.list(),
+                **({} if removed else {"error": "No such session."})}
+
+    async def remote_revoke_all(params: dict, ws) -> dict:
+        from backend.remote import auth
+        count = auth.sessions.revoke_all()
+        return {"success": True, "revoked": count, "sessions": []}
+
+    async def remote_start(params: dict, ws) -> dict:
+        from backend.remote.gateway import gateway
+        ok, error = await gateway.start()
+        return {"success": ok, "error": error, "status": gateway.status()}
+
+    async def remote_stop(params: dict, ws) -> dict:
+        from backend.remote.gateway import gateway
+        await gateway.stop()
+        return {"success": True, "status": gateway.status()}
+
+    # ---- Tailscale -----------------------------------------------------------
+
+    async def tailscale_status(params: dict, ws) -> dict:
+        from backend.tailscale.manager import tailscale
+        if params.get("refresh"):
+            try:
+                await tailscale.refresh()
+            except Exception as e:  # noqa: BLE001
+                log.debug("tailscale refresh failed: %s", e)
+        return {"success": True, **tailscale.status()}
+
+    async def tailscale_login(params: dict, ws) -> dict:
+        """Begin a sign-in. The URL arrives on `tailscale.loginUrl`."""
+        from backend.tailscale.manager import tailscale
+        key = str(params.get("authKey") or "").strip()
+        if key:
+            # Stored, never returned; `status()` deliberately omits it.
+            try:
+                from backend.config import config
+                config.set("tailscale", "auth_key", value=key)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not store the auth key: %s", e)
+        return await tailscale.login(auth_key=key)
+
+    async def tailscale_logout(params: dict, ws) -> dict:
+        from backend.tailscale.manager import tailscale
+        return await tailscale.logout()
+
+    async def tailscale_down(params: dict, ws) -> dict:
+        from backend.tailscale.manager import tailscale
+        return await tailscale.down()
+
+    async def tailscale_enable_serve(params: dict, ws) -> dict:
+        from backend.tailscale.manager import tailscale
+        return await tailscale.enable_serve(funnel=bool(params.get("funnel")))
+
+    async def tailscale_disable_serve(params: dict, ws) -> dict:
+        from backend.tailscale.manager import tailscale
+        return await tailscale.disable_serve(funnel=bool(params.get("funnel")))
 
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
@@ -2337,6 +2570,20 @@ def _register_default_handlers():
     _server.register("sop.save", sop_save)
     _server.register("sop.delete", sop_delete)
     _server.register("sop.reseed", sop_reseed)
+    _server.register("remote.status", remote_status)
+    _server.register("remote.setPassword", remote_set_password)
+    _server.register("remote.generatePassword", remote_generate_password)
+    _server.register("remote.sessions", remote_sessions)
+    _server.register("remote.revoke", remote_revoke)
+    _server.register("remote.revokeAll", remote_revoke_all)
+    _server.register("remote.start", remote_start)
+    _server.register("remote.stop", remote_stop)
+    _server.register("tailscale.status", tailscale_status)
+    _server.register("tailscale.login", tailscale_login)
+    _server.register("tailscale.logout", tailscale_logout)
+    _server.register("tailscale.down", tailscale_down)
+    _server.register("tailscale.enableServe", tailscale_enable_serve)
+    _server.register("tailscale.disableServe", tailscale_disable_serve)
 
     # Sprite skins
     _server.register("character.skinsList", character_skins_list)
