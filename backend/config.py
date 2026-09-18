@@ -54,12 +54,28 @@ DEFAULT_SETTINGS: dict = {
         "active": "local",
         "smart_default": True,
         "priority": ["local", "openrouter", "huggingface", "deepseek", "claude", "openai", "copilot", "gemini", "ollama", "lmstudio"],
+        # Task-aware model routing (see backend/providers/router.py).
+        # "default_model" stays the baseline for every role; the per-provider
+        # "roles" map only overrides it where the user (or these defaults) opt in.
+        "auto_route": True,
+        "route_validate": True,
+        "route_long_chars": 1200,
+        "route_reason_chars": 400,
+        "route_code_reason_chars": 80,
         "builtin": {
             "deepseek": {
                 "name": "DeepSeek",
                 "base_url": "https://api.deepseek.com",
                 "api_key": "",
                 "default_model": "deepseek-v4-pro",
+                # Cheap/fast model for ordinary conversation, the stronger model
+                # for analysis. Empty values fall back to "default_model".
+                "roles": {
+                    "chat": "deepseek-v4-flash",
+                    "reasoning": "deepseek-v4-pro",
+                    "vision": "",
+                    "utility": "",
+                },
                 "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"],
                 "vision": True,
                 "vision_mode": "local",

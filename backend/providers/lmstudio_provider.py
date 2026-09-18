@@ -42,7 +42,8 @@ class LMStudioProvider(BaseProvider):
             client = self._get_client()
             payload = {
                 "messages": messages,
-                "model": model or self._config.get("model", "local-model"),
+                "model": model or self._config.get("default_model")
+                or self._config.get("model", "local-model"),
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "stream": False,
@@ -68,7 +69,8 @@ class LMStudioProvider(BaseProvider):
             client = self._get_client()
             payload = {
                 "messages": messages,
-                "model": model or self._config.get("model", "local-model"),
+                "model": model or self._config.get("default_model")
+                or self._config.get("model", "local-model"),
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "stream": True,

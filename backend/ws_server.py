@@ -174,7 +174,8 @@ def get_server() -> WSServer:
     return _server
 
 
-async def _analyze_attachments(provider, attachments: list[dict]) -> list[str]:
+async def _analyze_attachments(provider, attachments: list[dict],
+                              vision_model: str | None = None) -> list[str]:
     """Route attachments to the right model:
     - images → visual model (provider vision or local Florence-2) → text description
     - text files → inline content
@@ -194,7 +195,8 @@ async def _analyze_attachments(provider, attachments: list[dict]) -> list[str]:
             desc = None
             try:
                 if getattr(provider, "supports_vision", False):
-                    res = await provider.vision(data, prompt)
+                    res = await provider.vision(data, prompt,
+                                                model=vision_model)
                     if res.ok:
                         desc = res.response
             except Exception:
@@ -293,6 +295,9 @@ async def _speak_reply(text: str, voice: str = "en-US-JennyNeural") -> dict:
 
 async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> dict:
     from backend.config import config
+
+    # params is optional; several paths below read from it unconditionally.
+    params = params or {}
 
     # Prompt guard check
     if config.get("safety", "prompt_guard", default=True):
@@ -414,13 +419,16 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
             except Exception as e:
                 log.debug("triple lookup failed: %s", e)
 
+        # Does this look like code/file work? Shared by project injection and by
+        # the model router (substantive code work leans on the reasoning role).
+        code_hint = any(k in message.lower() for k in
+                        (".py", ".js", ".ts", "file", "function",
+                         "class ", "code", "bug", "repo", "import"))
+
         # Project awareness: inject matching code snippets when the message
         # looks code/file-related
         if config.get("project", "inject_into_chat", default=True):
             try:
-                code_hint = any(k in message.lower() for k in
-                                (".py", ".js", ".ts", "file", "function",
-                                 "class ", "code", "bug", "repo", "import"))
                 if code_hint:
                     from backend.project.indexer import search_project
                     hits = search_project(message, top_k=4)
@@ -492,7 +500,11 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         attachments = params.get("attachments") or []
         if attachments:
             try:
-                att_notes = await _analyze_attachments(provider, attachments)
+                from backend.providers import router as _router
+                _vision_model = _router.resolve_model(
+                    getattr(provider, "provider_id", ""), "vision")
+                att_notes = await _analyze_attachments(
+                    provider, attachments, vision_model=_vision_model)
                 if att_notes:
                     user_messages.insert(0, {
                         "role": "user",
@@ -505,12 +517,35 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
 
         user_messages.append({"role": "user", "content": message})
 
+        # Task-aware model routing. "default_model" stays the baseline, so an
+        # unconfigured provider behaves exactly as it did before routing.
+        role, route_model = "chat", None
+        try:
+            from backend.providers import router
+            explicit_role, message = router.split_role_tag(message)
+            image_only = bool(attachments) and all(
+                (a or {}).get("kind") == "image" for a in attachments)
+            role, route_model = router.pick(
+                getattr(provider, "provider_id", "unknown"),
+                message,
+                has_attachments=bool(attachments),
+                image_only=image_only,
+                code_hint=code_hint,
+                force_role=explicit_role,
+            )
+            log.debug("Chat route: role=%s model=%s provider=%s",
+                      role, route_model,
+                      getattr(provider, "provider_id", "?"))
+        except Exception as e:
+            log.debug("Model routing failed, using provider default: %s", e)
+
         # Use the provider-agnostic tool-use loop
         result = await chat_with_tools(
             provider=provider,
             messages=user_messages,
             system_prompt=sys_prompt,
             max_tool_rounds=params.get("maxToolRounds", 5),
+            model=route_model,
         )
 
         response_text = result.get("response", "")
@@ -532,9 +567,12 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
                 "toolRounds": tool_rounds,
                 "toolResults": len(tool_results),
                 "memoryRecall": bool(memory_ctx),
+                "role": role,
+                "model": route_model or "",
             }
         return {"response": response_text or "I couldn't process that request.",
-                "tokens": result.get("tokens", 0), "conversationId": None}
+                "tokens": result.get("tokens", 0), "conversationId": None,
+                "role": role, "model": route_model or ""}
     except Exception as e:
         log.exception("Chat failed")
         return {"response": f"[Not connected: {e}] Configure an AI provider in Settings.", "tokens": 0, "conversationId": None}
@@ -603,6 +641,19 @@ def _register_default_handlers():
         from backend.actions.desktop_control import desktop_control
         desktop_control.revoke()
         return {"success": True, "granted": False}
+
+    async def models_routes(params: dict, ws) -> dict:
+        """Effective model per task role — powers the Settings routing panel."""
+        from backend.config import config
+        from backend.providers import router
+        pid = params.get("provider") or config.active_provider
+        try:
+            return {"routes": router.describe(pid),
+                    "roles": list(router.ROLES)}
+        except Exception as e:
+            log.debug("models.routes failed: %s", e)
+            return {"routes": {}, "roles": list(router.ROLES),
+                    "error": str(e)}
 
     async def settings_get(params: dict, ws) -> dict:
         from backend.config import config
@@ -996,7 +1047,17 @@ def _register_default_handlers():
             if original:
                 prompt += f"And this original code:\n```\n{original[:3000]}\n```\n\n"
             prompt += "Return ONLY the complete modified code. No explanations."
-            result = await provider.chat([{"role": "user", "content": prompt}], max_tokens=4000, temperature=0.3)
+            # Editing code is the canonical reasoning-role task.
+            try:
+                from backend.providers import router
+                _role, _model = router.pick(
+                    getattr(provider, "provider_id", "unknown"),
+                    instruction, force_role="reasoning")
+            except Exception:
+                _model = None
+            result = await provider.chat(
+                [{"role": "user", "content": prompt}],
+                model=_model, max_tokens=4000, temperature=0.3)
             if result.ok and original:
                 modified = result.response.strip()
                 if modified.startswith("```"):
@@ -1580,6 +1641,7 @@ def _register_default_handlers():
     _server.register("desktop.revoke", desktop_revoke)
     _server.register("settings.get", settings_get)
     _server.register("settings.set", settings_set)
+    _server.register("models.routes", models_routes)
 
     # Phase 5 Goals engine
     _server.register("goal.create", goal_create)

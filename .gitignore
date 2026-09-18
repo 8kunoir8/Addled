@@ -32,3 +32,6 @@ backend/voice/models/
 backend/memory/integrations/scheduled_tasks.json
 backend/memory/integrations/scheduler_state.json
 
+# Skill usage telemetry (runtime counters)
+backend/memory/integrations/skill_telemetry.json
+

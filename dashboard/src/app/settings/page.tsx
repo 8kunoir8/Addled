@@ -213,6 +213,13 @@ function SkinsSection({ send, connected }: { send: (m: string, p?: any) => Promi
   );
 }
 
+const ROUTE_ROLES:[string,string,string][]=[
+  ['chat','Chat','quick conversational replies'],
+  ['reasoning','Reasoning','analysis, debugging, code changes'],
+  ['vision','Vision','images and screenshots'],
+  ['long','Long context','whole files and documents'],
+];
+
 function ProvidersSection({ settings, update, saving, status }: any) {
   const p=settings?.providers||{}, builtin=p.builtin||{}, active=p.active||'local';
   const llm=settings?.local_llm||{};
@@ -259,6 +266,45 @@ function ProvidersSection({ settings, update, saving, status }: any) {
         <input type="text" value={builtin[active]?.default_model||''} readOnly className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#8b949e] w-64"/>
       )}
     </SettingRow>
+    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium text-[#e8eaed]">🎯 Model routing</p>
+        <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+          <input type="checkbox" checked={p.auto_route!==false}
+            onChange={e=>update('providers','auto_route',e.target.checked)}/>
+          Auto-switch per task
+        </label>
+      </div>
+      <p className="mt-1 text-[11px] text-[#8b949e]">
+        Addled picks a model based on what the task needs. Any role left on
+        <span className="font-mono"> default </span>
+        uses <span className="font-mono">{builtin[active]?.default_model||'the provider default'}</span>.
+      </p>
+      {p.auto_route!==false&&
+        <div className="mt-2 space-y-1">
+          {ROUTE_ROLES.map(([role,label,hint])=>{
+            const rcfg=builtin[active]?.roles||{};
+            const cur=rcfg[role]||'';
+            const fb=role==='vision'
+              ?(builtin[active]?.vision_model||builtin[active]?.default_model||'')
+              :(builtin[active]?.default_model||'');
+            const opts=Array.from(new Set(
+              [...(models||[]), fb, cur,
+               ...(role==='vision'&&builtin[active]?.vision_model?[builtin[active].vision_model]:[])]
+            )).filter(Boolean) as string[];
+            return <div key={role} className="flex items-center gap-2">
+              <span className="w-24 shrink-0 text-[11px] text-[#8b949e]" title={hint}>{label}</span>
+              <select value={cur}
+                onChange={e=>{const u={...builtin,[active]:{...builtin[active],roles:{...(builtin[active]?.roles||{}),[role]:e.target.value}}};update('providers','builtin',u)}}
+                className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] flex-1 min-w-0">
+                <option value="">Use default — {fb||'provider default'}</option>
+                {opts.map(m=><option key={m} value={m}>{m}</option>)}
+              </select>
+              <span className="w-44 shrink-0 truncate text-[10px] text-[#8b949e]" title={`Effective model: ${cur||fb}`}>{cur||fb||'—'}</span>
+            </div>;
+          })}
+        </div>}
+    </div>
     {active==='openrouter'&&!builtin?.openrouter?.api_key&&
       <p className="text-xs text-[#d29922] px-1">⚠ OpenRouter needs an API key — paste it below (openrouter.ai/keys).</p>}
 

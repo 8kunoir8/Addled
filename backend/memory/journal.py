@@ -120,7 +120,11 @@ async def _summarize_day(date_str: str) -> dict:
              "2-3 plain sentences (no lists, no meta-commentary)."},
             {"role": "user", "content": transcript},
         ])
-        provider_text = (resp.get("content") or "").strip()
+        # provider.chat returns a ProviderResult, not a dict.
+        if resp.ok:
+            provider_text = (resp.response or "").strip()
+        else:
+            log.debug("journal LLM summary failed: %s", resp.error)
     except Exception as e:
         log.debug("journal LLM summary unavailable: %s", e)
 

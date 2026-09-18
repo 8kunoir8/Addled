@@ -108,6 +108,7 @@ async def chat_with_tools(
     messages: list[dict],
     system_prompt: str = "",
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
+    model: str | None = None,
 ) -> dict:
     """
     Run a chat completion with automatic tool execution.
@@ -116,6 +117,10 @@ async def chat_with_tools(
       1. Send messages + tools to provider
       2. If provider returns a tool_call → execute skill → append result → repeat
       3. If provider returns text → done, return response
+
+    ``model`` is chosen by the request router (see backend.providers.router).
+    When it is None the provider uses its own configured default, which is the
+    behaviour Addled had before routing existed.
     """
     provider_id = getattr(provider, "provider_id", "unknown")
     uses_native = provider_id in NATIVE_TOOL_PROVIDERS
@@ -136,9 +141,9 @@ async def chat_with_tools(
         })
         try:
             if uses_native:
-                final = await _call_native_tools(provider, full_messages)
+                final = await _call_native_tools(provider, full_messages, model)
             else:
-                final = await _call_prompt_tools(provider, full_messages)
+                final = await _call_prompt_tools(provider, full_messages, model)
             final_text = (final.get("response") or "").strip()
             if final_text and not final.get("tool_calls"):
                 return {
@@ -156,9 +161,9 @@ async def chat_with_tools(
         rounds += 1
 
         if uses_native:
-            result = await _call_native_tools(provider, full_messages)
+            result = await _call_native_tools(provider, full_messages, model)
         else:
-            result = await _call_prompt_tools(provider, full_messages)
+            result = await _call_prompt_tools(provider, full_messages, model)
 
         # No tool call — normal text response
         if not result.get("tool_calls"):
@@ -222,7 +227,8 @@ async def chat_with_tools(
     }
 
 
-async def _call_native_tools(provider, messages: list[dict]) -> dict:
+async def _call_native_tools(provider, messages: list[dict],
+                             model: str | None = None) -> dict:
     """Use native function-calling API (OpenAI/DeepSeek/Gemini)."""
     tools = skill_registry.to_openai_tools()
 
@@ -230,13 +236,14 @@ async def _call_native_tools(provider, messages: list[dict]) -> dict:
         try:
             result = await provider.chat(
                 messages,
+                model=model,
                 max_tokens=4096,
                 temperature=0.7,
                 tools=tools,
             )
         except TypeError:
             # Provider doesn't accept a tools kwarg → prompt-injected tools
-            return await _call_prompt_tools(provider, messages)
+            return await _call_prompt_tools(provider, messages, model)
 
         if not result.ok:
             return {"response": f"[Provider error: {result.error}]", "tokens": 0}
@@ -281,7 +288,8 @@ async def _call_native_tools(provider, messages: list[dict]) -> dict:
         return {"response": f"Error: {e}", "tokens": 0}
 
 
-async def _call_prompt_tools(provider, messages: list[dict]) -> dict:
+async def _call_prompt_tools(provider, messages: list[dict],
+                             model: str | None = None) -> dict:
     """For providers without native tool support: inject tools into prompt."""
     tools_text = skill_registry.to_prompt_tools()
 
@@ -296,6 +304,7 @@ async def _call_prompt_tools(provider, messages: list[dict]) -> dict:
     try:
         result = await provider.chat(
             modified_messages,
+            model=model,
             max_tokens=4096,
             temperature=0.7,
         )
