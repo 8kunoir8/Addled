@@ -46,7 +46,10 @@ extraResources:
     filter: ['**/*']
 
 win:
-  icon: electron/icons/icon.png
+  # A multi-size .ico rather than one bitmap: Windows picks 16/32/48 for the
+  # taskbar, Start Menu and Explorer, and a single large PNG scaled down to 16px
+  # comes out soft.
+  icon: electron/icons/icon.ico
   target:
     - target: nsis
       arch: [x64]
@@ -54,7 +57,11 @@ win:
       arch: [x64]
   artifactName: '${productName}-${version}-${arch}.${ext}'
   sign: null
-  signAndEditExecutable: false
+  # This has to stay true for the icon to reach the executable at all. The Start
+  # Menu and desktop shortcuts point at Addled.exe with icon index 0, so while
+  # this was false electron-builder skipped stamping the exe and every shortcut
+  # showed Electron's default atom instead of Addled's own icon.
+  signAndEditExecutable: true
 
 nsis:
   oneClick: false
@@ -64,6 +71,8 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: Addled
   uninstallDisplayName: Addled
+  installerIcon: electron/icons/icon.ico
+  uninstallerIcon: electron/icons/icon.ico
 
 portable:
   artifactName: '${productName}-${version}-portable.${ext}'

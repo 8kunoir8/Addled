@@ -523,8 +523,13 @@ def show_onboarding():
         app = QApplication(sys.argv)
 
     wizard = OnboardingWizard()
-    # Use bundled icon if available, fall back to default
-    icon_path = Path(__file__).parent.parent.parent / "electron" / "icons" / "icon.png"
+    # Two layouts to try: the repo keeps icons in electron/icons, while a
+    # packaged build copies them to <resources>/icons. Only the first was
+    # checked, so a packaged wizard silently fell back to no icon at all.
+    root = Path(__file__).parent.parent.parent
+    icon_path = root / "electron" / "icons" / "icon.png"
+    if not icon_path.exists():
+        icon_path = root / "icons" / "icon.png"
     wizard.setWindowIcon(QIcon(str(icon_path)) if icon_path.exists() else QIcon())
 
     if wizard.exec() == QWizard.DialogCode.Accepted:
