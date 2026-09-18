@@ -33,6 +33,7 @@ SUITES = [
     "check_mcp.py",
     "check_ws_methods.py",
     "check_bot_chat.py",
+    "check_web_search.py",
 ]
 
 

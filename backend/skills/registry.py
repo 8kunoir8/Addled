@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
 
@@ -26,6 +27,29 @@ log = logging.getLogger("addled.skills")
 # characters (~4,700 tokens) — more than the local model's entire remaining
 # context once its reply budget is set aside.
 PROMPT_DESC_CHARS = 110
+
+# Search engine health. Scraped engines rot and networks block them: on the
+# machine this was reported from, every DuckDuckGo endpoint timed out, so each
+# search spent 15s failing on it before falling through to something that
+# worked. Remember which engine just failed and skip it for a while instead.
+_ENGINE_FAILURES: dict[str, tuple[int, float]] = {}
+_ENGINE_FAIL_LIMIT = 2
+_ENGINE_COOLDOWN_S = 600.0
+
+
+def _engine_ready(name: str) -> bool:
+    count, when = _ENGINE_FAILURES.get(name, (0, 0.0))
+    if count < _ENGINE_FAIL_LIMIT:
+        return True
+    return (time.time() - when) >= _ENGINE_COOLDOWN_S
+
+
+def _record_engine(name: str, ok: bool) -> None:
+    if ok:
+        _ENGINE_FAILURES.pop(name, None)
+        return
+    count, _ = _ENGINE_FAILURES.get(name, (0, 0.0))
+    _ENGINE_FAILURES[name] = (count + 1, time.time())
 
 
 @dataclass
@@ -84,7 +108,7 @@ class SkillResult:
     summary: str = ""
 
 
-async def _search_ddg_html(query: str) -> dict:
+async def _search_ddg_html(query: str, timeout: float = 8.0) -> dict:
     """Scrape DuckDuckGo's HTML endpoint with stdlib only (no Playwright)."""
     import asyncio
     import html as _html
@@ -100,7 +124,7 @@ async def _search_ddg_html(query: str) -> dict:
                            "AppleWebKit/537.36 (KHTML, like Gecko) "
                            "Chrome/125.0.0.0 Safari/537.36"),
         })
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="ignore")
 
     try:
@@ -209,6 +233,252 @@ async def _search_bing(query: str) -> dict:
         "snippet": "\n".join(lines)[:2000],
         "results": results[:5],
     }
+
+
+# ── Sources that do not depend on scraping ──────────────────────────────
+
+_SEARCH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+
+# Words that carry no signal when deciding whether a result answers a question.
+_SEARCH_STOPWORDS = {
+    "the", "and", "for", "with", "what", "whats", "who", "how", "why", "when",
+    "where", "which", "this", "that", "these", "those", "from", "about",
+    "are", "was", "were", "does", "did", "can", "could", "get", "any", "some",
+    "apa", "yang", "dan", "untuk", "dengan", "adalah", "itu", "ini", "saja",
+    "juga", "tidak", "bisa", "hari", "sedang", "lagi", "dari", "akan", "ada",
+    "saya", "kamu", "kita", "mereka", "atau", "karena", "kalau", "mau",
+}
+
+
+def _http_get(url: str, timeout: float = 10.0) -> str:
+    import urllib.request
+    request = urllib.request.Request(url, headers={"User-Agent": _SEARCH_UA})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="ignore")
+
+
+def _rss_items(xml: str, limit: int = 5) -> list[dict]:
+    """Pull title/link/source/date out of an RSS feed."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return []
+    items: list[dict] = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        if not title:
+            continue
+        source_el = item.find("source")
+        items.append({
+            "title": title,
+            "url": (item.findtext("link") or "").strip(),
+            "source": ((source_el.text or "").strip()
+                       if source_el is not None else ""),
+            "published": (item.findtext("pubDate") or "").strip(),
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _published_key(item: dict) -> float:
+    """Sort key for an RSS date. Undated and unparseable items sort last."""
+    from email.utils import parsedate_to_datetime
+    try:
+        return parsedate_to_datetime(item.get("published") or "").timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _search_payload(query: str, engine: str, items: list[dict]) -> dict:
+    """Shape the results the way _tool_result_message hands them to the model."""
+    lines: list[str] = []
+    for index, item in enumerate(items, 1):
+        lines.append(f"{index}. {item.get('title', '')}")
+        meta = " ".join(part for part in
+                        (item.get("source"), item.get("published")) if part)
+        if meta:
+            lines.append(f"   {meta}")
+        if item.get("context"):
+            lines.append(f"   {item['context']}")
+        if item.get("url"):
+            lines.append(f"   {item['url']}")
+    return {
+        "success": True,
+        "query": query,
+        "engine": engine,
+        "results": items,
+        "snippet": "\n".join(lines)[:2000],
+    }
+
+
+async def _search_google_news(query: str) -> dict:
+    """Google News search feed: a real feed, so no scraping and no bot wall.
+
+    Both editions are asked because they index different things - the local
+    edition carries fresher local coverage, the US one the English write-ups.
+    Merging them newest-first is what a "what is happening there" question
+    needs: asked on its own, the US edition answered a Jakarta question with
+    articles from 2016 and 2018.
+    """
+    import urllib.parse
+
+    loop = asyncio.get_running_loop()
+
+    def _one(hl: str, gl: str) -> list[dict]:
+        url = ("https://news.google.com/rss/search?q="
+               + urllib.parse.quote(query)
+               + f"&hl={hl}&gl={gl}&ceid={gl}:{hl.split('-')[0]}")
+        return _rss_items(_http_get(url, timeout=10.0), limit=6)
+
+    batches = await asyncio.gather(
+        *[loop.run_in_executor(None, _one, hl, gl)
+          for hl, gl in (("id-ID", "ID"), ("en-US", "US"))],
+        return_exceptions=True)
+
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for batch in batches:
+        if isinstance(batch, Exception):
+            continue
+        for item in batch:
+            key = " ".join(item["title"].lower().split())[:70]
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    if not merged:
+        return {"success": False, "error": "Google News returned no results"}
+    merged.sort(key=_published_key, reverse=True)
+    return _search_payload(query, "google-news", merged[:5])
+
+
+async def _search_bing_news(query: str) -> dict:
+    """Bing News RSS - the same idea against a different index."""
+    import urllib.parse
+
+    url = ("https://www.bing.com/news/search?q=" + urllib.parse.quote(query)
+           + "&format=RSS")
+    try:
+        xml = await asyncio.get_running_loop().run_in_executor(
+            None, _http_get, url, 10.0)
+    except Exception as e:
+        return {"success": False, "error": f"Bing News request failed: {e}"}
+    items = _rss_items(xml, limit=5)
+    if not items:
+        return {"success": False, "error": "Bing News returned no results"}
+    return _search_payload(query, "bing-news", items)
+
+
+async def _search_wikipedia(query: str) -> dict:
+    """MediaWiki search API - plain JSON, no key and nothing to scrape."""
+    import re
+    import urllib.parse
+
+    url = ("https://en.wikipedia.org/w/api.php?action=query&list=search"
+           "&srsearch=" + urllib.parse.quote(query) + "&format=json&srlimit=5")
+    try:
+        body = await asyncio.get_running_loop().run_in_executor(
+            None, _http_get, url, 10.0)
+        hits = json.loads(body).get("query", {}).get("search", [])
+    except Exception as e:
+        return {"success": False, "error": f"Wikipedia request failed: {e}"}
+    if not hits:
+        return {"success": False, "error": "Wikipedia returned no results"}
+    items = [{
+        "title": str(hit.get("title", "")),
+        "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(
+            str(hit.get("title", "")).replace(" ", "_")),
+        "source": "Wikipedia",
+        "published": "",
+        "context": re.sub(r"<[^>]+>", "", str(hit.get("snippet", "")))[:160],
+    } for hit in hits]
+    return _search_payload(query, "wikipedia", items)
+
+
+def _significant_terms(query: str) -> list[str]:
+    import re
+
+    words = re.findall(r"[\w']{3,}", query.lower())
+    return [word for word in words if word not in _SEARCH_STOPWORDS]
+
+
+# Wording that means "something happening now" rather than "tell me about a
+# thing". It only decides which source's results are listed first.
+_RECENCY_HINTS = (
+    "hari ini", "terbaru", "terkini", "sekarang", "ramai", "trending",
+    "viral", "berita", "today", "latest", "news", "current", "recent",
+    "this week", "this month", "this year", "right now", "hot", "update",
+)
+
+
+def _wants_current(query: str) -> bool:
+    import re
+
+    lowered = query.lower()
+    # Word-boundary matched: a substring test let "hot" fire on "hotel".
+    return any(re.search(rf"\b{re.escape(hint)}\b", lowered)
+               for hint in _RECENCY_HINTS)
+
+
+async def _search_news_and_reference(query: str) -> dict:
+    """Ask the news feed and the encyclopedia at once, and return both.
+
+    Choosing between them would mean guessing what kind of question this is,
+    and a wrong guess is invisible to the user: a news index answered a
+    tutorial question with unrelated articles, and an encyclopedia has nothing
+    to say about what happened this morning. Ordering only decides which rows
+    are listed first; both are always offered.
+    """
+    news, reference = await asyncio.gather(
+        _search_google_news(query), _search_wikipedia(query),
+        return_exceptions=True)
+
+    def _items(result: object) -> tuple[list[dict], str]:
+        if isinstance(result, Exception) or not isinstance(result, dict):
+            return [], "failed"
+        if not result.get("success"):
+            return [], str(result.get("error") or "failed")
+        return list(result.get("results") or []), ""
+
+    news_items, news_err = _items(news)
+    ref_items, ref_err = _items(reference)
+    if not news_items and not ref_items:
+        return {"success": False,
+                "error": f"news: {news_err}; wikipedia: {ref_err}"}
+
+    if _wants_current(query):
+        items = news_items[:4] + ref_items[:3]
+    else:
+        items = ref_items[:4] + news_items[:3]
+    engine = "+".join(
+        name for name, got in (("google-news", news_items),
+                               ("wikipedia", ref_items)) if got)
+    return _search_payload(query, engine, items)
+
+
+def _looks_relevant(query: str, result: dict) -> bool:
+    """True when the results actually mention what was asked.
+
+    Bing's HTML endpoint sometimes answers with results for a different query
+    entirely: a question about Jakarta came back as APA citation generators,
+    and one about the Nintendo 3DS as Japanese song lyrics. Handing that to the
+    model made it tell the user it could not find out, so a result set that
+    barely shares a word with the question is treated as a failure instead.
+    """
+    terms = _significant_terms(query)
+    if not terms:
+        return True
+    parts = [str(result.get("snippet") or "")]
+    for item in result.get("results") or []:
+        parts.append(str(item.get("title") or ""))
+        parts.append(str(item.get("context") or ""))
+    haystack = " ".join(parts).lower()
+    hits = sum(1 for term in terms if term in haystack)
+    return hits >= max(1, len(terms) // 2)
 
 
 class SkillRegistry:
@@ -838,15 +1108,46 @@ class SkillRegistry:
             query = str(params.get("query", "")).strip()
             if not query:
                 return {"success": False, "error": "No search query"}
-            # Primary: DuckDuckGo HTML endpoint (stdlib only, no Playwright)
-            result = await _search_ddg_html(query)
-            if result.get("success"):
+
+            # Ordered by what still works. These are real feeds and APIs
+            # rather than scraped HTML, so there is no bot wall in the way and
+            # no silently irrelevant result set coming back.
+            problems: list[str] = []
+            for name, fn in (("news+reference", _search_news_and_reference),
+                             ("bing-news", _search_bing_news)):
+                if not _engine_ready(name):
+                    problems.append(f"{name}: skipped after repeated failures")
+                    continue
+                result = await fn(query)
+                ok = bool(result.get("success"))
+                _record_engine(name, ok)
+                if ok:
+                    return result
+                problems.append(f"{name}: {result.get('error')}")
+
+            # Scraped engines last, and only when the results can show they
+            # answer the question - see _looks_relevant.
+            for name, fn in (("bing", _search_bing),
+                             ("ddg-html", _search_ddg_html)):
+                if not _engine_ready(name):
+                    problems.append(f"{name}: skipped after repeated failures")
+                    continue
+                result = await fn(query)
+                if not result.get("success"):
+                    _record_engine(name, False)
+                    problems.append(f"{name}: {result.get('error')}")
+                    continue
+                if not _looks_relevant(query, result):
+                    _record_engine(name, False)
+                    problems.append(f"{name}: results did not match the query")
+                    continue
+                _record_engine(name, True)
                 return result
-            # Fallback 1: Bing (DuckDuckGo is blocked on some networks)
-            result = await _search_bing(query)
-            if result.get("success"):
-                return result
-            # Fallback 2: Playwright browser (if installed)
+
+            # Last resort: drive a real browser. Slow, but nothing blocks it -
+            # and it is still Bing underneath, so its output needs the same
+            # relevance check as the scraped path or the model is handed the
+            # same irrelevant page it was just protected from.
             try:
                 from urllib.parse import quote
                 from backend.browser.browser_engine import browser
@@ -856,19 +1157,29 @@ class SkillRegistry:
                     extract = await browser.extract()
                     text = (extract or {}).get("text", "") if isinstance(extract, dict) else str(extract or "")
                     if text:
-                        return {"success": True, "query": query,
-                                "engine": "browser", "url": nav.get("url"),
-                                "snippet": text[:2000]}
+                        candidate = {"success": True, "query": query,
+                                     "engine": "browser", "url": nav.get("url"),
+                                     "snippet": text[:2000]}
+                        if _looks_relevant(query, candidate):
+                            return candidate
+                        problems.append(
+                            "browser: results did not match the query")
             except Exception as e:
                 log.debug("Browser search fallback failed: %s", e)
-            return result
+
+            # Say why, rather than leaving the model to tell the user it has
+            # no internet access.
+            return {"success": False,
+                    "error": ("no search source returned usable results ("
+                              + "; ".join(problems[:4]) + ")")}
 
         self.register(SkillDefinition(
             "web_search",
-            "Search the web (DuckDuckGo, falls back to Bing) and return "
-            "result titles, URLs and snippets. If one query gives nothing "
-            "useful, try again with different keywords (add site:, wiki, "
-            "chapter number, or the site name).",
+            "Search news sites and Wikipedia. Use this for anything current, "
+            "local, or outside your training data - including what people in "
+            "a place are talking about. Results carry titles, sources, dates "
+            "and URLs. If a query comes back empty, retry with different "
+            "keywords instead of telling the user you cannot find out.",
             {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search query"},
             }, "required": ["query"]},
