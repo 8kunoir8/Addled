@@ -37,6 +37,8 @@ interface Tailscale {
   error?: string;
   login?: { state?: string; url?: string; error?: string };
   cli?: string;
+  needs_enablement?: boolean;
+  enable_url?: string;
 }
 
 interface Installer {
@@ -276,10 +278,33 @@ export default function RemotePage() {
 
       {blockers.length > 0 && (
         <div className="mb-4 rounded-lg border border-[#5a4a1d] bg-[#2a2410] px-4 py-3">
-          <div className="text-xs font-semibold text-[#d29922] mb-1">Not reachable yet</div>
+          <div className="text-xs font-semibold text-[#d29922] mb-1">
+            {ts.needs_enablement ? 'One thing left, and it needs you' : 'Not reachable yet'}
+          </div>
           <ul className="text-xs text-[#d29922] list-disc pl-4 space-y-0.5">
             {blockers.map((b, i) => <li key={i}>{b}</li>)}
           </ul>
+          {ts.needs_enablement && (
+            <div className="mt-3 pt-3 border-t border-[#5a4a1d]">
+              <div className="text-xs text-[#8b949e] mb-2">
+                Sharing to a tailnet is a one-time switch that only the tailnet
+                owner can accept, in a browser. Addled cannot press it for you —
+                but once you have, it finishes the rest on its own within a
+                minute, without you coming back here.
+              </div>
+              {ts.enable_url ? (
+                <a href={ts.enable_url} target="_blank" rel="noreferrer"
+                   className="inline-block px-3 py-1.5 rounded bg-[#1f6feb] text-white text-xs">
+                  Enable Tailscale Serve
+                </a>
+              ) : (
+                <span className="text-xs text-[#8b949e]">
+                  Open the Tailscale admin console and enable Serve / HTTPS for
+                  this tailnet.
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 

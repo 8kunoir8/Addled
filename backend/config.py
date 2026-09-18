@@ -390,7 +390,11 @@ DEFAULT_SETTINGS: dict = {
     "tailscale": {
         "enabled": False,
         "hostname": "",
-        "serve_enabled": False,
+        # Keep the dashboard shared to the user's own tailnet, and set that up
+        # automatically once Tailscale is installed and signed in. This can only
+        # ever reach their tailnet: it refuses without a password, and Funnel is
+        # never covered by it.
+        "auto_share": True,
         "serve_port": 443,
         "funnel": False,
         "poll_seconds": 20,

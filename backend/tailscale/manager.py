@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -37,6 +38,19 @@ LOGIN_TIMEOUT = 300
 
 DOWNLOAD_URL = "https://tailscale.com/download/windows"
 HTTPS_DOCS = "https://login.tailscale.com/admin/dns"
+
+# Serve and Funnel are one-time opt-ins on the tailnet, accepted by the account
+# owner in a browser. `tailscale serve` does not fail on this — it prints the
+# enable URL and then WAITS, so a plain timeout turns an actionable instruction
+# into a mystery. These two constants are how it is recognised instead.
+NOT_ENABLED_MARKER = "is not enabled on your tailnet"
+ENABLE_URL_RE = re.compile(r"https://login\.tailscale\.com/\S+")
+
+
+def enable_url_from(text: str) -> str:
+    """The admin URL Tailscale prints when serve/funnel needs enabling."""
+    match = ENABLE_URL_RE.search(str(text or ""))
+    return match.group(0).rstrip(".,;\"'") if match else ""
 
 # Candidate locations, checked in order. PATH first so a user-managed install
 # wins, then the standard installer locations.
@@ -246,6 +260,10 @@ class TailscaleManager:
         self._login_state = "idle"   # idle | starting | waiting | done | failed
         self._login_error = ""
         self._watchdog: asyncio.Task | None = None
+        # Set when Tailscale reports that serve has to be enabled on the tailnet
+        # first. Kept so the dashboard can show the one thing the user has to do.
+        self._enable_url = ""
+        self._enable_checked_at = 0.0
 
     # -- config
 
@@ -253,7 +271,14 @@ class TailscaleManager:
         return bool(_cfg("enabled", False))
 
     def serve_wanted(self) -> bool:
-        return bool(_cfg("serve_enabled", False))
+        """Whether the tailnet share should be kept in place.
+
+        Defaults to on, because sharing to your own tailnet is the whole point of
+        the feature and it is the step people get stuck on. It still cannot
+        publish anything on its own: the share refuses without a password, and
+        Funnel (public internet) is never covered by this.
+        """
+        return bool(_cfg("auto_share", True))
 
     def funnel_allowed(self) -> bool:
         return bool(_cfg("funnel", False))
@@ -372,8 +397,13 @@ class TailscaleManager:
             else:
                 out.append("Tailscale is not running.")
         if snapshot.get("logged_in") and not snapshot["serve"].get("configured"):
-            out.append("The dashboard is not shared to your tailnet yet "
-                       "(no `tailscale serve` mapping).")
+            if self._enable_url:
+                out.append("Tailscale Serve is not enabled for your tailnet yet. "
+                           "That switch is yours to accept — Addled shares the "
+                           "dashboard by itself once you have.")
+            else:
+                out.append("The dashboard is not shared to your tailnet yet "
+                           "(no `tailscale serve` mapping).")
         elif snapshot.get("logged_in") and not snapshot["serve"].get("target_hit", True):
             out.append("Another address is being served, not Addled's gateway.")
         return out
@@ -396,6 +426,9 @@ class TailscaleManager:
         snapshot["login"] = {"state": self._login_state, "url": self._login_url,
                              "error": self._login_error}
         snapshot["installed"] = bool(snapshot.get("installed"))
+        # The one thing the user may have to do that Addled cannot do for them.
+        snapshot["needs_enablement"] = bool(self._enable_url)
+        snapshot["enable_url"] = self._enable_url
         return snapshot
 
     def url(self) -> str:
@@ -520,12 +553,94 @@ class TailscaleManager:
 
     # -- serve
 
+    async def _run_serve_attempt(self, args: list[str],
+                                 timeout: float = 30.0) -> dict:
+        """Run one `serve`/`funnel` call, watching for the tailnet opt-in prompt.
+
+        `tailscale serve` does not fail when serve has not been enabled on the
+        tailnet — it prints a URL and then waits, indefinitely. Treating that as
+        a timeout would mean three minutes of hanging followed by a message that
+        says nothing useful, when the output already contained the exact thing
+        the user has to do. So the output is read as it arrives, and the moment
+        the prompt is recognised the process is stopped and its URL returned.
+        """
+        argv = (cli() or []) + [str(a) for a in args]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except (OSError, ValueError) as e:
+            return {"success": False, "timeout": False,
+                    "error": f"Could not run {argv[0]}: {e}",
+                    "command": " ".join(argv)}
+
+        collected: list[str] = []
+        needs_enablement = False
+        enable_url = ""
+        deadline = time.time() + timeout
+        try:
+            assert proc.stdout is not None
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return {"success": False, "timeout": True,
+                            "error": f"`{args[0]}` did not finish within "
+                                     f"{int(timeout)}s",
+                            "command": " ".join(argv)}
+                try:
+                    chunk = await asyncio.wait_for(proc.stdout.readline(),
+                                                   timeout=remaining)
+                except asyncio.TimeoutError:
+                    return {"success": False, "timeout": True,
+                            "error": f"`{args[0]}` did not finish within "
+                                     f"{int(timeout)}s",
+                            "command": " ".join(argv)}
+                if not chunk:
+                    break
+                collected.append(chunk.decode("utf-8", errors="replace"))
+                text = "".join(collected)
+                if NOT_ENABLED_MARKER in text:
+                    needs_enablement = True
+                    enable_url = enable_url_from(text)
+                    if enable_url:
+                        break
+                    # The marker lands a line or two before the URL.
+                    deadline = min(deadline, time.time() + 5.0)
+        finally:
+            if needs_enablement:
+                # It is waiting on a human. Nothing will complete it here.
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+        if needs_enablement:
+            return {"success": False, "needs_enablement": True,
+                    "enable_url": enable_url, "timeout": False,
+                    "command": " ".join(argv),
+                    "error": ("Tailscale Serve is not enabled for your tailnet "
+                              "yet.")}
+
+        code = await proc.wait()
+        output = "".join(collected)
+        if code == 0:
+            return {"success": True, "command": " ".join(argv),
+                    "stdout": output}
+        detail = output.strip().splitlines()
+        return {"success": False, "timeout": False,
+                "command": " ".join(argv),
+                "error": (detail[-1][:200] if detail else f"exited with {code}"),
+                "stdout": output}
+
     async def _serve_command(self, funnel: bool) -> dict:
         """Configure the mapping, tolerating older CLI syntax.
 
-        The `serve` surface has changed shape across releases, so the modern
-        form is tried first and the older one after it. Both errors are
-        reported, because "it did not work" is not actionable.
+        The `serve` surface has changed shape across releases, so the modern form
+        is tried first and the older one after it. Every failure is reported,
+        because "it did not work" is not actionable.
         """
         verb = "funnel" if funnel else "serve"
         port = self.serve_port()
@@ -538,9 +653,19 @@ class TailscaleManager:
         ]
         problems = []
         for args in attempts:
-            result = await run(args, timeout=45)
+            result = await self._run_serve_attempt(args)
             if result["success"]:
                 return {"success": True, "command": result["command"]}
+            if result.get("needs_enablement"):
+                # Trying other spellings cannot help: the tailnet itself has not
+                # opted in. Report the one thing that will fix it.
+                url = result.get("enable_url") or ""
+                message = ("Tailscale Serve is not enabled for your tailnet yet. "
+                           "It is a one-time switch the account owner has to "
+                           "accept in a browser")
+                message += f": {url}" if url else "."
+                return {"success": False, "needs_enablement": True,
+                        "enable_url": url, "error": message}
             problems.append(f"`{' '.join(args)}` -> {result.get('error')}")
         detail = " | ".join(problems[:3])
         # HTTPS has to be switched on for the tailnet before `serve` will issue a
@@ -583,8 +708,14 @@ class TailscaleManager:
 
         result = await self._serve_command(funnel=funnel)
         if not result["success"]:
+            if result.get("needs_enablement"):
+                # Remember the URL so the Remote page can offer the one link that
+                # unblocks this, and don't keep retrying into it blindly.
+                self._enable_url = str(result.get("enable_url") or "")
+                self._enable_checked_at = time.time()
             log.warning("Serving the gateway failed: %s", result.get("error"))
             return result
+        self._enable_url = ""
 
         serve_raw = await run(["serve", "status", "--json"])
         parsed = {}
@@ -610,9 +741,12 @@ class TailscaleManager:
             except Exception:  # noqa: BLE001
                 pass
         else:
+            # Record that the user wants the tailnet share kept in place. This is
+            # an intent, and unlike the funnel flag it is safe to act on: it can
+            # only ever reach the user's own tailnet.
             try:
                 from backend.config import config
-                config.set("tailscale", "serve_enabled", value=True)
+                config.set("tailscale", "auto_share", value=True)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -631,10 +765,14 @@ class TailscaleManager:
             if result["success"]:
                 try:
                     from backend.config import config
-                    config.set("tailscale", "funnel" if funnel else "serve_enabled",
-                               value=False)
+                    if funnel:
+                        config.set("tailscale", "funnel", value=False)
+                    else:
+                        # Turning it off has to stop it coming straight back.
+                        config.set("tailscale", "auto_share", value=False)
                 except Exception:  # noqa: BLE001
                     pass
+                self._enable_url = ""
                 await self.refresh()
                 self._broadcast("tailscale.status", self.status())
                 return {"success": True}
@@ -645,29 +783,27 @@ class TailscaleManager:
     # -- lifecycle
 
     async def apply_policy(self) -> None:
-        """Make reality match the settings. Called after settings change."""
+        """Make reality match the settings.
+
+        This is the "just handle it" path: once Tailscale is installed, signed in
+        and a password exists, the gateway is started and the tailnet share is
+        put in place without the user having to press anything.
+
+        What it will not do is publish to the public internet. Funnel is only
+        ever started by an explicit action, because `tailscale.funnel` records
+        what is published rather than requesting it — reading that as an
+        instruction is a mistake this already made once.
+        """
         await self.refresh()
         if not self.enabled() or not installed():
             return
         if not (self._snapshot or {}).get("logged_in"):
             return
+
         current = (self._snapshot or {}).get("serve") or {}
 
-        # Funnel is deliberately NOT reconciled here, and this is the important
-        # line in the file. `tailscale.funnel` records what is currently
-        # published; it is not an instruction to publish. Treating it as one
-        # meant that merely having the value set caused the dashboard to be put
-        # on the public internet at startup, with no click — which is the one
-        # thing this feature promises never happens. Public exposure is only
-        # ever started by an explicit action on the Remote page.
-        wanted = self.serve_wanted()
-        if wanted and not current.get("configured"):
-            await self.enable_serve(funnel=False)
-        elif not wanted and current.get("configured"):
-            await self.disable_serve(funnel=current.get("funnel", False))
-
-        # Clear a leftover flag: nothing is published, so a recorded funnel state
-        # is stale, and leaving it set is what makes the confusion above possible.
+        # Clear a leftover funnel flag: nothing is published, so a recorded
+        # funnel state is stale and only invites the confusion above.
         if not current.get("configured") and self.funnel_allowed():
             try:
                 from backend.config import config
@@ -675,6 +811,41 @@ class TailscaleManager:
                 log.info("Cleared a stale Tailscale funnel flag (nothing published)")
             except Exception as e:  # noqa: BLE001
                 log.debug("Could not clear the funnel flag: %s", e)
+
+        if not self.serve_wanted():
+            if current.get("configured") and not current.get("funnel"):
+                await self.disable_serve(funnel=False)
+            return
+
+        # Sharing is pointless unless the thing being shared is actually up, and
+        # it must never be shared without a password. Starting the gateway here
+        # rather than assuming it is already up also removes a startup race
+        # between the two managers.
+        try:
+            from backend.remote.auth import password_is_set
+            from backend.remote.gateway import gateway
+            if not password_is_set():
+                return
+            if not gateway.is_running():
+                ok, error = await gateway.start()
+                if not ok:
+                    log.debug("Not sharing yet — gateway did not start: %s", error)
+                    return
+        except Exception as e:  # noqa: BLE001
+            log.debug("Could not check the gateway before sharing: %s", e)
+            return
+
+        if current.get("configured"):
+            return
+
+        # Back off once Tailscale has told us serve needs enabling on the
+        # tailnet: retrying every poll would spawn a process every 20 seconds to
+        # be told the same thing, and it cannot fix itself.
+        if self._enable_url and time.time() - self._enable_checked_at < 60:
+            return
+
+        log.info("Sharing the dashboard to the tailnet automatically")
+        await self.enable_serve(funnel=False)
 
     async def boot(self) -> None:
         """Reconcile on startup. Never starts a login on its own."""
@@ -687,8 +858,16 @@ class TailscaleManager:
         except Exception as e:  # noqa: BLE001
             log.debug("Tailscale boot skipped: %s", e)
 
+    def needs_work(self) -> bool:
+        """Whether the share the user asked for is still missing."""
+        if not self.enabled() or not self.serve_wanted():
+            return False
+        if not (self._snapshot or {}).get("logged_in"):
+            return False
+        return not ((self._snapshot or {}).get("serve") or {}).get("configured")
+
     async def watchdog_loop(self) -> None:
-        """Keep the cached status fresh, and push changes to the dashboard."""
+        """Keep the cached status fresh, and finish the job without being asked."""
         while True:
             try:
                 before = json.dumps({
@@ -704,6 +883,11 @@ class TailscaleManager:
                 }, sort_keys=True)
                 if before != after:
                     self._broadcast("tailscale.status", self.status())
+                # Reconcile on any change, and keep trying while the share is
+                # still missing — so signing in later, or enabling Serve in the
+                # browser, completes on its own without the user coming back.
+                if before != after or self.needs_work():
+                    await self.apply_policy()
             except Exception as e:  # noqa: BLE001
                 log.debug("Tailscale watchdog: %s", e)
             await asyncio.sleep(self.poll_seconds())

@@ -134,6 +134,20 @@ if args[0] == "serve" and any(a in ("off", "--off") or a.endswith("off") for a i
 
 if args[0] in ("serve", "funnel"):
     st = state()
+    # Reproduces the real behaviour when serve has not been enabled on the
+    # tailnet: print the enable URL, then WAIT. It never exits, which is what
+    # used to turn an actionable instruction into a timeout.
+    if m == "serve_needs_enable":
+        out("")
+        out("Serve is not enabled on your tailnet.")
+        out("To enable, visit:")
+        out("")
+        out("         https://login.tailscale.com/f/serve?node=TESTNODE")
+        out("")
+        sys.stdout.flush()
+        import time as _t
+        while True:
+            _t.sleep(0.5)
     # The stand-in rejects the modern spelling in "slow_fail" mode so the
     # legacy-syntax fallback is exercised.
     if m == "slow_fail" and any(a.startswith("--https=") for a in args):
@@ -203,7 +217,7 @@ async def run():
 
     tmp = Path(tempfile.mkdtemp())
     config._data["tailscale"] = {
-        "enabled": True, "hostname": "", "serve_enabled": False,
+        "enabled": True, "hostname": "", "auto_share": False,
         "serve_port": 443, "funnel": False, "poll_seconds": 20, "auth_key": "",
     }
     config._data["remote"] = {
@@ -286,8 +300,8 @@ async def run():
               status["serve"].get("target_hit") is True,
               str(status["serve"]))
         check("the config records that sharing is on",
-              config.get("tailscale", "serve_enabled") is True,
-              str(config.get("tailscale", "serve_enabled")))
+              config.get("tailscale", "auto_share") is True,
+              str(config.get("tailscale", "auto_share")))
         check("no more serve blockers",
               not any("not shared" in b for b in status["blockers"]),
               str(status["blockers"]))
@@ -299,7 +313,7 @@ async def run():
         check("serve status reports nothing configured",
               status["serve"]["configured"] is False, str(status["serve"]))
         check("the config records that sharing is off",
-              config.get("tailscale", "serve_enabled") is False, "")
+              config.get("tailscale", "auto_share") is False, "")
 
         # ---- 6. older serve syntax -----------------------------------------
         # The stand-in rejects `--https=`, so the fallback has to carry it.
@@ -463,7 +477,7 @@ async def run():
         manager.enable_serve = fake_enable
         manager.disable_serve = fake_disable
         try:
-            config._data["tailscale"]["serve_enabled"] = False
+            config._data["tailscale"]["auto_share"] = False
             config._data["tailscale"]["funnel"] = True
             await manager.apply_policy()
             check("a leftover funnel flag publishes nothing",
@@ -473,21 +487,98 @@ async def run():
                   str(config.get("tailscale", "funnel")))
 
             calls.clear()
-            config._data["tailscale"]["serve_enabled"] = True
+            config._data["tailscale"]["auto_share"] = True
             await manager.apply_policy()
-            check("serve_enabled does share, to the tailnet only",
+            check("auto_share does share, to the tailnet only",
                   calls == [("enable", False)], str(calls))
 
             calls.clear()
-            config._data["tailscale"]["serve_enabled"] = False
+            config._data["tailscale"]["auto_share"] = False
             serve_state["configured"] = True
             await manager.apply_policy()
             check("turning the share off disables it",
                   calls and calls[0][0] == "disable", str(calls))
+
+            # ---- 15. the serve opt-in prompt, and sharing automatically ----
+            # The real CLI prints an enable URL and then waits forever. That used
+            # to burn four 30s attempts and report nothing useful.
+            # The real enable_serve is needed here — the section above swapped in
+            # a stub that only records calls, so calling it would prove nothing.
+            manager.enable_serve = saved_methods[1]
+            (tmp / "mode").write_text("serve_needs_enable", encoding="utf-8")
+            config._data["tailscale"]["auto_share"] = True
+            manager._enable_url = ""
+            manager._enable_checked_at = 0.0
+            started = time.time()
+            result = await manager.enable_serve()
+            elapsed = time.time() - started
+            manager.enable_serve = fake_enable
+
+            check("a tailnet without serve enabled is reported as such",
+                  result.get("needs_enablement") is True, str(result))
+            check("the enable URL from the CLI is surfaced",
+                  result.get("enable_url", "").endswith("TESTNODE"),
+                  str(result.get("enable_url")))
+            check("and the message says who can accept it",
+                  "account owner" in result.get("error", ""), str(result.get("error")))
+            # The whole point: recognising the prompt instead of waiting it out.
+            check("the prompt is detected quickly, not timed out",
+                  elapsed < 15, f"took {elapsed:.1f}s — it waited instead of reading")
+            check("the URL is kept for the dashboard",
+                  manager.status().get("enable_url", "").endswith("TESTNODE"),
+                  str(manager.status().get("enable_url")))
+            check("the blocker explains it is the user's switch to accept",
+                  any("yours to accept" in b for b in manager._blockers(
+                      {"logged_in": True, "serve": {"configured": False}})),
+                  str(manager._blockers({"logged_in": True,
+                                         "serve": {"configured": False}})))
+
+            # While that is pending it must not hammer the CLI every tick.
+            calls.clear()
+            serve_state["configured"] = False
+            await manager.apply_policy()
+            check("it backs off instead of respawning while waiting on the user",
+                  calls == [], str(calls))
+
+            # ---- 16. sharing happens by itself once it can -----------------
+            (tmp / "mode").write_text("ok", encoding="utf-8")
+            from backend.remote import auth as auth_mod
+            from backend.remote import gateway as gw_mod
+            saved_pw = auth_mod.password_is_set
+            saved_running = gw_mod.gateway.is_running
+            auth_mod.password_is_set = lambda: True
+            gw_mod.gateway.is_running = lambda: True
+            try:
+                manager._enable_url = ""
+                manager._enable_checked_at = 0.0
+                calls.clear()
+                config._data["tailscale"]["auto_share"] = True
+                config._data["tailscale"]["funnel"] = False
+                serve_state["configured"] = False
+                await manager.apply_policy()
+                check("the share is set up automatically when everything is ready",
+                      calls == [("enable", False)], str(calls))
+
+                calls.clear()
+                config._data["tailscale"]["auto_share"] = False
+                await manager.apply_policy()
+                check("and not when the user has turned it off", calls == [], str(calls))
+
+                calls.clear()
+                config._data["tailscale"]["auto_share"] = True
+                auth_mod.password_is_set = lambda: False
+                await manager.apply_policy()
+                check("never shared without a password", calls == [],
+                      "it shared a dashboard that had no password")
+            finally:
+                auth_mod.password_is_set = saved_pw
+                gw_mod.gateway.is_running = saved_running
+                (tmp / "mode").write_text("ok", encoding="utf-8")
+                config._data["tailscale"]["auto_share"] = False
         finally:
             (manager.refresh, manager.enable_serve,
              manager.disable_serve) = saved_methods
-            config._data["tailscale"]["serve_enabled"] = False
+            config._data["tailscale"]["auto_share"] = False
             config._data["tailscale"]["funnel"] = False
     finally:
         if saved_env is None:

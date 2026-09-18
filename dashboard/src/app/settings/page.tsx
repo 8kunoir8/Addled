@@ -985,7 +985,7 @@ function RemoteSection({ settings, update, saving, status }: any) {
     </SettingRow>
     <Num label="Share port" desc="The HTTPS port Tailscale serves on" group="tailscale" cfg={t} skey="serve_port" min={443} max={8443}/>
     <Num label="Status poll (seconds)" desc="How often to ask the Tailscale CLI for its status" group="tailscale" cfg={t} skey="poll_seconds" min={5} max={600}/>
-    <Toggle label="Share on startup" desc="Re-apply the tailnet share when Addled starts" group="tailscale" cfg={t} skey="serve_enabled"/>
+    <Toggle label="Share to the tailnet automatically" desc="Once Tailscale is installed and signed in, keep the dashboard shared to your own tailnet and start the gateway. Refuses without a password, and never publishes to the public internet" group="tailscale" cfg={t} skey="auto_share"/>
     <SettingRow label="Funnel" description="Not configured here — Funnel is started and stopped only from the Remote page, so it can never come on by itself.">
       <span className="text-xs text-[#8b949e]">{t.funnel ? 'last state: on (will be cleared)' : 'off'}</span>
     </SettingRow>
