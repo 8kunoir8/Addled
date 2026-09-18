@@ -5,6 +5,8 @@ build_cache/
 .env
 *.log
 backend/memory/*.db
+backend/memory/*.db-shm
+backend/memory/*.db-wal
 backend/memory/*.json
 backend/memory/goals/
 backend/memory/models/
