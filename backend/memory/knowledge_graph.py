@@ -77,11 +77,18 @@ class KnowledgeGraph:
             log.debug("triple embed failed: %s", e)
             return None
 
-    def add_triples(self, triples: list[dict], source: str = "agent") -> int:
-        """Add [{subject, relation, object}] rows. Returns count added."""
+    def add_triples(self, triples: list[dict], source: str = "agent",
+                    origin: tuple[str, str] | None = None) -> int:
+        """Add [{subject, relation, object}] rows. Returns count added.
+
+        ``origin`` is an optional ``(kind, id)`` reference the triples were
+        derived from, recorded as a ``derived_from`` relation so provenance is
+        a query rather than a guess.
+        """
         if not self.available:
             return 0
         added = 0
+        inserted: list[tuple[int, str]] = []
         try:
             for t in triples:
                 sub = str(t.get("subject", "")).strip()
@@ -96,14 +103,26 @@ class KnowledgeGraph:
                 if exists:
                     continue
                 blob = self._embed(_triple_text(sub, rel, obj))
-                self._conn.execute(
+                cur = self._conn.execute(
                     "INSERT INTO triples (subject, relation, object, ts, "
                     "source, embedding) VALUES (?,?,?,?,?,?)",
                     (sub, rel, obj, time.time(), source, blob))
+                inserted.append((int(cur.lastrowid), f"{sub} {rel} {obj}"))
                 added += 1
             self._conn.commit()
         except Exception as e:
             log.debug("add_triples failed: %s", e)
+        # Relate the new triples to the files they name and to their origin.
+        try:
+            from backend.memory.autolink import link_provenance, link_text
+            for row_id, text in inserted:
+                link_text("triple", row_id, text, source="auto",
+                          extra_note=text[:80])
+                if origin:
+                    link_provenance("triple", row_id, origin[0], origin[1],
+                                    note=text[:80])
+        except Exception as e:
+            log.debug("triple auto-link failed: %s", e)
         return added
 
     def lookup(self, subject: str | None = None, relation: str | None = None,

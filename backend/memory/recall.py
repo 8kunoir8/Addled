@@ -58,11 +58,16 @@ async def remember_async(role: str, text: str) -> None:
         return
     try:
         vec = await embed_text_async(text)
-        vector_store.add(
+        row_id = vector_store.add(
             vec, category="conversation",
             metadata={"role": role, "text": text[:2000],
                       "embedder": _embedder_kind()},
         )
+        # Relate the memory to any file it names.
+        if row_id:
+            from backend.memory.autolink import link_text
+            link_text("memory", row_id, text, source="auto",
+                      extra_note=f"{role}: {text[:80]}")
     except Exception as e:
         log.debug("remember failed: %s", e)
 

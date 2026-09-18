@@ -365,6 +365,18 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         if timeline_ctx:
             sys_prompt = sys_prompt + "\n\n" + timeline_ctx
 
+        # Wiki: the maintained factual layer. Pages are already distilled from
+        # the user's own sources, so they outrank guesswork.
+        wiki_ctx = None
+        if config.get("wiki", "enabled", default=True):
+            try:
+                from backend.wiki.query import build_wiki_context
+                wiki_ctx = build_wiki_context(message)
+                if wiki_ctx:
+                    sys_prompt = sys_prompt + "\n\n" + wiki_ctx
+            except Exception as e:
+                log.debug("wiki context failed: %s", e)
+
         # Memory-grounded conversation: volunteer relevant past organically
         sys_prompt += ("\n\nIf a saved fact, a previous conversation, or a "
                        "recent day's summary is clearly relevant to this "
@@ -401,6 +413,8 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
                 anchors.append({"type": "timeline", "text": timeline_ctx[:300]})
             if facts_ctx:
                 anchors.append({"type": "facts", "text": facts_ctx[:300]})
+            if wiki_ctx:
+                anchors.append({"type": "wiki", "text": wiki_ctx[:300]})
             if anchors:
                 get_server().broadcast_nowait("memory.anchors",
                                                {"anchors": anchors})
@@ -421,7 +435,11 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
 
         # Temporal fact triples (Graphiti-lite) — relational questions only
         rel_kw = ("decide", "decided", "prefer", "preference", "favorite",
-                  "project", "working on", "what is my", "name of", "use for")
+                  "project", "working on", "what is my", "name of", "use for",
+                  "remember", "know about", "related", "context", "history",
+                  "last time", "why did", "who is", "where is", "which file",
+                  "document", "notes", "note about")
+        triples = []
         if any(k in message.lower() for k in rel_kw):
             try:
                 from backend.memory.knowledge_graph import kg
@@ -435,6 +453,42 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
                         lines + "\nUse them when relevant."})
             except Exception as e:
                 log.debug("triple lookup failed: %s", e)
+
+        # Relation graph: what those items are attached to. This is what lets an
+        # answer say "and the file for that is ..." instead of stopping at the
+        # fact, which is the whole point of recording relations.
+        try:
+            if triples and config.get("links", "enabled", default=True):
+                from backend.memory.links import link_store
+                depth = int(config.get("links", "related_depth", default=1))
+                cap = int(config.get("links", "related_inject", default=5))
+                seen: set[tuple] = set()
+                related_lines: list[str] = []
+                for seed in triples[:4]:
+                    if seed.get("id") is None:
+                        continue
+                    for row in link_store.related("triple", seed["id"],
+                                                  depth=depth, limit=6):
+                        key = (row["kind"], row["ref_id"])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        rel = (row.get("via") or {}).get("rel", "relates_to")
+                        label = f"{row['kind']}: {row['ref_id']}"
+                        if row.get("label"):
+                            label += f" ({row['label']})"
+                        related_lines.append(f"- {label} — {rel}")
+                        if len(related_lines) >= cap:
+                            break
+                    if len(related_lines) >= cap:
+                        break
+                if related_lines:
+                    user_messages.insert(0, {"role": "user", "content":
+                        "[Related] Connected in the user's memory graph:\n" +
+                        "\n".join(related_lines) +
+                        "\nMention these only when they help the answer."})
+        except Exception as e:
+            log.debug("related lookup failed: %s", e)
 
         # Does this look like code/file work? Shared by project injection and by
         # the model router (substantive code work leans on the reasoning role).
@@ -995,7 +1049,11 @@ def _register_default_handlers():
         idx = params.get("index")
         if not isinstance(idx, int) or idx < 0:
             return {"success": False, "error": "index is required"}
-        return {"success": delete_summary(idx)}
+        ok = delete_summary(idx)
+        if ok:
+            from backend.memory import autolink
+            autolink.forget_ref("summary", idx)
+        return {"success": ok}
 
     async def memory_delete_memory(params: dict, ws) -> dict:
         from backend.memory.vector_store import vector_store
@@ -1003,9 +1061,13 @@ def _register_default_handlers():
         if rid is None:
             return {"success": False, "error": "id is required"}
         try:
-            return {"success": vector_store.delete(int(rid))}
+            ok = vector_store.delete(int(rid))
         except (TypeError, ValueError):
             return {"success": False, "error": "id must be a number"}
+        if ok:
+            from backend.memory import autolink
+            autolink.forget_ref("memory", int(rid))
+        return {"success": ok}
 
     async def memory_clear(params: dict, ws) -> dict:
         from backend.memory.session_summary import clear_summaries
@@ -1039,9 +1101,13 @@ def _register_default_handlers():
     async def memory_delete_triple(params: dict, ws) -> dict:
         from backend.memory.knowledge_graph import kg
         try:
-            ok = kg.delete(int(params.get("id")))
+            tid = int(params.get("id"))
+            ok = kg.delete(tid)
         except (TypeError, ValueError):
             return {"success": False, "error": "id must be a number"}
+        if ok:
+            from backend.memory import autolink
+            autolink.forget_ref("triple", tid)
         return {"success": ok}
 
     async def chat_get_history(params: dict, ws) -> dict:
@@ -1050,6 +1116,163 @@ def _register_default_handlers():
         from backend.memory.chat_history import chat_history
         max_messages = int(params.get("max", 60))
         return {"messages": chat_history.get_context(max_messages=max_messages)}
+
+    # ---- Memory relations ----------------------------------------------------
+
+    async def memory_links(params: dict, ws) -> dict:
+        """The relation graph: stats, plus edges for one item when asked."""
+        from backend.memory.links import link_store
+        out = {"success": True, **link_store.stats()}
+        kind = (params.get("kind") or "").strip().lower()
+        ref_id = params.get("id")
+        if kind and ref_id not in (None, ""):
+            out["neighbors"] = link_store.neighbors(
+                kind, ref_id,
+                direction=params.get("direction") or "both",
+                relations=params.get("relations") or None,
+                limit=int(params.get("limit", 100)))
+            out["count"] = len(out["neighbors"])
+        else:
+            out["edges"] = link_store.export(int(params.get("limit", 200)))
+        return out
+
+    async def memory_add_link(params: dict, ws) -> dict:
+        from backend.memory.links import RELATIONS, link_store
+        rel = (params.get("relation") or "relates_to").strip().lower()
+        if rel not in RELATIONS:
+            return {"success": False,
+                    "error": f"relation must be one of {', '.join(RELATIONS)}"}
+        link_id = link_store.link(
+            params.get("kind", ""), params.get("id", ""), rel,
+            params.get("target_kind", ""), params.get("target_id", ""),
+            source=params.get("source") or "dashboard",
+            note=params.get("note") or "")
+        if link_id is None:
+            return {"success": False,
+                    "error": "Could not link those items (check the kinds and "
+                             "that they are not the same item)."}
+        return {"success": True, "id": link_id}
+
+    async def memory_delete_link(params: dict, ws) -> dict:
+        from backend.memory.links import link_store
+        try:
+            return {"success": link_store.unlink(int(params.get("id")))}
+        except (TypeError, ValueError):
+            return {"success": False, "error": "id must be a number"}
+
+    async def memory_related(params: dict, ws) -> dict:
+        from backend.memory.links import link_store
+        kind = (params.get("kind") or "").strip().lower()
+        ref_id = params.get("id")
+        if not kind or ref_id in (None, ""):
+            return {"success": False, "error": "kind and id are required"}
+        items = link_store.related(kind, ref_id,
+                                   depth=int(params.get("depth", 1)),
+                                   limit=int(params.get("limit", 50)))
+        return {"success": True, "related": items, "count": len(items)}
+
+    async def memory_files(params: dict, ws) -> dict:
+        """Files the memory graph points at, most referenced first."""
+        from backend.memory.links import link_store
+        rows = link_store.files(int(params.get("limit", 200)))
+        return {"success": True, "files": rows, "count": len(rows)}
+
+    async def memory_prune_links(params: dict, ws) -> dict:
+        """Drop edges whose target no longer exists."""
+        from backend.memory.links import link_store
+        report = link_store.prune()
+        try:
+            from backend.wiki import store as wiki_store
+            wiki_store.reindex_links()
+        except Exception:
+            pass
+        return {"success": True, **report}
+
+    # ---- Wiki ---------------------------------------------------------------
+
+    async def wiki_list(params: dict, ws) -> dict:
+        from backend.wiki import store
+        if not store.enabled():
+            return {"success": False, "error": "The wiki is disabled."}
+        pages = store.list_pages()
+        return {"success": True, "pages": pages, "count": len(pages),
+                "dir": str(store.base_dir())}
+
+    async def wiki_get(params: dict, ws) -> dict:
+        from backend.wiki import store
+        slug = (params.get("slug") or "").strip()
+        if not slug:
+            return {"success": False, "error": "slug is required"}
+        page = store.read(slug)
+        if not page:
+            return {"success": False, "error": f"No wiki page '{slug}'."}
+        page["backlinks"] = store.backlinks(page["slug"])
+        return {"success": True, "page": page}
+
+    async def wiki_save(params: dict, ws) -> dict:
+        from backend.wiki import store
+        if not store.enabled():
+            return {"success": False, "error": "The wiki is disabled."}
+        slug = (params.get("slug") or params.get("title") or "").strip()
+        if not slug:
+            return {"success": False, "error": "slug or title is required"}
+        body = params.get("body")
+        if body is None:
+            return {"success": False, "error": "body is required"}
+        tags = params.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        sources = params.get("sources") or []
+        if isinstance(sources, str):
+            sources = [s.strip() for s in sources.splitlines() if s.strip()]
+        page = store.write(slug, title=params.get("title") or slug,
+                           body=str(body), tags=list(tags),
+                           sources=list(sources))
+        if not page:
+            return {"success": False, "error": "Could not write the page."}
+        return {"success": True, "page": page}
+
+    async def wiki_delete(params: dict, ws) -> dict:
+        from backend.wiki import store
+        slug = (params.get("slug") or "").strip()
+        if not slug:
+            return {"success": False, "error": "slug is required"}
+        return {"success": store.delete(slug)}
+
+    async def wiki_search(params: dict, ws) -> dict:
+        from backend.wiki import store
+        query = (params.get("query") or "").strip()
+        if not query:
+            return {"success": False, "error": "query is required"}
+        hits = store.search(query, limit=int(params.get("limit", 20)))
+        return {"success": True, "pages": hits, "count": len(hits)}
+
+    async def wiki_ingest(params: dict, ws) -> dict:
+        """Fold a file or pasted text into the wiki — the slow path, so the
+        dashboard shows progress rather than blocking silently."""
+        from backend.wiki import ingest
+        path = (params.get("path") or "").strip()
+        text = (params.get("text") or "").strip()
+        if not path and not text:
+            return {"success": False, "error": "path or text is required"}
+        tags = params.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        if path:
+            return await ingest.ingest_file(path, tags=list(tags))
+        return await ingest.ingest_text(text, title=params.get("title") or "",
+                                        source_ref=params.get("source") or "",
+                                        tags=list(tags))
+
+    async def wiki_lint(params: dict, ws) -> dict:
+        from backend.wiki import store
+        if not store.enabled():
+            return {"success": False, "error": "The wiki is disabled."}
+        return {"success": True, **store.lint()}
+
+    async def wiki_refresh_links(params: dict, ws) -> dict:
+        from backend.wiki import store
+        return {"success": True, **store.reindex_links()}
 
     # ---- Phase 3: Voice TTS --------------------------------------------------
 
@@ -1912,6 +2135,20 @@ def _register_default_handlers():
     _server.register("memory.deleteFact", memory_delete_fact)
     _server.register("memory.listTriples", memory_list_triples)
     _server.register("memory.deleteTriple", memory_delete_triple)
+    _server.register("memory.links", memory_links)
+    _server.register("memory.addLink", memory_add_link)
+    _server.register("memory.deleteLink", memory_delete_link)
+    _server.register("memory.related", memory_related)
+    _server.register("memory.files", memory_files)
+    _server.register("memory.pruneLinks", memory_prune_links)
+    _server.register("wiki.list", wiki_list)
+    _server.register("wiki.get", wiki_get)
+    _server.register("wiki.save", wiki_save)
+    _server.register("wiki.delete", wiki_delete)
+    _server.register("wiki.search", wiki_search)
+    _server.register("wiki.ingest", wiki_ingest)
+    _server.register("wiki.lint", wiki_lint)
+    _server.register("wiki.refreshLinks", wiki_refresh_links)
 
     # Sprite skins
     _server.register("character.skinsList", character_skins_list)

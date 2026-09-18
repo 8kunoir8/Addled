@@ -39,3 +39,7 @@ backend/memory/integrations/skill_telemetry.json
 # Guideline packs (fetched from upstream by backend/guidelines/store.py)
 backend/memory/guidelines/
 
+# Wiki pages and journal days are the user's own notes, not repository content
+backend/memory/wiki/
+backend/memory/journal/
+

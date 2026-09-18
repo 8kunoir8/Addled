@@ -87,7 +87,7 @@ launch.bat
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
 | Desktop Shell | Electron 28, system tray, auto-updater, backend auto-respawn | ✅ Built |
 | Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
-| Communication | WebSocket JSON-RPC 2.0 (111 handlers) | ✅ Built |
+| Communication | WebSocket JSON-RPC 2.0 (125 handlers) | ✅ Built |
 
 ---
 
@@ -205,7 +205,7 @@ not per server, and a *Trusted* switch on the server skips the prompt. A server
 that is missing, slow or crashed records an error and returns a readable tool
 failure rather than hanging the conversation.
 
-### 🛠️ 30 Built-in Skills (Provider-Agnostic)
+### 🛠️ 56 Built-in Skills (Provider-Agnostic)
 All 10 AI providers can invoke any skill — no provider lock-in.
 
 | Category | Skills |
@@ -217,7 +217,11 @@ All 10 AI providers can invoke any skill — no provider lock-in.
 | **Code** | `code_read`, `code_edit` |
 | **Calendar** | `calendar_add`, `calendar_list` |
 | **Web** | `web_search`, `web_fetch` (auto-falls back to search discovery when sites block bots) |
-| **Meta** | `forge_skill`, `list_forged` |
+| **Memory relations** | `memory_get`, `memory_set`, `memory_link`, `memory_unlink`, `memory_related`, `memory_files`, `memory_graph` |
+| **Wiki** | `wiki_search`, `wiki_read`, `wiki_write`, `wiki_ingest`, `wiki_links`, `wiki_lint` |
+| **Meta** | `forge_skill`, `list_forged`, `guidelines_status`, `ponytail_review` |
+
+Plus the MCP-bridged skills from any connected server, registered dynamically as `mcp__<server>__<tool>`.
 
 ### 🔨 Skill Forge — Self-Extending Agent
 When the agent encounters a task it can't handle, it automatically:
@@ -254,6 +258,12 @@ Prompt guard (15 injection + 5 exfiltration patterns), presence guard (meeting/g
 ### 🧠 Memory
 **Local semantic memory** — a fully offline, layered memory system: chat history (JSON, cross-session), **semantic long-term recall** (local ONNX MiniLM embeddings + BM25 hybrid search — every turn remembered; relevant past turns auto-injected into new chats, with hash fallback when the model is missing), **rolling compaction** (long conversations auto-summarize their oldest turns so early context survives), **core facts** (durable user facts the agent saves/reads via `memory_get`/`memory_set` tools — shown on the Memory page), **temporal knowledge graph** (subject → relation → object triples with semantic + time-bounded lookup), and **rolling screenshot memory** (last 30 privacy-masked screenshots, 24h auto-purge — enables "what was I doing 20 minutes ago?"). Idle-time maintenance re-embeds legacy rows, dedups and prunes in the background. All controllable in Settings → Memory.
 
+### 🔗 Memory Relations (one graph over everything)
+Every memory store above is an independent flat collection, so nothing knew that a fact and a file were about the same thing. **`links.db`** is a single edge table across all of them — `fact`, `triple`, `memory`, `summary`, `journal`, `wiki`, `file` — with a closed relation vocabulary (`relates_to`, `same_as`, `supersedes`, `contradicts`, `derived_from`, `mentions`, `part_of`, `sourced_from`, `documents`, `links_to`). Relations are recorded automatically as memories are written: **file mentions** are scanned out of a fact/triple/memory and linked to the path on disk, and **provenance** links each derived item back to whatever produced it (a triple to its conversation, a summary to its journal day). Related items are injected into chat as a `[Related]` block, which is what lets an answer volunteer *"and the file for that is …"* instead of stopping at the fact. Idle maintenance drops edges whose target no longer exists and flags facts that say the same thing in different words as `same_as`. Tools: `memory_link` `memory_unlink` `memory_related` `memory_files` `memory_graph`. Dashboard: Memory page → Relations (trace any item, list referenced files, prune).
+
+### 📖 Wiki (LLM Wiki, local-first)
+A **Karpathy-pattern wiki** instead of another chat transcript: markdown pages under `backend/memory/wiki/pages/` with YAML frontmatter, maintained *incrementally* from your own sources. Ingesting a document first pulls the pages that already look related and asks the model for **merged page bodies**, so a second document about the same topic updates the page and appends its citation rather than creating a rival page — and the citation is preserved on every later rewrite. `[[wiki-links]]` between pages are mirrored into the relation graph (`links_to`), and non-URL sources become `sourced_from` edges to the real files, so the wiki also answers "which file said this?". Relevant pages are injected into chat with their citations as a `[Wiki]` block, since pre-distilled pages are better evidence than a guess. **`auto_ingest` is off by default** — Addled never reads your files into the wiki unless you ask. Tools: `wiki_search` `wiki_read` `wiki_write` `wiki_ingest` `wiki_links` `wiki_lint`. Dashboard: Wiki page (list, search, edit, ingest, lint).
+
 ### 🎤 Voice & Perception
 **Voice input**: wake word → command → chat → spoken reply. **Silero VAD** segments real speech for turn detection (RMS fallback). STT: **faster-whisper** (local, offline; tiny/small selectable) with **SenseVoice** auto-activating when funasr is available. **TTS**: **Kokoro** neural voices fully offline (local 82M ONNX) with **edge-tts** online fallback — engine selectable in Settings → Voice, with an **Auto TTS toggle** so dashboard chat and character prompts speak replies out loud. Speech input is local & offline; Edge TTS is the only network-dependent part. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
 
@@ -268,7 +278,7 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 
 ---
 
-## WebSocket API (111 handlers)
+## WebSocket API (125 handlers)
 
 ### Core
 `chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
@@ -295,10 +305,12 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 `privacy.setZones` `privacy.list` `privacy.excludeApp` `privacy.removeApp` `egress.list` `snapshot.list`
 
 ### Memory
-`chat.history` `memory.list` `memory.deleteSummary` `memory.deleteMemory` `memory.clear` `memory.getFacts` `memory.setFact` `memory.deleteFact` `memory.listTriples` `memory.deleteTriple`
+`chat.history` `memory.list` `memory.deleteSummary` `memory.deleteMemory` `memory.clear` `memory.getFacts` `memory.setFact` `memory.deleteFact` `memory.listTriples` `memory.deleteTriple` `memory.links` `memory.addLink` `memory.deleteLink` `memory.related` `memory.files` `memory.pruneLinks`
 
-### Skill Forge
-`forge.create` `forge.list`
+### Wiki
+`wiki.list` `wiki.get` `wiki.save` `wiki.delete` `wiki.search` `wiki.ingest` `wiki.lint` `wiki.refreshLinks`
+
+### Skill Forge`forge.create` `forge.list`
 
 ### Skills
 `skills.list` `skills.setState` `skills.delete` `skills.searchMarket` `skills.installFrom`
@@ -334,7 +346,7 @@ Addled/
 │   ├── main.py              # Entry point + onboarding + single-instance lock + kill switch + voice
 │   ├── config.py            # Portable JSON settings
 │   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
-│   ├── ws_server.py         # 111 JSON-RPC 2.0 handlers + server pushes
+│   ├── ws_server.py         # 125 JSON-RPC 2.0 handlers + server pushes
 │   ├── providers/           # 10 AI providers (base + registry + selector + router)
 │   │                        #   + live model catalog + local Florence-2 vision
 │   ├── mcp_client/          # MCP client (stdio + streamable HTTP) → tools as skills

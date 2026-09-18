@@ -277,6 +277,19 @@ class SkillRegistry:
         except Exception as e:
             log.debug("guideline skills unavailable: %s", e)
 
+    def _register_memory_skills(self):
+        """The memory link graph and the wiki."""
+        try:
+            from backend.skills.memory_links import register
+            register(self)
+        except Exception as e:
+            log.debug("memory link skills unavailable: %s", e)
+        try:
+            from backend.skills.wiki import register
+            register(self)
+        except Exception as e:
+            log.debug("wiki skills unavailable: %s", e)
+
     def _register_all(self):
         """Register all 55+ agent skills."""
         self._register_system_skills()
@@ -288,6 +301,7 @@ class SkillRegistry:
         self._register_web_skills()
         self._register_meta_skills()
         self._register_guideline_skills()
+        self._register_memory_skills()
 
     # ── System ───────────────────────────────────────────────────────────
 

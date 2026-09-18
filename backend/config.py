@@ -231,6 +231,25 @@ DEFAULT_SETTINGS: dict = {
         "dedup_min_sim": 0.95,
         "max_age_days": 365,
     },
+    # Relations between memories, and between memories and files (links.db).
+    "links": {
+        "enabled": True,
+        "auto_file_links": True,
+        "auto_provenance": True,
+        "dedup_links": True,
+        "prune_interval_h": 24,
+        "related_depth": 1,
+        "related_inject": 5,
+    },
+    # LLM Wiki: an interlinked markdown knowledge base Addled maintains from
+    # sources, instead of retrieving from scratch on every question.
+    "wiki": {
+        "enabled": True,
+        "dir": "",
+        "auto_ingest": False,
+        "inject_top_k": 3,
+        "max_chars": 4000,
+    },
     "tools": {
         "rtk_enabled": True,
     },

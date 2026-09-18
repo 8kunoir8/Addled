@@ -7,8 +7,7 @@ type SettingsData = Record<string, any>;
 
 const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
-  notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',
-  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️', guidelines: '📐',
+  notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️', guidelines: '📐',
   mcp: '🧰',
 };
 
@@ -40,7 +39,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['providers','character','voice','safety','notifications','observation','memory','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
+  const sections = ['providers','character','voice','safety','notifications','observation','memory','wiki','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -68,6 +67,7 @@ export default function SettingsPage() {
         {activeSection==='notifications'&&<NotificationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='memory'&&<MemorySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
+        {activeSection==='wiki'&&<WikiSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='tools'&&<ToolsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='guidelines'&&<GuidelinesSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='mcp'&&<McpSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
@@ -799,6 +799,51 @@ function MemorySection({ settings, update, saving, status }: any) {
     <Toggle label="Auto memory notes" desc="Let the agent occasionally write durable facts about you in the background (uses provider credits)" skey="auto_facts"/>
     <Toggle label="Knowledge graph" desc="Extract fact triples (subject → relation → object) from conversations in the background (uses provider credits)" skey="graph_extract"/>
     <SettingRow label="Vector Store"><span className="text-xs text-[#8b949e]">SQLite + numpy (384-dim)</span></SettingRow>
+  </div>;
+}
+
+function WikiSection({ settings, update, saving, status }: any) {
+  const l=settings?.links||{};
+  const w=settings?.wiki||{};
+  const Toggle=(group:'links'|'wiki', cfg:any)=>{
+    const T=({label,desc,skey}:{label:string;desc?:string;skey:string})=>(
+      <SettingRow label={label} description={desc}>
+        <button onClick={()=>update(group,skey,!cfg[skey])} className={`w-10 h-5 rounded-full transition-colors ${cfg[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}>
+          <div className={`w-4 h-4 bg-white rounded-full transition-transform ${cfg[skey]?'translate-x-5':'translate-x-0.5'}`}/>
+        </button>
+      </SettingRow>
+    );
+    return T;
+  };
+  const Num=(group:'links'|'wiki', cfg:any, min:number, max:number)=>{
+    return ({label,desc,skey}:{label:string;desc?:string;skey:string})=>(
+      <SettingRow label={label} description={desc}>
+        <input type="number" min={min} max={max} value={cfg[skey] ?? ''}
+          onChange={(e)=>update(group,skey,Number(e.target.value))}
+          className="w-20 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] focus:outline-none focus:border-[#3380FF]"/>
+      </SettingRow>
+    );
+  };
+  const LinkToggle=Toggle('links', l);
+  const LinkNum=Num('links', l, 0, 50);
+  const WikiToggle=Toggle('wiki', w);
+  const WikiNum=Num('wiki', w, 1, 20);
+  return <div className="space-y-1">
+    <p className="text-xs text-[#8b949e] mb-2">One graph connects every memory store (facts, triples, memories, summaries, journal days, wiki pages) to each other and to files on disk.</p>
+    <LinkToggle label="Memory relations" desc="Record and use relations between memories, and between memories and files" skey="enabled"/>
+    <LinkToggle label="Link files automatically" desc="Scan new memories for file paths and link them to the file" skey="auto_file_links"/>
+    <LinkToggle label="Record provenance" desc="Link a memory back to whatever produced it (a conversation turn, a journal day, a file)" skey="auto_provenance"/>
+    <LinkToggle label="Flag rephrased duplicates" desc="Daily scan for facts that say the same thing in different words, linked as same_as" skey="dedup_links"/>
+    <LinkNum label="Relation hops to follow" desc="How far to walk the graph when recalling related items (1-4)" skey="related_depth"/>
+    <LinkNum label="Related items to inject" desc="Maximum related items added to a chat prompt" skey="related_inject"/>
+
+    <div className="border-t border-[#30363d] my-3"/>
+    <p className="text-xs text-[#8b949e] mb-2">The wiki is a set of markdown pages Addled maintains from your own documents, so its pages can be cited as fact instead of guessed at.</p>
+    <WikiToggle label="Wiki" desc="Maintain and use knowledge pages" skey="enabled"/>
+    <WikiToggle label="Ingest files automatically" desc="Off by default — Addled never reads your files into the wiki unless you ask it to" skey="auto_ingest"/>
+    <WikiNum label="Pages to inject" desc="How many matching pages to give the model per message" skey="inject_top_k"/>
+    <WikiNum label="Prompt budget (chars)" desc="Upper bound on wiki text added to one message" skey="max_chars"/>
+    <SettingRow label="Wiki folder"><span className="text-xs text-[#8b949e] break-all">{w.dir || 'default (backend/memory/wiki)'}</span></SettingRow>
   </div>;
 }
 

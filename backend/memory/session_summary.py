@@ -97,6 +97,17 @@ def save_session_summary(summary: str) -> None:
     entries = _load()
     entries.append({"ts": time.time(), "summary": summary})
     _save(entries)
+    # Provenance: this summary came out of today's session, and it may name files.
+    try:
+        import datetime as _dt
+        from backend.memory.autolink import link_provenance, link_text
+        index = len(entries) - 1
+        link_provenance("summary", index, "journal",
+                        _dt.date.today().isoformat(), note=summary[:80])
+        link_text("summary", index, summary, source="auto",
+                  extra_note=summary[:80])
+    except Exception as e:
+        log.debug("summary auto-link failed: %s", e)
     try:
         from backend.memory.recall import embed_text
         from backend.memory.vector_store import vector_store

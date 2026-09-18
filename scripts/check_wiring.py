@@ -35,6 +35,7 @@ STRUCTURAL = {
     "backend/skills/forge.py": "reasoning",
     "backend/swarm/orchestrator.py": "reasoning",
     "backend/goals/planner.py": "reasoning",
+    "backend/wiki/ingest.py": "reasoning",
 }
 
 

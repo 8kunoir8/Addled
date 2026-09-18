@@ -32,6 +32,11 @@ export default function MemoryPage() {
   const [triples, setTriples] = useState<any[]>([]);
   const [journalDays, setJournalDays] = useState<any[]>([]);
   const [profile, setProfile] = useState<any>({});
+  const [linkStats, setLinkStats] = useState<any>({});
+  const [files, setFiles] = useState<any[]>([]);
+  const [relKind, setRelKind] = useState('fact');
+  const [relId, setRelId] = useState('');
+  const [related, setRelated] = useState<any[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -57,6 +62,12 @@ export default function MemoryPage() {
       try {
         const p = await send('profile.get', {});
         setProfile(p?.profile || {});
+      } catch { /* older backend */ }
+      try {
+        const l = await send('memory.links', {});
+        setLinkStats(l || {});
+        const fl = await send('memory.files', {});
+        setFiles(fl?.files || []);
       } catch { /* older backend */ }
       setError('');
     } catch (e: any) {
@@ -112,6 +123,35 @@ export default function MemoryPage() {
         const t = await send('memory.listTriples', {});
         setTriples(t?.triples || []);
       }
+    } catch { /* ignore */ }
+  };
+
+  const lookupRelated = async () => {
+    const id = relId.trim();
+    if (!id) return;
+    try {
+      const r = await send('memory.related', { kind: relKind, id, depth: 2 });
+      setRelated(r?.related || []);
+    } catch {
+      setRelated([]);
+    }
+  };
+
+  const deleteLink = async (id: number) => {
+    try {
+      const r = await send('memory.deleteLink', { id });
+      if (r?.success) {
+        const l = await send('memory.links', {});
+        setLinkStats(l || {});
+        if (related) lookupRelated();
+      }
+    } catch { /* ignore */ }
+  };
+
+  const pruneLinks = async () => {
+    try {
+      const r = await send('memory.pruneLinks', {});
+      if (r?.success) load();
     } catch { /* ignore */ }
   };
 
@@ -254,6 +294,100 @@ export default function MemoryPage() {
               </div>
             ))}
           </div>
+        </section>
+
+        {/* Relations — the graph across every memory store and the filesystem */}
+        <section>
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-[#8b949e] mb-2">
+            Relations ({linkStats.links ?? 0})
+          </h2>
+          <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-3 mb-3">
+            <p className="text-xs text-[#e8eaed]">
+              {linkStats.links ?? 0} link{(linkStats.links ?? 0) === 1 ? '' : 's'} across{' '}
+              {linkStats.items ?? 0} item{(linkStats.items ?? 0) === 1 ? '' : 's'} ·{' '}
+              {linkStats.files ?? 0} file{(linkStats.files ?? 0) === 1 ? '' : 's'} referenced
+            </p>
+            {linkStats.by_relation && Object.keys(linkStats.by_relation).length > 0 && (
+              <p className="text-[11px] text-[#8b949e] mt-1">
+                {Object.entries(linkStats.by_relation as Record<string, number>)
+                  .map(([rel, n]) => `${rel} ${n}`)
+                  .join(' · ')}
+              </p>
+            )}
+          </div>
+
+          <div className="flex gap-2 mb-3">
+            <select
+              value={relKind}
+              onChange={(e) => setRelKind(e.target.value)}
+              className="bg-[#161b22] border border-[#30363d] rounded-lg px-2 py-2 text-sm text-[#e8eaed] focus:outline-none focus:border-[#3380FF]"
+            >
+              {['fact', 'triple', 'memory', 'summary', 'journal', 'wiki', 'file'].map((k) => (
+                <option key={k} value={k}>{k}</option>
+              ))}
+            </select>
+            <input
+              value={relId}
+              onChange={(e) => setRelId(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') lookupRelated(); }}
+              placeholder="id — e.g. 12, a slug, a journal date, a file path"
+              className="flex-1 bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"
+            />
+            <button
+              onClick={lookupRelated}
+              disabled={!relId.trim()}
+              className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium"
+            >
+              Trace
+            </button>
+            <button
+              onClick={pruneLinks}
+              className="border border-[#30363d] hover:border-[#8b949e] text-[#8b949e] hover:text-[#e8eaed] rounded-lg px-3 py-2 text-sm"
+              title="Drop links whose target no longer exists"
+            >
+              Prune
+            </button>
+          </div>
+
+          {related !== null && related.length === 0 && (
+            <p className="text-sm text-[#8b949e]">Nothing is connected to that item.</p>
+          )}
+          <div className="space-y-2">
+            {related?.map((r, i) => (
+              <div key={`${r.kind}-${r.ref_id}-${i}`} className="rounded-lg border border-[#30363d] bg-[#161b22] p-3 flex items-start gap-3">
+                <span className="text-[10px] font-semibold uppercase mt-0.5 px-1.5 py-0.5 rounded bg-[#1f2937] text-[#58a6ff]">
+                  {r.kind}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-[#e8eaed] break-words">{r.ref_id}</p>
+                  <p className="text-[11px] text-[#8b949e]">
+                    {r.via?.rel || 'relates_to'}
+                    {r.depth > 1 ? ` · ${r.depth} hops` : ''}
+                    {r.label ? ` · ${r.label}` : ''}
+                    {r.exists === false ? ' · missing' : ''}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {files.length > 0 && (
+            <div className="mt-4">
+              <p className="text-[10px] uppercase tracking-wide text-[#8b949e] mb-2">
+                Files memory points at
+              </p>
+              <div className="space-y-1">
+                {files.slice(0, 12).map((f) => (
+                  <div key={f.ref_id} className="flex items-baseline gap-2 text-xs">
+                    <span className={`${f.exists === false ? 'text-[#8b949e] line-through' : 'text-[#e8eaed]'} break-all`}>
+                      {f.ref_id}
+                    </span>
+                    <span className="text-[#8b949e] shrink-0">{f.count ?? ''}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Conversation memories */}

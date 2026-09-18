@@ -62,6 +62,13 @@ def add_fact(text: str, source: str = "manual") -> dict | None:
     facts.append(fact)
     max_facts = int(config.get("memory", "facts_max", default=200))
     _save(facts[-max_facts:])
+    # Relate the new fact to any file its text names.
+    try:
+        from backend.memory.autolink import link_text
+        link_text("fact", fact["id"], text, source="auto",
+                  extra_note=text[:80])
+    except Exception:
+        pass
     return fact
 
 
@@ -72,12 +79,23 @@ def delete_fact(fact_id: int) -> bool:
     if len(facts) == before:
         return False
     _save(facts)
+    # Drop its relations too, or the graph keeps a node that is gone.
+    try:
+        from backend.memory.autolink import forget_ref
+        forget_ref("fact", fact_id)
+    except Exception:
+        pass
     return True
 
 
 def clear_facts() -> int:
     facts = _load()
     _save([])
+    try:
+        from backend.memory.autolink import forget_kind
+        forget_kind("fact")
+    except Exception:
+        pass
     return len(facts)
 
 
