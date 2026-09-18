@@ -266,7 +266,9 @@ function ProvidersSection({ settings, update, saving, status }: any) {
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-[#e8eaed]">🧠 Local AI (llamafile)</p>
         <span className="text-[10px] text-[#8b949e]">
-          {llmStatus?.running?'● running':llmStatus?.installed?'○ stopped':'— not installed'}
+          {llmStatus?.running
+            ? (llmStatus?.run_reason?`● running (${llmStatus.run_reason})`:'● running (on demand)')
+            : llmStatus?.installed?'○ stopped':'— not installed'}
         </span>
       </div>
       <p className="mt-1 text-[11px] text-[#8b949e]">
@@ -274,6 +276,20 @@ function ProvidersSection({ settings, update, saving, status }: any) {
         {llmStatus?.installed_mb?` · on disk ${(llmStatus.installed_mb/1024).toFixed(1)} GB`:''}
         {llmStatus?` · ${llmStatus.free_mb} MB free`:''}
       </p>
+      {llmStatus?.installed&&(
+        <div className="mt-2 space-y-1">
+          <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+            <input type="checkbox" checked={!!llmStatus?.keep_running}
+              onChange={e=>{ send('localLlm.setOption',{key:'enabled',value:e.target.checked}).then(refresh).catch(()=>{}); }}/>
+            Keep local AI running (always loaded)
+          </label>
+          <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+            <input type="checkbox" checked={llmStatus?.autostart!==false}
+              onChange={e=>{ send('localLlm.setOption',{key:'autostart',value:e.target.checked}).then(refresh).catch(()=>{}); }}/>
+            Start automatically when selected as provider
+          </label>
+        </div>
+      )}
       {llmStatus?.downloading&&(
         <div className="mt-2">
           <div className="h-1.5 w-full rounded bg-[#21262d] overflow-hidden">

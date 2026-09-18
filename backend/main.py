@@ -187,7 +187,7 @@ def main():
             handle.add_done_callback(_done)
             return handle
 
-        _background(local_llm.start_if_configured(), "local model boot")
+        _background(local_llm.boot(), "local model boot")
         _background(local_llm.watchdog_loop(), "local model watchdog")
         log.info("Local model manager armed (port %s)", local_llm.port())
     except Exception as e:

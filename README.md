@@ -125,6 +125,13 @@ interrupted. Decline and Addled falls back to **OpenRouter**
 `Hugging Face (Local)` runs any Hugging Face chat model in-process with
 `transformers` (optional install from Settings).
 
+**Runs only when you use it**: the local server never preloads at launch. It starts
+when *Addled Local* is the selected provider (Settings → Providers → *Start
+automatically when selected provider*) or when *Keep local AI running* is switched
+on — and any message routed to it starts it on demand (~3 s). While it is not
+selected or kept, it stays stopped and frees its RAM after `local_llm.idle_unload_min`
+(15 min) of inactivity.
+
 ### 🛠️ 30 Built-in Skills (Provider-Agnostic)
 All 10 AI providers can invoke any skill — no provider lock-in.
 

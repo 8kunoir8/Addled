@@ -624,6 +624,13 @@ def _register_default_handlers():
             else:
                 # Top-level setting (e.g. agent_name)
                 config.set(section, value=value)
+        # Switching to/from the local provider starts or stops its server
+        if section == "providers":
+            try:
+                from backend.local_llm.manager import local_llm
+                await local_llm.apply_policy()
+            except Exception as exc:
+                log.debug("Local model policy after settings change: %s", exc)
         return {"success": True}
 
     # ---- Phase 3: Chat with prompt guard + provider integration ---------------
@@ -1349,6 +1356,12 @@ def _register_default_handlers():
         from backend.local_llm.manager import local_llm
         return await local_llm.remove()
 
+    async def localllm_set_option(params: dict, ws) -> dict:
+        """Toggle keep-running / autostart-on-select for the local model."""
+        from backend.local_llm.manager import local_llm
+        return await local_llm.set_option(str(params.get("key", "")),
+                                          params.get("value"))
+
     async def localllm_hf_install(params: dict, ws) -> dict:
         """Install the optional torch + transformers pair for HF (Local)."""
         from backend.local_llm.manager import local_llm
@@ -1629,6 +1642,7 @@ def _register_default_handlers():
     _server.register("localLlm.start", localllm_start)
     _server.register("localLlm.stop", localllm_stop)
     _server.register("localLlm.remove", localllm_remove)
+    _server.register("localLlm.setOption", localllm_set_option)
     _server.register("localLlm.installHfDeps", localllm_hf_install)
     _server.register("hf.unload", hf_unload)
 

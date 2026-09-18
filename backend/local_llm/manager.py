@@ -83,6 +83,47 @@ class LocalLlmManager:
             self._has_nvidia = shutil.which("nvidia-smi") is not None
         return self._has_nvidia
 
+    def _reap_orphans(self) -> int:
+        """Kill leftover llamafile processes started from our own runtime path.
+
+        A forced backend kill (app update, Task Manager) can leave the server
+        orphaned holding our port, which would push the next launch to 8091, ...
+        Only processes whose image path is exactly our bundled runtime are hit.
+        """
+        if os.name != "nt" or not paths.runtime_exists():
+            return 0
+        try:
+            import win32api
+            import win32con
+            import win32process
+        except Exception:
+            return 0
+        target = str(paths.llamafile_exe()).lower()
+        killed = 0
+        for pid in win32process.EnumProcesses():
+            if pid <= 0:
+                continue
+            handle = None
+            try:
+                handle = win32api.OpenProcess(
+                    win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_TERMINATE,
+                    False, pid)
+                image = win32process.GetModuleFileNameEx(handle, 0)
+                if image and image.lower() == target:
+                    win32api.TerminateProcess(handle, 0)
+                    killed += 1
+            except Exception:
+                continue
+            finally:
+                if handle is not None:
+                    try:
+                        win32api.CloseHandle(handle)
+                    except Exception:
+                        pass
+        if killed:
+            log.info("Reclaimed %s orphaned llamafile process(es)", killed)
+        return killed
+
     # ---- status --------------------------------------------------------------
 
     def is_running(self) -> bool:
@@ -108,6 +149,40 @@ class LocalLlmManager:
 
     def is_declined(self) -> bool:
         return bool(self._cfg("declined", default=False))
+
+    # ---- when may the server run? -------------------------------------------
+    #
+    # Policy: the local model is never started eagerly. It runs only when it is
+    # the provider Addled would actually use ("autostart", on by default), or
+    # when the user explicitly keeps it warm with the "enabled" toggle. On top
+    # of that, a request routed to `local` still starts it on demand.
+
+    def is_chosen(self) -> bool:
+        """True when `local` is the provider Addled would use right now."""
+        try:
+            return config.active_provider == "local"
+        except Exception:
+            return False
+
+    def keep_running(self) -> bool:
+        """Explicit 'keep it warm' toggle, independent of the chosen provider."""
+        return bool(self._cfg("enabled", default=False))
+
+    def autostart_on_select(self) -> bool:
+        """Start the server when `local` becomes the selected provider."""
+        return bool(self._cfg("autostart", default=True))
+
+    def should_run(self) -> bool:
+        if self.keep_running():
+            return True
+        return self.autostart_on_select() and self.is_chosen()
+
+    def run_reason(self) -> str:
+        if self.keep_running():
+            return "keep-running"
+        if self.autostart_on_select() and self.is_chosen():
+            return "selected provider"
+        return ""
 
     def status(self) -> dict:
         free_ok, free_mb = has_space(self.size_mb(), margin_mb=0)
@@ -136,6 +211,12 @@ class LocalLlmManager:
             # Ask on every launch until the user actually answers, so the prompt
             # is never lost to a missed broadcast.
             "should_ask": self.should_ask() and not self._downloading,
+            # Start policy (so the UI can explain why it is or is not running)
+            "chosen": self.is_chosen(),
+            "keep_running": self.keep_running(),
+            "autostart": self.autostart_on_select(),
+            "should_run": self.should_run(),
+            "run_reason": self.run_reason(),
             "dir": str(paths.LLAMAFILE_DIR),
         }
 
@@ -205,9 +286,11 @@ class LocalLlmManager:
         need_runtime = not paths.runtime_exists()
         need_model = not paths.model_exists()
         if not need_runtime and not need_model:
-            config.set("local_llm", "enabled", value=True)
             config.set("local_llm", "declined", value=False)
-            return {"ok": True, "already_installed": True}
+            started = False
+            if self.should_run():
+                started, _ = await self.start()
+            return {"ok": True, "already_installed": True, "started": started}
 
         ok, free_mb = has_space(self.size_mb())
         if not ok:
@@ -247,7 +330,6 @@ class LocalLlmManager:
         finally:
             self._downloading = False
 
-        config.set("local_llm", "enabled", value=True)
         config.set("local_llm", "declined", value=False)
         config.set("local_llm", "download_approved", value=True)
         self._phase = "idle"
@@ -255,9 +337,16 @@ class LocalLlmManager:
         self._detail = "installed"
         self._broadcast("local.llmProgress",
                         {"phase": "done", "pct": 100.0, "detail": "installed"})
+        # Only spin the server up if the user is actually using the local model.
+        started = False
+        if self.should_run():
+            started, problem = await self.start()
+            if not started:
+                log.warning("Local model installed but failed to start: %s", problem)
         self._broadcast("local.llmStatus", self.status())
-        log.info("Local model installed (%s MB)", self.status()["installed_mb"])
-        return {"ok": True}
+        log.info("Local model installed (%s MB)%s", self.status()["installed_mb"],
+                 " and started" if started else " - idle until selected")
+        return {"ok": True, "started": started}
 
     async def _download_runtime(self) -> None:
         url = self._cfg("runtime_url", default="")
@@ -339,6 +428,24 @@ class LocalLlmManager:
         args += [str(a) for a in (self._cfg("extra_args", default=[]) or [])]
         return args
 
+    async def _pick_port(self, preferred: int) -> int:
+        """Prefer the configured port, waiting briefly for a dying orphan.
+
+        TerminateProcess is asynchronous: the socket can stay bound for a moment
+        after the reaper kills a leftover server. Without this wait the next
+        launch would silently migrate 8090 -> 8091 -> ... on every restart.
+        """
+        port = preferred
+        for attempt in range(8):            # up to ~4 s
+            port = paths.resolve_free_port(preferred, LOOPBACK)
+            if port == preferred:
+                if attempt:
+                    log.info("Reclaimed configured port %s", preferred)
+                return preferred
+            await asyncio.sleep(0.5)
+        log.warning("Port %s stayed busy — using %s instead", preferred, port)
+        return port
+
     async def start(self) -> tuple[bool, str]:
         if self.is_running():
             return True, ""
@@ -346,8 +453,10 @@ class LocalLlmManager:
             return False, ("Local model is not downloaded yet. Approve the download "
                            "in Settings — Providers — Local AI.")
         paths.ensure_dirs()
+        # Free our port from a previous forced shutdown before picking one.
+        self._reap_orphans()
         preferred = int(self._cfg("port", default=8090) or 8090)
-        self._port = paths.resolve_free_port(preferred, LOOPBACK)
+        self._port = await self._pick_port(preferred)
         if self._port != preferred:
             log.info("Port %s busy — local model will use %s", preferred, self._port)
 
@@ -483,8 +592,11 @@ class LocalLlmManager:
             await asyncio.sleep(IDLE_TICK_S)
             try:
                 minutes = float(self._cfg("idle_unload_min", default=15) or 0)
-                # Never unload while a start or download is still in flight.
-                if minutes <= 0 or self._phase != "running" or self._downloading:
+                # Never unload while a start or download is still in flight, and
+                # never while the local model is the chosen provider or has been
+                # explicitly kept warm.
+                if (minutes <= 0 or self._phase != "running"
+                        or self._downloading or self.should_run()):
                     continue
                 idle = time.monotonic() - self._last_used
                 if idle >= minutes * 60:
@@ -495,13 +607,18 @@ class LocalLlmManager:
             except Exception as exc:
                 log.debug("Local model watchdog error: %s", exc)
 
-    async def start_if_configured(self) -> None:
-        """Boot-time: honour an approved download, or preload a warm server."""
+    async def boot(self) -> None:
+        """Boot policy: never start eagerly — only when chosen or kept warm."""
         if paths.installed():
-            if bool(self._cfg("enabled", default=False)):
+            # Clean up after a forced shutdown before deciding anything.
+            await asyncio.to_thread(self._reap_orphans)
+            if self.should_run():
                 ok, problem = await self.start()
                 if not ok:
-                    log.warning("Local model preload failed: %s", problem)
+                    log.warning("Local model start failed: %s", problem)
+            else:
+                log.info("Local model idle - it starts when 'Addled Local' is the "
+                         "provider, or when 'Keep running' is enabled")
             return
         if bool(self._cfg("download_approved", default=False)) \
                 and not self.is_declined():
@@ -509,6 +626,29 @@ class LocalLlmManager:
             await self.install()
         elif self.should_ask():
             self.ask()
+
+    async def apply_policy(self) -> dict:
+        """Make the running state match the policy (after a settings change)."""
+        if self.should_run() and paths.installed():
+            if not self.is_running():
+                ok, problem = await self.start()
+                if not ok:
+                    return {"ok": False, "error": problem}
+                return {"ok": True, "started": True}
+        elif self.is_running() and not self.should_run():
+            await self.stop()
+            return {"ok": True, "stopped": True}
+        return {"ok": True}
+
+    async def set_option(self, key: str, value) -> dict:
+        """Toggle `enabled` (keep running) or `autostart` (start when selected)."""
+        if key not in ("enabled", "autostart"):
+            return {"ok": False, "error": f"unknown option: {key}"}
+        config.set("local_llm", key, value=bool(value))
+        result = await self.apply_policy()
+        self._broadcast("local.llmStatus", self.status())
+        result["status"] = self.status()
+        return result
 
     # ---- optional Hugging Face (Local) dependencies --------------------------
 
