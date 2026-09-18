@@ -732,14 +732,16 @@ function ProvidersSection({ settings, update, saving, status }: any) {
 }
 
 function CharacterSection({ settings, update, saving, status }: any) {
-  const c=settings?.character||{}, shapes=['triangle','circle','diamond','hexagon','star','square'];
+  // Shape, Colour, Glow and Eyes were removed from here on request. They are not
+  // unused: the avatar reads every one of them (shape at avatar.py:431, colour at
+  // :84/:128, glow at :80/:131/:406, eyes at :85/:129), so the character keeps its
+  // current appearance — but shape is now only asked during first-run setup, and
+  // the other three can no longer be changed from the UI. Their values stay in
+  // settings.json and can be edited there.
+  const c=settings?.character||{};
   return <div className="space-y-1">
     <SettingRow label="Agent Name"><input type="text" value={settings?.agent_name||'Addled'} onChange={e=>update('agent_name','',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-40"/></SettingRow>
-    <SettingRow label="Shape"><div className="flex gap-1.5">{shapes.map(s=><button key={s} onClick={()=>update('character','shape',s)} className={`px-2.5 py-1 rounded text-xs border transition-colors ${c.shape===s?'border-[#3380FF] bg-[#1f6feb22] text-[#3380FF]':'border-[#30363d] text-[#8b949e] hover:border-[#484f58]'}`}>{s}</button>)}</div></SettingRow>
-    <SettingRow label="Color"><div className="flex items-center gap-2"><input type="color" value={c.color||'#3380FF'} onChange={e=>update('character','color',e.target.value)} className="w-8 h-8 rounded cursor-pointer border-0"/><input type="text" value={c.color||'#3380FF'} onChange={e=>update('character','color',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed] w-24 font-mono"/></div></SettingRow>
     <SettingRow label="Size" description={`${c.size||64}px`}><input type="range" min={32} max={128} value={c.size||64} onChange={e=>update('character','size',parseInt(e.target.value))} className="w-32"/></SettingRow>
-    <SettingRow label="Glow" description={`${Math.round((c.glow_intensity||0.6)*100)}%`}><input type="range" min={0} max={100} value={Math.round((c.glow_intensity||0.6)*100)} onChange={e=>update('character','glow_intensity',parseInt(e.target.value)/100)} className="w-32"/></SettingRow>
-    <SettingRow label="Eyes"><button onClick={()=>update('character','eyes',c.eyes===false)} className={`w-10 h-5 rounded-full transition-colors ${c.eyes!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${c.eyes!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
     <SettingRow label="Speed"><select value={c.movement_speed||'medium'} onChange={e=>update('character','movement_speed',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="slow">Slow</option><option value="medium">Medium</option><option value="fast">Fast</option></select></SettingRow>
   </div>;
 }
