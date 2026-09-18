@@ -353,6 +353,9 @@ class LocalLlmManager:
 
         args = self._launch_args()
         log.info("Starting local model: %s", " ".join(args))
+        # Stamp activity before spawning so the idle watchdog cannot unload the
+        # server while it is still loading the weights.
+        self._last_used = time.monotonic()
         try:
             self._log_handle = open(self._log_path(), "ab")
         except OSError:
@@ -392,9 +395,11 @@ class LocalLlmManager:
         deadline = time.monotonic() + timeout
         last = "no response"
         while time.monotonic() < deadline:
-            if self._proc is None or self._proc.returncode is not None:
-                code = getattr(self._proc, "returncode", "?")
-                return False, (f"llamafile exited with code {code}. "
+            if self._proc is None:
+                return False, ("The local model was stopped before it finished "
+                               "starting.")
+            if self._proc.returncode is not None:
+                return False, (f"llamafile exited with code {self._proc.returncode}. "
                                f"See {self._log_path()} for details.")
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
@@ -478,7 +483,8 @@ class LocalLlmManager:
             await asyncio.sleep(IDLE_TICK_S)
             try:
                 minutes = float(self._cfg("idle_unload_min", default=15) or 0)
-                if minutes <= 0 or not self.is_running():
+                # Never unload while a start or download is still in flight.
+                if minutes <= 0 or self._phase != "running" or self._downloading:
                     continue
                 idle = time.monotonic() - self._last_used
                 if idle >= minutes * 60:
