@@ -36,6 +36,21 @@ log = logging.getLogger("addled.providers.router")
 ROLES = ("chat", "reasoning", "vision", "long", "utility")
 DEFAULT_ROLE = "chat"
 
+# Shipped role defaults, used when the saved value for a role is empty.
+#
+# These also live in DEFAULT_SETTINGS, but a settings file written by an older
+# build can persist an empty string for a role, and _deep_merge will keep that
+# empty value rather than injecting the new default. Empty means "use the
+# default", so the default is resolved here too — otherwise the optimisation
+# would silently never reach anyone who had already saved a setting.
+_BUILTIN_ROLES: dict[str, dict[str, str]] = {
+    "deepseek": {
+        "chat": "deepseek-v4-flash",
+        "reasoning": "deepseek-v4-pro",
+        "utility": "deepseek-chat",
+    },
+}
+
 # Messages longer than this are treated as "long context" work.
 _LONG_CHARS = 1200
 # Messages longer than this are treated as substantive enough to reason about.
@@ -162,6 +177,20 @@ def _provider_cfg(provider_id: str) -> dict:
         return {}
 
 
+def _configured_role(cfg: dict, role: str, provider_id: str) -> str:
+    """The model configured for a role, falling back to the shipped default.
+
+    Precedence: explicit value in settings -> shipped default -> "" (which
+    callers read as "let the provider decide").
+    """
+    roles = cfg.get("roles")
+    if isinstance(roles, dict):
+        value = str(roles.get(role) or "").strip()
+        if value:
+            return value
+    return str((_BUILTIN_ROLES.get(provider_id) or {}).get(role) or "").strip()
+
+
 def _catalog_models(provider_id: str) -> list[str]:
     """Models discovered from the provider's API, if the catalog module exists."""
     try:
@@ -189,10 +218,7 @@ def resolve_model(
 
     cfg = cfg if cfg is not None else _provider_cfg(provider_id)
     default_model = str(cfg.get("default_model") or "").strip()
-    roles = cfg.get("roles") or {}
-    if not isinstance(roles, dict):
-        roles = {}
-    override = str(roles.get(role) or "").strip()
+    override = _configured_role(cfg, role, provider_id)
 
     if override:
         candidate = override
@@ -245,14 +271,45 @@ def pick(
 
 
 def utility_model(provider_id: str) -> str | None:
-    """Model for small background extractions, or None to use the default."""
+    """Model for small background extractions, or None to use the default.
+
+    These jobs run often, need a short strict output (JSON, a few bullets) and
+    are capped at a few hundred tokens — exactly the workload a thinking model
+    handles badly, since hidden reasoning can consume the whole budget.
+    """
     if not bool(config.get("providers", "auto_route", default=True)):
         return None
     cfg = _provider_cfg(provider_id)
-    roles = cfg.get("roles") or {}
-    if not isinstance(roles, dict):
+    override = _configured_role(cfg, "utility", provider_id)
+    if not override:
+        return None  # nothing configured -> leave the provider's default alone
+    # A background job should degrade to the provider default rather than fail
+    # on every run because the configured model no longer exists.
+    known = _catalog_models(provider_id)
+    if known and override not in known:
+        log.warning("Utility model '%s' for '%s' is not offered by the "
+                    "provider — using the provider default instead.",
+                    override, provider_id)
         return None
-    return str(roles.get("utility") or "").strip() or None
+    return override
+
+
+def for_provider(provider, role: str) -> str | None:
+    """Resolve ``role`` for a provider object, or None for its own default.
+
+    Never raises: a background job must not fail because routing could not read
+    the config, so any problem degrades to "let the provider decide".
+    """
+    try:
+        provider_id = getattr(provider, "provider_id", "") or ""
+        if not provider_id:
+            return None
+        if role == "utility":
+            return utility_model(provider_id)
+        return resolve_model(provider_id, role)
+    except Exception as e:
+        log.debug("route lookup failed for %s/%s: %s", provider, role, e)
+        return None
 
 
 def describe(provider_id: str) -> dict:

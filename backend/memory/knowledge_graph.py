@@ -235,9 +235,11 @@ async def extract_triples() -> int:
               "Each triple: {\"subject\": person/entity, \"relation\": short "
               "verb phrase, \"object\": entity/thing}. Return ONLY a JSON "
               "array, or [] if nothing worth saving.\n\n" + transcript)
+    from backend.providers import router
     try:
         result = await provider.chat(
             [{"role": "user", "content": prompt}],
+            model=router.for_provider(provider, "utility"),
             max_tokens=400, temperature=0.2)
         if not result.ok or not result.response or \
                 result.response.startswith(("[Provider", "[Not connected")):

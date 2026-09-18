@@ -125,8 +125,10 @@ class SkillForge:
                     f'"import_statement": "from X import Y", '
                     f'"code_hint": "example usage code"}}'
                 )
+                from backend.providers import router
                 result = await provider.chat(
                     [{"role": "user", "content": prompt}],
+                    model=router.for_provider(provider, "reasoning"),
                     max_tokens=1000, temperature=0.3,
                 )
                 if result.ok:
@@ -220,8 +222,10 @@ class SkillForge:
         """)
 
         try:
+            from backend.providers import router
             result = await provider.chat(
                 [{"role": "user", "content": prompt}],
+                model=router.for_provider(provider, "reasoning"),
                 max_tokens=2000, temperature=0.3,
             )
             if not result.ok:

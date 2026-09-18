@@ -34,7 +34,11 @@ Return format: [{{"description":"...","action_type":"...","params":{{...}},"depe
 
     try:
         if provider:
-            result = await provider.chat([{"role": "user", "content": prompt}], max_tokens=2000, temperature=0.3)
+            from backend.providers import router
+            result = await provider.chat(
+                [{"role": "user", "content": prompt}],
+                model=router.for_provider(provider, "reasoning"),
+                max_tokens=2000, temperature=0.3)
             if result.ok:
                 # Extract JSON array from response
                 text = result.response.strip()

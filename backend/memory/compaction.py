@@ -56,6 +56,7 @@ async def _summarize_chunk(messages: list[dict]) -> str:
         provider = None
 
     if provider is not None and time.time() - _last_provider_error > PROVIDER_BACKOFF_S:
+        from backend.providers import router
         try:
             transcript = "\n".join(
                 f"{m['role']}: {str(m['content'])[:400]}" for m in messages)
@@ -65,6 +66,7 @@ async def _summarize_chunk(messages: list[dict]) -> str:
                       + transcript)
             result = await provider.chat(
                 [{"role": "user", "content": prompt}],
+                model=router.for_provider(provider, "utility"),
                 max_tokens=300, temperature=0.3)
             if result.ok and result.response and not result.response.startswith("["):
                 summary = result.response.strip()

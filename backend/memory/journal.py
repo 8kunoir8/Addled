@@ -114,12 +114,13 @@ async def _summarize_day(date_str: str) -> dict:
         provider = get_provider()
         transcript = "\n".join(
             f"{e['role']}: {e['text'][:200]}" for e in entries[-40:])
+        from backend.providers import router
         resp = await provider.chat([
             {"role": "system", "content":
              "Summarize this day of a user+desktop-AI working together in "
              "2-3 plain sentences (no lists, no meta-commentary)."},
             {"role": "user", "content": transcript},
-        ])
+        ], model=router.for_provider(provider, "utility"))
         # provider.chat returns a ProviderResult, not a dict.
         if resp.ok:
             provider_text = (resp.response or "").strip()

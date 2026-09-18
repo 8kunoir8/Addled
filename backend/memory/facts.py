@@ -117,9 +117,11 @@ async def auto_extract_facts() -> int:
               "the user worth remembering (preferences, projects, decisions). "
               "Return ONLY a JSON array of short strings, or [] if nothing "
               "worth saving.\n\n" + transcript)
+    from backend.providers import router
     try:
         result = await provider.chat(
             [{"role": "user", "content": prompt}],
+            model=router.for_provider(provider, "utility"),
             max_tokens=200, temperature=0.2)
         if not result.ok or not result.response or \
                 result.response.startswith(("[Provider", "[Not connected")):

@@ -33,11 +33,15 @@ class SwarmAgent:
 
         try:
             if provider:
+                from backend.providers import router
                 messages = [
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": task},
                 ]
-                result = await provider.chat(messages, max_tokens=2000)
+                result = await provider.chat(
+                    messages,
+                    model=router.for_provider(provider, "reasoning"),
+                    max_tokens=2000)
                 if result.ok:
                     self.results.append({"task": task, "response": result.response, "timestamp": __import__('time').time()})
                     self.status = "ready"

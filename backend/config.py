@@ -77,7 +77,9 @@ DEFAULT_SETTINGS: dict = {
                     "chat": "deepseek-v4-flash",
                     "reasoning": "deepseek-v4-pro",
                     "vision": "",
-                    "utility": "",
+                    # Non-thinking model: these jobs cap output at 200-400 tokens
+                    # and a reasoning model wastes part of that budget thinking.
+                    "utility": "deepseek-chat",
                 },
                 "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"],
                 "vision": True,
