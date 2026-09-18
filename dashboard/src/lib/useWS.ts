@@ -99,6 +99,14 @@ function connect() {
     // Never leave callers hanging — reject all pending requests on drop.
     rejectAllPending('Connection closed');
     setSharedState('disconnected');
+    // When the page came from the remote gateway, a dropped socket usually means
+    // the session lapsed rather than the backend being down. Ask, and go to the
+    // login form instead of sitting on a dashboard that looks dead.
+    if ((globalThis as any).__ADDLED_WS_URL__ && window.location.pathname !== '/login') {
+      fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' })
+        .then((r) => { if (r.status === 401) window.location.replace('/login'); })
+        .catch(() => { /* offline; the reconnect loop will keep trying */ });
+    }
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 2000);
   };

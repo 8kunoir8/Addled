@@ -53,6 +53,30 @@ def http(url: str, method: str = "GET", headers: dict | None = None,
         return e.code, e.read().decode("utf-8", "replace"), e.headers.get("Set-Cookie") or ""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def http_noredirect(url: str, cookie: str = ""):
+    """(status, location, body) without following redirects.
+
+    `urlopen` follows 3xx silently, so a redirect to the login page would look
+    like a 200 with the login page in the body — which is precisely the thing
+    this suite needs to tell apart.
+    """
+    req = urllib.request.Request(url)
+    if cookie:
+        req.add_header("Cookie", cookie)
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=10) as r:
+            return r.status, r.headers.get("Location") or "", r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        location = (e.headers.get("Location") or "") if e.headers else ""
+        return e.code, location, e.read().decode("utf-8", "replace")
+
+
 async def main():
     from backend.config import config
     from backend.remote import auth, gateway as gw
@@ -66,8 +90,18 @@ async def main():
     (build / "index.html").write_text(
         "<html><head><title>App</title></head><body>dashboard shell</body></html>",
         encoding="utf-8")
+    # Next's static export writes a route as BOTH `chat/` and `chat.html`, with
+    # the directory holding only RSC payloads — no index.html. The first version
+    # of this fixture had only `chat.html`, so it could not catch the bug where
+    # the directory branch returned None and every route fell back to the shell.
+    (build / "chat").mkdir()
+    (build / "chat" / "payload.txt").write_text("rsc payload", encoding="utf-8")
     (build / "chat.html").write_text("<html><body>chat page</body></html>",
                                      encoding="utf-8")
+    # The other shape, where the directory does have an index.
+    (build / "direct").mkdir()
+    (build / "direct" / "index.html").write_text(
+        "<html><body>direct page</body></html>", encoding="utf-8")
     (build / "_next" / "static" / "app.js").write_text("console.log(1)",
                                                        encoding="utf-8")
     # A secret sitting outside the build, to prove containment.
@@ -117,13 +151,18 @@ async def main():
             check("no password is echoed into the page",
                   "a-good-enough-password" not in body, "the password leaked")
 
-            # ---- 2. the dashboard without a session ------------------------
-            status, body, _ = await asyncio.to_thread(http, base + "/")
-            check("the shell loads without a session",
-                  status == 200 and "dashboard shell" in body,
-                  f"{status} {body[:80]}")
-            check("the socket URL is injected into HTML",
-                  "__ADDLED_WS_URL__" in body, body[:200])
+            # ---- 2. nothing is served without a session --------------------
+            # This used to assert the opposite: that the shell loaded with no
+            # cookie. That is exactly the bug the user hit — the dashboard was
+            # readable by anyone who could reach the port.
+            for path in ("/", "/chat", "/_next/static/app.js"):
+                status, location, body = await asyncio.to_thread(
+                    http_noredirect, base + path)
+                check(f"{path} is not served without a session",
+                      status in (301, 302, 303, 307, 308),
+                      f"status {status} — content served to an anonymous caller")
+                check(f"{path} redirects to the login page",
+                      location.endswith("/login"), f"Location: {location!r}")
 
             # ---- 3. the session API ----------------------------------------
             status, body, _ = await asyncio.to_thread(
@@ -164,23 +203,45 @@ async def main():
             check("an invented token is refused", status == 401, str(status))
 
             # ---- 5. static serving and containment -------------------------
-            status, body, _ = await asyncio.to_thread(http, base + "/_next/static/app.js")
-            check("a hashed asset is served", status == 200 and "console.log" in body,
-                  f"{status} {body[:60]}")
+            # Note the cookie: everything except /login and /api/* now needs a
+            # session. The earlier version of this test asserted that the shell
+            # loaded with no session — it encoded the bug as expected behaviour,
+            # which is why the dashboard was readable by anyone who reached the
+            # port.
+            status, body, _ = await asyncio.to_thread(
+                http, base + "/_next/static/app.js", "GET", None, cookie)
+            check("a hashed asset is served once signed in",
+                  status == 200 and "console.log" in body, f"{status} {body[:60]}")
 
-            status, body, _ = await asyncio.to_thread(http, base + "/chat")
-            check("a route falls back to the app shell",
+            status, body, _ = await asyncio.to_thread(
+                http, base + "/chat", "GET", None, cookie)
+            check("a route serves its own page, not the app shell",
                   status == 200 and "chat page" in body, f"{status} {body[:60]}")
+            check("and the socket URL is injected into it",
+                  "__ADDLED_WS_URL__" in body, body[:200])
+
+            # Without a cookie, and NOT following the redirect — urlopen would
+            # happily fetch /login and report 200, which is how the earlier
+            # version of this suite managed to assert the opposite.
+            status, location, body = await asyncio.to_thread(
+                http_noredirect, base + "/_next/static/app.js")
+            check("an asset is NOT served without a session",
+                  status in (301, 302, 303, 307, 308),
+                  f"status {status} — the UI is readable by anyone who reaches the port")
+            check("the anonymous asset request is sent to the login page",
+                  location.endswith("/login"), f"Location: {location!r}")
 
             for attack in ("/../secret.txt", "/../../secret.txt",
                            "/%2e%2e/secret.txt", "/..%2fsecret.txt",
                            "/_next/../../secret.txt"):
-                status, body, _ = await asyncio.to_thread(http, base + attack)
+                status, body, _ = await asyncio.to_thread(
+                    http, base + attack, "GET", None, cookie)
                 leaked = "TOP SECRET" in body
                 check(f"traversal refused: {attack}", not leaked,
                       f"status={status} body={body[:80]}")
 
-            status, body, _ = await asyncio.to_thread(http, base + "/missing.js")
+            status, body, _ = await asyncio.to_thread(
+                http, base + "/missing.js", "GET", None, cookie)
             check("a missing asset is a 404, not the shell",
                   status == 404, f"{status} {body[:60]} — the Electron server returns 200 here")
 

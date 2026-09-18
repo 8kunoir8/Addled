@@ -296,6 +296,14 @@ class RemoteGateway:
 
             if method not in ("GET", "HEAD"):
                 return _json_response(405, {"error": f"{method} is not supported."})
+
+            # Everything past this point needs a session. The dashboard is only a
+            # static bundle, but serving it to anyone who can reach the port hands
+            # over the whole UI, and gating just the socket left the shell visible
+            # — which reads as a working, empty app rather than a locked door.
+            if _session_from(request) is None:
+                return self._redirect_to_login()
+
             return await self._static(path, head=(method == "HEAD"))
         except Exception as e:  # noqa: BLE001
             # A raised exception here would drop the connection with no reply,
@@ -304,6 +312,20 @@ class RemoteGateway:
             return _json_response(500, {"error": "Gateway error."})
 
     # -- http: the login page and the session API -----------------------------
+
+    def _redirect_to_login(self) -> Response:
+        """Send a browser to the login form.
+
+        A redirect rather than a 401 with a body, because these are browser
+        navigations: the user needs to end up looking at a form, not at an error
+        page. No return-to parameter — that would be an open-redirect to keep
+        safe, and the app shell sends you on to /chat anyway.
+        """
+        return Response(302, "Found", Headers([
+            ("Location", LOGIN_PATH),
+            NO_STORE,
+            ("Referrer-Policy", "no-referrer"),
+        ]), b"")
 
     async def _login_page(self) -> Response:
         page = Path(__file__).resolve().parent / "login.html"
@@ -425,12 +447,17 @@ class RemoteGateway:
             log.warning("Refused a path outside the dashboard: %r", url_path)
             return None
         if candidate.is_dir():
-            candidate = candidate / "index.html"
-            return candidate if candidate.is_file() else None
-        if candidate.is_file():
+            index = candidate / "index.html"
+            if index.is_file():
+                return index
+        elif candidate.is_file():
             return candidate
-        # Next's static export writes `/chat` as either `chat/index.html` or
-        # `chat.html` depending on trailingSlash, so try the sibling too.
+        # Next's static export writes a route as BOTH `chat/` and `chat.html`,
+        # and the directory holds only RSC payloads — not an index.html. Returning
+        # None as soon as the directory had no index meant every route fell
+        # through to the app shell, so /chat, /settings and /remote all rendered
+        # the root page, which then redirected to /chat, which rendered the root
+        # page again.
         if not candidate.suffix:
             sibling = candidate.with_suffix(".html")
             if sibling.is_file():
