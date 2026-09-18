@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -432,6 +433,62 @@ async def run():
               "tskey-auth-SECRET" not in blob,
               "the auth key is in the status payload")
         config._data["tailscale"]["auth_key"] = ""
+
+        # ---- 14. funnel is NEVER reconciled automatically ------------------
+        # This was a real bug. `apply_policy` used to treat the funnel flag as an
+        # instruction, so a leftover value published the dashboard to the public
+        # internet at startup with no click — while allow_shell and
+        # allow_desktop_input might be on.
+        calls: list[tuple] = []
+        saved_methods = (manager.refresh, manager.enable_serve, manager.disable_serve)
+        # apply_policy refreshes first, so the snapshot has to come from here
+        # rather than being assigned before the call.
+        serve_state = {"configured": False}
+
+        async def fake_refresh():
+            manager._snapshot = {"logged_in": True,
+                                 "serve": {"configured": serve_state["configured"]}}
+            manager._checked_at = time.time()
+            return manager._snapshot
+
+        async def fake_enable(funnel: bool = False):
+            calls.append(("enable", funnel))
+            return {"success": True}
+
+        async def fake_disable(funnel: bool = False):
+            calls.append(("disable", funnel))
+            return {"success": True}
+
+        manager.refresh = fake_refresh
+        manager.enable_serve = fake_enable
+        manager.disable_serve = fake_disable
+        try:
+            config._data["tailscale"]["serve_enabled"] = False
+            config._data["tailscale"]["funnel"] = True
+            await manager.apply_policy()
+            check("a leftover funnel flag publishes nothing",
+                  calls == [], f"apply_policy started {calls}")
+            check("and the stale flag is cleared",
+                  config.get("tailscale", "funnel") is False,
+                  str(config.get("tailscale", "funnel")))
+
+            calls.clear()
+            config._data["tailscale"]["serve_enabled"] = True
+            await manager.apply_policy()
+            check("serve_enabled does share, to the tailnet only",
+                  calls == [("enable", False)], str(calls))
+
+            calls.clear()
+            config._data["tailscale"]["serve_enabled"] = False
+            serve_state["configured"] = True
+            await manager.apply_policy()
+            check("turning the share off disables it",
+                  calls and calls[0][0] == "disable", str(calls))
+        finally:
+            (manager.refresh, manager.enable_serve,
+             manager.disable_serve) = saved_methods
+            config._data["tailscale"]["serve_enabled"] = False
+            config._data["tailscale"]["funnel"] = False
     finally:
         if saved_env is None:
             os.environ.pop("ADDLED_TAILSCALE_EXE", None)

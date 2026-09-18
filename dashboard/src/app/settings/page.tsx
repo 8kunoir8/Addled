@@ -965,7 +965,7 @@ function RemoteSection({ settings, update, saving, status }: any) {
     <p className="text-xs text-[#8b949e] mb-2">A signed-in browser is not automatically root. These hold back the two things that would turn a stolen session into full control of this machine.</p>
     <Toggle label="Allow remote shell" desc="Let a remote session run commands. This is remote code execution — leave it off unless you need it" group="remote" cfg={r} skey="allow_shell"/>
     <Toggle label="Allow remote input" desc="Let a remote session move the mouse and type. This can drive any window on this machine" group="remote" cfg={r} skey="allow_desktop_input"/>
-    <Toggle label="Publish to the public internet" desc="Allow Tailscale Funnel. Anyone with the URL reaches the login page, not just your tailnet" group="remote" cfg={r} skey="allow_funnel"/>
+    <Toggle label="Permit public internet access" desc="Allows Tailscale Funnel. This is a permission only — nothing is published until you turn on Funnel on the Remote page, and it is never published automatically" group="remote" cfg={r} skey="allow_funnel"/>
 
     <div className="border-t border-[#30363d] my-3"/>
     <p className="text-xs text-[#8b949e] mb-2">Addled manages Tailscale — status, sign-in and sharing — and can run the official installer when you press the button on the Remote page. Nothing installs on its own.</p>
@@ -985,8 +985,10 @@ function RemoteSection({ settings, update, saving, status }: any) {
     </SettingRow>
     <Num label="Share port" desc="The HTTPS port Tailscale serves on" group="tailscale" cfg={t} skey="serve_port" min={443} max={8443}/>
     <Num label="Status poll (seconds)" desc="How often to ask the Tailscale CLI for its status" group="tailscale" cfg={t} skey="poll_seconds" min={5} max={600}/>
-    <Toggle label="Share on startup" desc="Re-apply the share when Addled starts" group="tailscale" cfg={t} skey="serve_enabled"/>
-    <Toggle label="Public sharing (Funnel)" desc="Off by default. Only turn this on together with the permission above" group="tailscale" cfg={t} skey="funnel"/>
+    <Toggle label="Share on startup" desc="Re-apply the tailnet share when Addled starts" group="tailscale" cfg={t} skey="serve_enabled"/>
+    <SettingRow label="Funnel" description="Not configured here — Funnel is started and stopped only from the Remote page, so it can never come on by itself.">
+      <span className="text-xs text-[#8b949e]">{t.funnel ? 'last state: on (will be cleared)' : 'off'}</span>
+    </SettingRow>
     <SettingRow label="Auth key" description="Optional, for headless sign-in. Stored locally and never sent to a browser.">
       <span className="text-xs text-[#8b949e]">{t.auth_key ? 'Stored' : 'Not set'}</span>
     </SettingRow>

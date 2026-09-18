@@ -87,6 +87,11 @@ async def main():
         finally:
             manager_mod.installed = real_installed
 
+        # From here on the precondition is "Tailscale is not installed yet".
+        # Stated explicitly rather than relying on the host: this machine does
+        # have it, and install() correctly short-circuits when it does.
+        manager_mod.installed = lambda: False
+
         inst = inst_mod.TailscaleInstaller()
         out = await inst.install(remote=True)
         check("refuses for a remote session", out.get("success") is False, str(out))

@@ -542,9 +542,15 @@ class TailscaleManager:
             if result["success"]:
                 return {"success": True, "command": result["command"]}
             problems.append(f"`{' '.join(args)}` -> {result.get('error')}")
+        detail = " | ".join(problems[:3])
+        # HTTPS has to be switched on for the tailnet before `serve` will issue a
+        # certificate, and the CLI's own wording for that is easy to miss. Say it
+        # plainly and point at the page that fixes it.
+        if "https" in detail.lower() or "cert" in detail.lower():
+            detail += (f". Serving HTTPS needs to be enabled for your tailnet "
+                       f"first: {HTTPS_DOCS}")
         return {"success": False,
-                "error": ("Tailscale rejected every form of the command. "
-                          + " | ".join(problems[:3])),
+                "error": "Tailscale rejected every form of the command. " + detail,
                 "attempts": problems}
 
     async def enable_serve(self, funnel: bool = False) -> dict:
@@ -645,12 +651,30 @@ class TailscaleManager:
             return
         if not (self._snapshot or {}).get("logged_in"):
             return
-        wanted = self.serve_wanted() or self.funnel_allowed()
         current = (self._snapshot or {}).get("serve") or {}
+
+        # Funnel is deliberately NOT reconciled here, and this is the important
+        # line in the file. `tailscale.funnel` records what is currently
+        # published; it is not an instruction to publish. Treating it as one
+        # meant that merely having the value set caused the dashboard to be put
+        # on the public internet at startup, with no click — which is the one
+        # thing this feature promises never happens. Public exposure is only
+        # ever started by an explicit action on the Remote page.
+        wanted = self.serve_wanted()
         if wanted and not current.get("configured"):
-            await self.enable_serve(funnel=self.funnel_allowed())
+            await self.enable_serve(funnel=False)
         elif not wanted and current.get("configured"):
             await self.disable_serve(funnel=current.get("funnel", False))
+
+        # Clear a leftover flag: nothing is published, so a recorded funnel state
+        # is stale, and leaving it set is what makes the confusion above possible.
+        if not current.get("configured") and self.funnel_allowed():
+            try:
+                from backend.config import config
+                config.set("tailscale", "funnel", value=False)
+                log.info("Cleared a stale Tailscale funnel flag (nothing published)")
+            except Exception as e:  # noqa: BLE001
+                log.debug("Could not clear the funnel flag: %s", e)
 
     async def boot(self) -> None:
         """Reconcile on startup. Never starts a login on its own."""

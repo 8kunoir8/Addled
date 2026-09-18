@@ -112,12 +112,18 @@ export default function RemotePage() {
   const [installPct, setInstallPct] = useState(0);
   const [installDetail, setInstallDetail] = useState('');
   const [installError, setInstallError] = useState('');
+  // Whether the backend has answered at least once. Without it the cards below
+  // render their fallbacks — "Not installed", "Missing", "Off" — which read as
+  // real answers. That is how a correctly detected Tailscale install looked
+  // broken, so nothing is shown until there is something true to show.
+  const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
     if (wsState !== 'connected') return;
     try {
       const r = await send('remote.status', {});
       setStatus(r || null);
+      setLoaded(true);
       if (r?.tailscale?.login?.url) setLoginUrl(r.tailscale.login.url);
     } catch (e: any) {
       setError(e.message);
@@ -227,6 +233,32 @@ export default function RemotePage() {
   const stateTone: 'ok' | 'warn' | 'off' =
     status?.running && serve.configured ? 'ok'
       : ts.installed && ts.logged_in ? 'warn' : 'off';
+
+  if (!loaded) {
+    return (
+      <div className="p-6 max-w-3xl">
+        <h1 className="text-lg font-semibold mb-1">Remote access</h1>
+        <p className="text-sm text-[#8b949e] mb-6">
+          Reach this Addled from your phone or another machine, in a browser,
+          over Tailscale.
+        </p>
+        <div className="rounded-lg border border-[#30363d] bg-[#161b22] px-4 py-4">
+          <div className="text-sm text-[#e8eaed] mb-1">
+            {wsState === 'connected'
+              ? 'Reading remote status…'
+              : 'Waiting for Addled to connect…'}
+          </div>
+          <div className="text-xs text-[#8b949e]">
+            {error || 'This page fills in once Addled answers.'}
+          </div>
+          <button onClick={load}
+            className="mt-3 px-3 py-1.5 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full overflow-y-auto p-6 max-w-3xl">
