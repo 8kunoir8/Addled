@@ -87,7 +87,7 @@ launch.bat
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
 | Desktop Shell | Electron 28, system tray, auto-updater, backend auto-respawn | ✅ Built |
 | Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
-| Communication | WebSocket JSON-RPC 2.0 (125 handlers) | ✅ Built |
+| Communication | WebSocket JSON-RPC 2.0 (126 handlers) | ✅ Built |
 
 ---
 
@@ -265,7 +265,7 @@ Every memory store above is an independent flat collection, so nothing knew that
 A **Karpathy-pattern wiki** instead of another chat transcript: markdown pages under `backend/memory/wiki/pages/` with YAML frontmatter, maintained *incrementally* from your own sources. Ingesting a document first pulls the pages that already look related and asks the model for **merged page bodies**, so a second document about the same topic updates the page and appends its citation rather than creating a rival page — and the citation is preserved on every later rewrite. `[[wiki-links]]` between pages are mirrored into the relation graph (`links_to`), and non-URL sources become `sourced_from` edges to the real files, so the wiki also answers "which file said this?". Relevant pages are injected into chat with their citations as a `[Wiki]` block, since pre-distilled pages are better evidence than a guess. **`auto_ingest` is off by default** — Addled never reads your files into the wiki unless you ask. Tools: `wiki_search` `wiki_read` `wiki_write` `wiki_ingest` `wiki_links` `wiki_lint`. Dashboard: Wiki page (list, search, edit, ingest, lint).
 
 ### 🎤 Voice & Perception
-**Voice input**: wake word → command → chat → spoken reply. **Silero VAD** segments real speech for turn detection (RMS fallback). STT: **faster-whisper** (local, offline; tiny/small selectable) with **SenseVoice** auto-activating when funasr is available. **TTS**: **Kokoro** neural voices fully offline (local 82M ONNX) with **edge-tts** online fallback — engine selectable in Settings → Voice, with an **Auto TTS toggle** so dashboard chat and character prompts speak replies out loud. Speech input is local & offline; Edge TTS is the only network-dependent part. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
+**Voice input**: wake word → command → chat → spoken reply. **Silero VAD** segments real speech for turn detection (RMS fallback). STT: **faster-whisper** (local, offline; tiny/small selectable) with **SenseVoice** auto-activating when funasr is available. **TTS**: **Kokoro** neural voices fully offline (local 82M ONNX) with **edge-tts** online fallback — engine selectable in Settings → Voice, with an **Auto TTS toggle** so dashboard chat and character prompts speak replies out loud. **Voice pickers** list what is actually available rather than asking you to type a voice name: the installed Kokoro pack is read straight out of `voices-v1.0.bin` (54 voices, offline, without loading the model) and the Edge voices come from the service, cached for a day with a curated offline fallback. Both are grouped by language and follow the **Language** setting, and where an engine simply cannot speak the chosen language — Kokoro has no Indonesian voice — Addled says so and routes to one that can. Speech input is local & offline; Edge TTS is the only network-dependent part. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
 
 ### � Skills & Market
 33 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
@@ -278,10 +278,10 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 
 ---
 
-## WebSocket API (125 handlers)
+## WebSocket API (126 handlers)
 
 ### Core
-`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
+`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
 
 ### Goals
 `goal.create` `goal.list` `goal.start` `goal.cancel`
@@ -346,7 +346,7 @@ Addled/
 │   ├── main.py              # Entry point + onboarding + single-instance lock + kill switch + voice
 │   ├── config.py            # Portable JSON settings
 │   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
-│   ├── ws_server.py         # 125 JSON-RPC 2.0 handlers + server pushes
+│   ├── ws_server.py         # 126 JSON-RPC 2.0 handlers + server pushes
 │   ├── providers/           # 10 AI providers (base + registry + selector + router)
 │   │                        #   + live model catalog + local Florence-2 vision
 │   ├── mcp_client/          # MCP client (stdio + streamable HTTP) → tools as skills
@@ -378,7 +378,7 @@ Addled/
 │       ├── browser/page.tsx # URL bar + screenshot + log
 │       ├── calendar/page.tsx# Month grid + WS-synced events
 │       ├── bots/page.tsx    # Bot connection UI
-│       └── settings/page.tsx# 9-section config + live WS save
+│       └── settings/page.tsx# provider/voice/memory/wiki config + live WS save
 ├── electron/
 │   ├── main.js              # BrowserWindow, tray, Python/Next.js spawn
 │   ├── updater.js           # GitHub Releases auto-updater
@@ -388,7 +388,11 @@ Addled/
 │   ├── whatsapp-bot.js      # Baileys multi-device
 │   └── discord-bot.js       # discord.js 5 slash commands
 ├── scripts/
-│   └── verify_python.py     # Python environment check
+│   ├── verify_python.py     # Python environment check
+│   ├── check_voice.py       # voice catalogue + voice selection
+│   ├── check_links.py       # memory relation graph
+│   ├── check_wiki.py        # wiki pages, ingest and skills
+│   └── check_wiring.py      # model routing wiring
 ├── launch.bat               # One-click dev launcher
 └── electron-builder.yml     # NSIS + portable packaging config
 ```

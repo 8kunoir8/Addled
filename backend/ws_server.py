@@ -290,8 +290,13 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
             _engine_ref._chat_busy = False
 
 
-async def _speak_reply(text: str, voice: str = "en-US-JennyNeural") -> dict:
-    """Speak text with the SPEAKING character animation, then reset."""
+async def _speak_reply(text: str, voice: str | None = None) -> dict:
+    """Speak text with the SPEAKING character animation, then reset.
+
+    voice None means "use whatever voice.tts_voice / voice.kokoro_voice is
+    configured" — the previous hardcoded default meant the Edge voice setting
+    was ignored on every path that reached the audio output.
+    """
     if _engine_ref is not None:
         _engine_ref._voice_busy = True
         try:
@@ -1278,10 +1283,27 @@ def _register_default_handlers():
 
     async def voice_speak(params: dict, ws) -> dict:
         text = params.get("text", "")
-        voice = params.get("voice", "en-US-JennyNeural")
+        voice = params.get("voice") or None
         if not text:
             return {"success": False, "error": "No text to speak"}
         return await _speak_reply(text, voice)
+
+    async def voice_voices(params: dict, ws) -> dict:
+        """The voices the pickers can offer: installed Kokoro + Edge service.
+
+        Slow on a cold cache, because the Edge half is a network call, so the
+        caller shows a loading state rather than blocking on it. `force`
+        bypasses the cache when the user asks to refresh.
+        """
+        try:
+            from backend.voice import voices as voice_catalogue
+            payload = await voice_catalogue.describe(
+                force=bool(params.get("force")))
+        except Exception as e:
+            log.debug("voice.voices failed: %s", e)
+            return {"success": False, "error": str(e),
+                    "kokoro": [], "edge": []}
+        return {"success": True, **payload}
 
     # ---- Phase 3: Character state control (used by bots) --------------------
 
@@ -2015,6 +2037,7 @@ def _register_default_handlers():
     _server.register("action.deny", action_deny)
     _server.register("action.pending", action_pending)
     _server.register("voice.speak", voice_speak)
+    _server.register("voice.voices", voice_voices)
     _server.register("character.setState", character_set_state)
     _server.register("observer.status", observer_status)
     _server.register("system.status", system_status)

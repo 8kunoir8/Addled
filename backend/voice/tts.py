@@ -62,6 +62,27 @@ def pick_voice(lang: str | None) -> tuple[str | None, str | None]:
         return LANG_TO_EDGE[code], "edge"
     return None, None
 
+
+# Kokoro v1.0 language coverage, keyed by the lang_code baked into the voice
+# names (af_/am_ = a, bf_/bm_ = b, ...). Kokoro ships no Indonesian voice, so
+# "Kokoro + Indonesian" is not a preference that can be made to work — it can
+# only ever speak the wrong language.
+KOKORO_LANG_CODES = {
+    "en": "a", "en-gb": "b", "es": "e", "fr": "f", "hi": "h",
+    "it": "i", "ja": "j", "pt": "p", "zh": "z",
+}
+
+
+def engine_speaks(engine: str, lang: str) -> bool:
+    """Whether an engine ships any voice for this language at all."""
+    code = (lang or "").lower()
+    if engine == "kokoro":
+        return code in KOKORO_LANG_CODES
+    if engine == "edge":
+        return code in LANG_TO_EDGE
+    return True
+
+
 # Kokoro caps each synthesis at MAX_PHONEME_LENGTH (510); long chat replies
 # must be split into sentence-sized pieces and concatenated.
 _KOKORO_MAX_CHARS = 180
@@ -111,6 +132,21 @@ async def speak(text: str, voice: str | None = None,
 
     engine = engine or config.get("voice", "tts_engine", default="edge") \
         or "edge"
+
+    # The Language setting is a promise the engine has to be able to keep. With
+    # Language = Indonesian and Kokoro selected, every utterance used to come
+    # out in an English voice. When the caller has not pinned a voice for this
+    # utterance, prefer an engine that can actually speak the configured
+    # language.
+    if voice is None:
+        wanted = config.get("voice", "language", default="auto") or "auto"
+        if wanted != "auto" and not engine_speaks(engine, wanted):
+            alt_voice, alt_engine = pick_voice(wanted)
+            if alt_voice and alt_engine:
+                log.info("TTS engine '%s' has no '%s' voice — using %s (%s)",
+                         engine, wanted, alt_engine, alt_voice)
+                engine, voice = alt_engine, alt_voice
+
     if engine == "kokoro":
         kokoro_voice = voice or config.get(
             "voice", "kokoro_voice", default=DEFAULT_KOKORO_VOICE)
@@ -118,7 +154,12 @@ async def speak(text: str, voice: str | None = None,
             return await _speak_kokoro(text, kokoro_voice, speed)
         except Exception as e:
             log.warning("Kokoro TTS failed (%s) — falling back to edge-tts", e)
-    edge_voice = voice or DEFAULT_EDGE_VOICE
+    # The configured voice, not the hardcoded default: voice.tts_voice was
+    # previously written by the dashboard and read by nobody, so this setting
+    # silently had no effect on anything the user actually heard.
+    edge_voice = voice or config.get(
+        "voice", "tts_voice", default=DEFAULT_EDGE_VOICE) \
+        or DEFAULT_EDGE_VOICE
     return await _speak_edge(text, edge_voice, rate)
 
 

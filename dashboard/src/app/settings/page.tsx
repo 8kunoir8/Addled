@@ -8,7 +8,7 @@ type SettingsData = Record<string, any>;
 const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
   notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️', guidelines: '📐',
-  mcp: '🧰',
+  mcp: '🧰', wiki: '📖',
 };
 
 export default function SettingsPage() {
@@ -62,7 +62,7 @@ export default function SettingsPage() {
         {activeSection==='providers'&&<ProvidersSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='character'&&<CharacterSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='character'&&<SkinsSection send={send} connected={wsState==='connected'}/>}
-        {activeSection==='voice'&&<VoiceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
+        {activeSection==='voice'&&<VoiceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='safety'&&<SafetySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='notifications'&&<NotificationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='observation'&&<ObservationSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
@@ -741,18 +741,140 @@ function CharacterSection({ settings, update, saving, status }: any) {
   </div>;
 }
 
-function VoiceSection({ settings, update, saving, status }: any) {
+const LANGUAGES: [string, string][] = [
+  ['en','English'],['id','Indonesian'],['zh','Chinese'],['ja','Japanese'],
+  ['ko','Korean'],['es','Spanish'],['fr','French'],['hi','Hindi'],
+  ['pt','Portuguese'],['auto','Auto (detect)'],
+];
+
+function VoiceSection({ settings, update, saving, status, send, connected }: any) {
   const v=settings?.voice||{};
+  const engine=v.tts_engine||'edge';
+  const language=v.language||'auto';
+  const [catalogue,setCatalogue]=useState<any>(null);
+  const [loadError,setLoadError]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [showAllEdge,setShowAllEdge]=useState(false);
+  const [customEdge,setCustomEdge]=useState(false);
+  const [customKokoro,setCustomKokoro]=useState(false);
+
+  const load=useCallback(async(force?:boolean)=>{
+    if(!connected) return;
+    setBusy(true);
+    try{
+      const r=await send('voice.voices', force?{force:true}:{});
+      if(r?.success){setCatalogue(r); setLoadError('');}
+      else setLoadError(r?.error||'Voice list unavailable');
+    }catch(e:any){setLoadError(e?.message||'Voice list unavailable');}
+    finally{setBusy(false);}
+  },[connected,send]);
+
+  useEffect(()=>{load();},[load]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selectCls="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] max-w-[320px]";
+  const edgeVoices:any[]=catalogue?.edge||[];
+  const kokoroVoices:any[]=catalogue?.kokoro||[];
+  const kokoroLanguages:string[]=catalogue?.kokoro_languages||[];
+
+  // A few hundred Edge voices is unusable as a flat list, so group by locale
+  // and keep the configured language in view unless asked for everything.
+  const edgeFiltered=(showAllEdge||language==='auto')
+    ? edgeVoices
+    : edgeVoices.filter(x=>x.language===language);
+  const edgeGroups:Record<string,any[]>={};
+  for(const x of edgeFiltered){
+    if(!edgeGroups[x.locale]) edgeGroups[x.locale]=[];
+    edgeGroups[x.locale].push(x);
+  }
+  const kokoroGroups:Record<string,any[]>={};
+  for(const x of kokoroVoices){
+    const key=x.language_label||x.language;
+    if(!kokoroGroups[key]) kokoroGroups[key]=[];
+    kokoroGroups[key].push(x);
+  }
+  // Kokoro v1.0 covers 9 languages and has no Indonesian voice at all.
+  const kokoroMissing=kokoroVoices.length>0&&language!=='auto'
+    &&!kokoroLanguages.includes(language);
+
+  const edgeValue=v.tts_voice||'en-US-JennyNeural';
+  const kokoroValue=v.kokoro_voice||'af_heart';
+  const edgeKnown=edgeVoices.some(x=>x.id===edgeValue);
+  const kokoroKnown=kokoroVoices.some(x=>x.id===kokoroValue);
+  const edgeCount=edgeVoices.length;
+  const sourceNote=catalogue&&catalogue.edge_source!=='live'
+    ? ` · ${catalogue.edge_source}` : '';
+
+  const toggleCls=(on:boolean)=>`w-10 h-5 rounded-full transition-colors ${on?'bg-[#3380FF]':'bg-[#30363d]'}`;
+  const knobCls=(on:boolean)=>`w-4 h-4 bg-white rounded-full transition-transform ${on?'translate-x-5':'translate-x-0.5'}`;
+
   return <div className="space-y-1">
-    <SettingRow label="TTS Engine"><select value={v.tts_engine||'edge'} onChange={e=>update('voice','tts_engine',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="kokoro">Kokoro (Local, offline)</option><option value="edge">Edge TTS (Free, online)</option></select></SettingRow>
-    <SettingRow label="Edge Voice"><input type="text" value={v.tts_voice||'en-US-JennyNeural'} onChange={e=>update('voice','tts_voice',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-48"/></SettingRow>
-    <SettingRow label="Kokoro Voice"><input type="text" value={v.kokoro_voice||'af_heart'} onChange={e=>update('voice','kokoro_voice',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-40"/></SettingRow>
-    <SettingRow label="STT Engine"><select value={v.stt_engine||'sensevoice'} onChange={e=>update('voice','stt_engine',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="sensevoice">SenseVoice (falls back to Whisper)</option><option value="whisper">Faster-Whisper</option></select></SettingRow>
-    <SettingRow label="STT Model"><select value={v.stt_model||'small'} onChange={e=>update('voice','stt_model',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="tiny">tiny (fast)</option><option value="small">small (accurate)</option></select></SettingRow>
+    <SettingRow label="TTS Engine"><select value={engine} onChange={e=>update('voice','tts_engine',e.target.value)} className={selectCls}><option value="kokoro">Kokoro (Local, offline)</option><option value="edge">Edge TTS (Free, online)</option></select></SettingRow>
+    <SettingRow label="Language" description="What to speak — the voice lists follow this"><select value={language} onChange={e=>update('voice','language',e.target.value)} className={selectCls}>{LANGUAGES.map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></SettingRow>
+
+    <SettingRow label="Edge Voice" description={busy?'Loading voices…':(edgeCount?`${edgeCount} available${sourceNote}`:undefined)}>
+      {customEdge
+        ? <div className="flex items-center gap-2">
+            <input type="text" value={edgeValue} onChange={e=>update('voice','tts_voice',e.target.value)} className={`${selectCls} w-56`}/>
+            <button onClick={()=>setCustomEdge(false)} className="text-xs text-[#8b949e] hover:text-[#e8eaed]">done</button>
+          </div>
+        : <select value={edgeKnown?edgeValue:'__custom__'} onChange={e=>{const val=e.target.value; if(val==='__custom__') setCustomEdge(true); else update('voice','tts_voice',val);}} className={`${selectCls} w-56`}>
+            {!edgeKnown&&<option value="__custom__">{edgeValue} (current)</option>}
+            {Object.keys(edgeGroups).sort().map(locale=>(
+              <optgroup key={locale} label={locale}>
+                {edgeGroups[locale].map(x=><option key={x.id} value={x.id}>{x.label}{x.gender?` — ${x.gender}`:''}</option>)}
+              </optgroup>
+            ))}
+            <option value="__custom__">Custom…</option>
+          </select>}
+    </SettingRow>
+
+    {language!=='auto'&&edgeCount>0&&(
+      <SettingRow label="Show every language" description="Edge voices for all locales, not just this one">
+        <button onClick={()=>setShowAllEdge(s=>!s)} className={toggleCls(showAllEdge)}><div className={knobCls(showAllEdge)}/></button>
+      </SettingRow>
+    )}
+
+    <SettingRow label="Kokoro Voice" description={busy?'Loading voices…':(kokoroVoices.length?`${kokoroVoices.length} installed`:'Not installed')}>
+      {customKokoro
+        ? <div className="flex items-center gap-2">
+            <input type="text" value={kokoroValue} onChange={e=>update('voice','kokoro_voice',e.target.value)} className={`${selectCls} w-44`}/>
+            <button onClick={()=>setCustomKokoro(false)} className="text-xs text-[#8b949e] hover:text-[#e8eaed]">done</button>
+          </div>
+        : <select value={kokoroKnown?kokoroValue:'__custom__'} onChange={e=>{const val=e.target.value; if(val==='__custom__') setCustomKokoro(true); else update('voice','kokoro_voice',val);}} className={`${selectCls} w-44`}>
+            {!kokoroKnown&&<option value="__custom__">{kokoroValue} (current)</option>}
+            {Object.keys(kokoroGroups).sort().map(lang=>(
+              <optgroup key={lang} label={lang}>
+                {kokoroGroups[lang].map(x=><option key={x.id} value={x.id}>{x.label} — {x.gender}</option>)}
+              </optgroup>
+            ))}
+            <option value="__custom__">Custom…</option>
+          </select>}
+    </SettingRow>
+
+    {kokoroMissing&&(
+      <p className="text-xs text-[#d29922] py-2">
+        Kokoro has no {language} voice — its {kokoroVoices.length} voices cover {
+          kokoroLanguages.join(', ')}. Pick an Edge voice to speak {language}, or
+        change the language above.
+      </p>
+    )}
+    {!busy&&catalogue&&edgeCount===0&&(
+      <p className="text-xs text-[#d29922] py-2">
+        Could not list Edge voices{loadError?`: ${loadError}`:''}. Showing nothing rather than a guess — try Refresh.
+      </p>
+    )}
+    {loadError&&edgeCount>0&&(
+      <p className="text-xs text-[#8b949e] py-2">
+        Edge list could not be refreshed ({loadError}); showing the last known set.
+      </p>
+    )}
+    <SettingRow label="Voice list"><button onClick={()=>load(true)} disabled={busy} className="text-xs px-2 py-1 rounded border border-[#30363d] hover:border-[#8b949e] text-[#8b949e] hover:text-[#e8eaed] disabled:opacity-50">{busy?'Refreshing…':'Refresh'}</button></SettingRow>
+
+    <SettingRow label="STT Engine"><select value={v.stt_engine||'sensevoice'} onChange={e=>update('voice','stt_engine',e.target.value)} className={selectCls}><option value="sensevoice">SenseVoice (falls back to Whisper)</option><option value="whisper">Faster-Whisper</option></select></SettingRow>
+    <SettingRow label="STT Model"><select value={v.stt_model||'small'} onChange={e=>update('voice','stt_model',e.target.value)} className={selectCls}><option value="tiny">tiny (fast)</option><option value="small">small (accurate)</option></select></SettingRow>
     <SettingRow label="Wake Word"><input type="text" value={v.wake_word||'hey addled'} onChange={e=>update('voice','wake_word',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-40"/></SettingRow>
-    <SettingRow label="Auto TTS"><button onClick={()=>update('voice','auto_tts',v.auto_tts===false)} className={`w-10 h-5 rounded-full transition-colors ${v.auto_tts!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${v.auto_tts!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
-    <SettingRow label="VAD (Silero)"><button onClick={()=>update('voice','vad_enabled',v.vad_enabled===false)} className={`w-10 h-5 rounded-full transition-colors ${v.vad_enabled!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${v.vad_enabled!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
-    <SettingRow label="Language"><select value={v.language||'en'} onChange={e=>update('voice','language',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="en">English</option><option value="id">Indonesian</option><option value="zh">Chinese</option><option value="ja">Japanese</option><option value="ko">Korean</option><option value="es">Spanish</option><option value="fr">French</option><option value="hi">Hindi</option><option value="pt">Portuguese</option><option value="auto">Auto (detect)</option></select></SettingRow>
+    <SettingRow label="Auto TTS"><button onClick={()=>update('voice','auto_tts',v.auto_tts===false)} className={toggleCls(v.auto_tts!==false)}><div className={knobCls(v.auto_tts!==false)}/></button></SettingRow>
+    <SettingRow label="VAD (Silero)"><button onClick={()=>update('voice','vad_enabled',v.vad_enabled===false)} className={toggleCls(v.vad_enabled!==false)}><div className={knobCls(v.vad_enabled!==false)}/></button></SettingRow>
   </div>;
 }
 
