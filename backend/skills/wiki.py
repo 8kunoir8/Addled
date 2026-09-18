@@ -182,6 +182,16 @@ def register(registry) -> None:
     """Attach the wiki skills to a SkillRegistry."""
     from backend.skills.registry import SkillDefinition
 
+    try:
+        # These handlers import the wiki at call time, so registration would
+        # otherwise succeed and advertise tools that can only ever error. The
+        # enabled/disabled switch is deliberately a separate thing: a wiki that
+        # is merely turned off still answers with a clear "turned off" message.
+        from backend.wiki import ingest, query, store  # noqa: F401
+    except Exception as e:
+        log.debug("wiki skills unavailable: %s", e)
+        return
+
     registry.register(SkillDefinition(
         "wiki_search",
         "Search Addled's wiki — the maintained knowledge pages distilled from "
