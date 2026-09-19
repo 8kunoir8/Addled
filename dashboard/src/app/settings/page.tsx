@@ -459,9 +459,9 @@ function McpSection({settings,update,saving,status}: any){
     <div className="mt-4 rounded-lg border border-[#30363d] p-3">
       <p className="text-sm font-medium text-[#e8eaed]">MCP market</p>
       <p className="mt-1 text-[11px] text-[#8b949e]">
-        Searches the official Model Context Protocol registry. A server that needs an
-        API key, a required variable or a runtime you do not have is listed with the
-        reason instead of being added to fail later.
+        Searches the official Model Context Protocol registry, and Smithery's. A server that needs an
+        API key, a required variable or a runtime you do not have is listed with a field to fill in
+        or the reason it cannot be added, instead of being added to fail later.
       </p>
       <div className="mt-2 flex items-center gap-2">
         <input value={marketQuery} onChange={e=>setMarketQuery(e.target.value)}
@@ -497,18 +497,23 @@ function McpSection({settings,update,saving,status}: any){
                 placeholder="optional — some servers need these and never say so"
                 className={`${inp} flex-1`}/>
             </div>}
-          {missingVars(c).length>0&&<div className="mt-1 space-y-1">
-            {missingVars(c).map((v:string)=><div key={v} className="flex items-center gap-2">
-              <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[#d29922]" title={v}>{v}</span>
-              <input type="password" autoComplete="off" value={creds[v]||''}
-                onChange={e=>setCreds({...creds,[v]:e.target.value})}
-                placeholder={String((c.header_hints||{})[v]||((c.requires_headers||[]).includes(v)?'value for this header':'value for this variable'))}
-                className={`${inp} flex-1`}/>
+          {missingVars(c).length>0&&<div className="mt-1 space-y-2">
+            {missingVars(c).map((v:string)=><div key={v} className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[#d29922]" title={v}>{v}</span>
+                <input type="password" autoComplete="off" value={creds[v]||''}
+                  onChange={e=>setCreds({...creds,[v]:e.target.value})}
+                  placeholder={String((c.header_hints||{})[v]||((c.requires_headers||[]).includes(v)?'value for this header':'value for this variable'))}
+                  className={`${inp} flex-1`}/>
+              </div>
+              {(c.key_help||{})[v]&&
+                <p className="pl-[11.5rem] text-[10px] text-[#8b949e]">{String(c.key_help[v])}</p>}
             </div>)}
             <p className="text-[10px] text-[#8b949e]">
-              Kept by name, so the next server wanting one of these reuses it — including when the
+              Fill {missingVars(c).length>1?'these':'this'} in to turn Add &amp; connect on. Kept by name,
+              so the next server wanting one of these reuses it — including when the
               agent finds and adds a server on its own. Values are never read back out.
-              {Object.keys(c.header_hints||{}).length>0&&' The placeholder is what the registry expects, scheme included.'}
+              {Object.keys(c.header_hints||{}).length>0&&' The placeholder is the shape the server expects; a bare key is given the scheme it needs.'}
             </p>
           </div>}
           {(c.blocked_kinds||[]).includes('runtime')&&String(c.command||'')==='uvx'&&

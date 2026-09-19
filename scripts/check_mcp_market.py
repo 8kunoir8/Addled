@@ -13,6 +13,7 @@ Run from the project root:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -450,10 +451,13 @@ def smithery_checks(market) -> None:
                                      "displayName": "Hosted",
                                      "description": "No config here.",
                                      "remote": True})
-    check("a hosted Smithery entry says why it cannot be used",
+    # A listing says it is remote and nothing else, so the missing endpoint is
+    # the blocker. The key is asked for once there is an address to send it to,
+    # which `hosted_reach_checks` covers.
+    check("a hosted Smithery entry reports the missing endpoint",
           hosted and hosted["runnable"] is False
           and "hosted" in hosted["blocked_reason"]
-          and "API key" in hosted["blocked_reason"],
+          and "endpoint" in hosted["blocked_reason"],
           hosted and hosted["blocked_reason"])
 
     # The value of a second source is the servers only it has...
@@ -711,23 +715,224 @@ async def smithery_endpoint_checks(market) -> None:
           str(kept.get("blocked_kinds")) if kept else "entry missing")
 
 
+def _hasdata_listing() -> dict:
+    """A hosted listing as Smithery's list endpoint gives it: remote, no more."""
+    return {"qualifiedName": "hasdata/duckduckgo-mcp",
+            "displayName": "DuckDuckGo MCP Server",
+            "description": "DuckDuckGo search as structured JSON. Runs on "
+                           "HasData's hosted API.",
+            "remote": True, "isDeployed": True}
+
+
+# What their detail endpoint publishes for it - the shape was copied from a live
+# response, including the schema key that says the value is a header.
+_HASDATA_DETAIL = {
+    "qualifiedName": "hasdata/duckduckgo-mcp",
+    "deploymentUrl": "https://duckduckgo-mcp--hasdata.run.tools",
+    "connections": [{
+        "type": "http",
+        "deploymentUrl": "https://duckduckgo-mcp--hasdata.run.tools",
+        "configSchema": {
+            "type": "object",
+            "properties": {
+                "x-api-key": {
+                    "type": "string",
+                    "x-from": {"header": "x-api-key"},
+                    "description": "Enter your API key from the HasData dashboard.",
+                },
+            },
+        },
+    }],
+}
+
+
+async def _hosted_search(market, listing: dict, record: dict | None) -> list[dict]:
+    """Search with only this one listing present, and this one detail record."""
+    candidate = market._smithery_normalise(listing)
+    with mock.patch.object(market, "_registry_candidates", lambda q, l: []), \
+         mock.patch.object(market, "_smithery_candidates",
+                           lambda q, l: [candidate]), \
+         mock.patch.object(market, "_fetch_smithery_detail", lambda name: record):
+        return await market.search("duckduckgo")
+
+
+async def hosted_reach_checks(market) -> None:
+    """A hosted listing becomes reachable with the key the user already has.
+
+    Smithery's registry marks a server remote and publishes neither an address
+    nor the values it wants, so "hosted by Smithery" was the end of the road and
+    there was nowhere to put a key. Their gateway serves a deployed server at its
+    qualified name - a bad bearer answers "Invalid token", not 404 - and their
+    detail record names the values the server itself asks for. That is what turns
+    the note into a field.
+    """
+    from backend.mcp_client import credentials
+
+    market._detail_cache.clear()
+    hits = await _hosted_search(market, _hasdata_listing(), _HASDATA_DETAIL)
+    hit = next((c for c in hits if c["name"] == "hasdata/duckduckgo-mcp"), None)
+    check("a deployed hosted listing gets Smithery's gateway address",
+          bool(hit) and hit.get("url")
+          == "https://server.smithery.ai/hasdata/duckduckgo-mcp/mcp",
+          (hit or {}).get("url"))
+    check("and asks for the key its own schema declares, beside the gateway's",
+          bool(hit) and hit.get("requires_headers")
+          == ["Authorization", "x-api-key"],
+          (hit or {}).get("requires_headers"))
+    check("only the gateway key has a shape to imitate",
+          bool(hit) and hit.get("header_hints")
+          == {"Authorization": "Bearer {smithery_api_key}"},
+          (hit or {}).get("header_hints"))
+    check("the server's own key is explained in the provider's words",
+          bool(hit) and (hit.get("key_help") or {}).get("x-api-key")
+          == "Enter your API key from the HasData dashboard.",
+          (hit or {}).get("key_help"))
+    check("and the gateway key says where to get one",
+          bool(hit) and "smithery.ai"
+          in (hit.get("key_help") or {}).get("Authorization", ""),
+          (hit or {}).get("key_help"))
+    check("so the card waits on a value, not on hosting",
+          bool(hit) and hit.get("blocked_kinds") == ["headers"]
+          and "hosted" not in (hit or {}).get("blocked_reason", ""),
+          (hit or {}).get("blocked_reason"))
+
+    with temp_settings():
+        credentials.save(None, {"Authorization": "Bearer sk-test"})
+        check("the gateway key alone is not enough when the server wants its own",
+              market._finish(dict(hit or {}))["runnable"] is False,
+              str((hit or {}).get("blocked_reason")))
+        credentials.save(None, {"x-api-key": "hd-123"})
+        ready = market._finish(dict(hit or {}))
+        check("both values make it addable", ready["runnable"] is True,
+              ready.get("blocked_reason"))
+        spec = market.to_spec(ready)
+        check("and both reach the spec's headers",
+              spec["headers"] == {"Authorization": "Bearer sk-test",
+                                 "x-api-key": "hd-123"},
+              spec["headers"])
+
+    # A server whose schema declares nothing still needs the gateway key: asked
+    # without one, Smithery answers "Missing Authorization header" rather than
+    # serving it. The address does not depend on the detail record at all.
+    shares = await _hosted_search(market, {"qualifiedName": "mcp-hive/hive-servers",
+                                          "displayName": "MCP Hive",
+                                          "description": "", "remote": True,
+                                          "isDeployed": True}, None)
+    hive = next((c for c in shares if c["name"] == "mcp-hive/hive-servers"), None)
+    check("a hosted server that declares no values is still asked for the key",
+          bool(hive) and hive.get("requires_headers") == ["Authorization"]
+          and hive.get("blocked_kinds") == ["headers"],
+          str((hive or {}).get("blocked_reason")))
+    check("because the address does not need the detail record to exist",
+          bool(hive) and hive.get("url")
+          == "https://server.smithery.ai/mcp-hive/hive-servers/mcp",
+          (hive or {}).get("url"))
+
+    # A server with no slug of its own has just its namespace in the address.
+    slim = await _hosted_search(market, {"qualifiedName": "motherduck",
+                                        "displayName": "MotherDuck",
+                                        "description": "", "remote": True,
+                                        "isDeployed": True}, None)
+    duck = next((c for c in slim if c["name"] == "motherduck"), None)
+    check("a slug-less server still gets an address",
+          bool(duck) and duck.get("url")
+          == "https://server.smithery.ai/motherduck/mcp",
+          (duck or {}).get("url"))
+
+    # Not deployed on their gateway and no host published: honest, as before.
+    stranded = await _hosted_search(market, {"qualifiedName": "nobody/private",
+                                            "displayName": "Private",
+                                            "description": "",
+                                            "remote": True}, None)
+    stay = next((c for c in stranded if c["name"] == "nobody/private"), None)
+    check("a hosted server with nowhere to send it stays blocked",
+          bool(stay) and stay.get("blocked_kinds") == ["hosted"]
+          and not stay.get("url"),
+          (stay or {}).get("blocked_kinds"))
+
+    # A value that belongs in an environment variable is not a header, so no
+    # field may be offered for it: it would be sent to the wrong place.
+    envonly = await _hosted_search(market, {"qualifiedName": "acme/envonly",
+                                           "displayName": "Env", "description": "",
+                                           "remote": True, "isDeployed": True},
+                                  {"connections": [{"type": "http", "configSchema": {
+                                      "properties": {"TOKEN": {
+                                          "x-from": {"env": "TOKEN"},
+                                          "description": "a variable"}}}}]})
+    env_hit = next((c for c in envonly if c["name"] == "acme/envonly"), None)
+    check("a value meant for a variable is not shown as a header",
+          bool(env_hit) and env_hit.get("requires_headers") == ["Authorization"],
+          (env_hit or {}).get("requires_headers"))
+
+async def detail_cache_checks(market) -> None:
+    """Their detail endpoint is asked once per server, not once per search.
+
+    `install` re-searches by name, so a host that has already answered must not
+    be asked again - and neither must it be asked for every keystroke in the
+    search box. The network is what is faked here rather than the function:
+    patching `_fetch_smithery_detail` would replace the cache with the stub and
+    prove nothing about it, which is exactly what the first version of this
+    check did.
+    """
+    market._detail_cache.clear()
+    asked: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._body = json.dumps(payload).encode()
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        asked.append(str(getattr(request, "full_url", request)))
+        return FakeResponse(_HASDATA_DETAIL)
+
+    with mock.patch.object(market, "_registry_candidates", lambda q, l: []), \
+         mock.patch.object(market, "_smithery_candidates",
+                           lambda q, l: [market._smithery_normalise(_hasdata_listing())]), \
+         mock.patch.object(market.urllib.request, "urlopen", fake_urlopen):
+        first = await market.search("duckduckgo")
+        await market.search("duckduckgo")
+    check("the detail record is fetched once and then remembered",
+          len(asked) == 1 and "hasdata/duckduckgo-mcp" in asked[0], asked)
+    check("and the remembered record is the one that was used",
+          bool(first) and first[0].get("key_help", {}).get("x-api-key")
+          == "Enter your API key from the HasData dashboard.",
+          first and first[0].get("key_help"))
+
+
 def main() -> int:
     from backend.mcp_client import market
 
     # Nothing here may touch the network: the sources are stubbed, and the
-    # checks that are about a source patch it themselves.
+    # checks that are about a source patch it themselves. The detail endpoint is
+    # stubbed too - it is one call per hosted listing, and a suite that reached
+    # for a live host would be slow, flaky and dependent on someone else's
+    # uptime.
     with mock.patch.object(market, "_fetch", lambda q, l: []), \
-         mock.patch.object(market, "_fetch_smithery", lambda q, l: []):
+         mock.patch.object(market, "_fetch_smithery", lambda q, l: []), \
+         mock.patch.object(market, "_fetch_smithery_detail", lambda name: None):
         normalise_checks(market)
         search_checks(market)
         suggest_checks(market)
         install_checks(market)
         sweep_checks()
         stderr_checks()
-    smithery_checks(market)
-    credential_checks(market)
-    asyncio.run(keyed_install_checks(market))
-    asyncio.run(smithery_endpoint_checks(market))
+        smithery_checks(market)
+        credential_checks(market)
+        asyncio.run(keyed_install_checks(market))
+        asyncio.run(smithery_endpoint_checks(market))
+        asyncio.run(hosted_reach_checks(market))
+    # Deliberately outside the stubs above: this check has to run the real
+    # function to observe its cache, so it fakes the network itself instead.
+    asyncio.run(detail_cache_checks(market))
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")

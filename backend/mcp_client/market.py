@@ -17,11 +17,13 @@ broken links.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger("addled.mcp.market")
 
@@ -32,8 +34,29 @@ REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers"
 # publishes into the official registry instead, and MCP Market and FreeMCPLab
 # serve no API at all - only HTML, which is not something to build on.
 SMITHERY_URL = "https://registry.smithery.ai/servers"
+# Their gateway, which is where a *hosted* server actually answers. The route is
+# the qualified name, and a call with a bad token answers "Invalid token" rather
+# than 404 - so the path is theirs, for every server they deploy.
+SMITHERY_GATEWAY = "https://server.smithery.ai"
 UA = {"User-Agent": "Addled/1.0 (mcp market)", "Accept": "application/json"}
 TIMEOUT = 15.0
+
+# Hosted servers are reached through that gateway, which authenticates the
+# caller with the user's own Smithery key - a server whose config schema
+# declares nothing still answers "Missing Authorization header" without one.
+SMITHERY_AUTH_HEADER = "Authorization"
+SMITHERY_AUTH_TEMPLATE = "Bearer {smithery_api_key}"
+SMITHERY_KEY_HELP = ("Your Smithery API key. Hosted servers are reached through "
+                     "Smithery's gateway, which needs it. "
+                     "smithery.ai -> Account -> API keys")
+
+# One detail record per hosted listing is wanted per search, so twelve results
+# must not cost twelve round trips in series - and a re-search, which `install`
+# does, must not pay for them again.
+_DETAIL_TTL = 900.0
+_DETAIL_MISS_TTL = 60.0
+_DETAIL_WORKERS = 6
+_detail_cache: dict[str, tuple[float, dict | None]] = {}
 
 # package registryType -> (launcher, is it installed here)
 _LAUNCHERS = {
@@ -62,6 +85,86 @@ def _clean_url(value: object) -> str:
     if url.lower().startswith(("http://", "https://")):
         return url
     return ""
+
+
+def _gateway_url(name: str) -> str:
+    """Smithery's own address for a hosted server, from its qualified name."""
+    path = "/".join(part for part in str(name or "").split("/") if part)
+    return f"{SMITHERY_GATEWAY}/{path}/mcp" if path else ""
+
+
+def _fetch_smithery_detail(name: str) -> dict | None:
+    """What a Smithery listing declares about itself.
+
+    The list endpoint says a server is remote and nothing more, which is why
+    these cards could only report that and stop. The detail endpoint publishes
+    the deployment *and* a config schema naming every value the server wants, in
+    the server's own words ("Enter your API key from the HasData dashboard") -
+    the only place that is ever said.
+    """
+    now = time.monotonic()
+    cached = _detail_cache.get(name)
+    if cached and cached[0] > now:
+        return cached[1]
+    record: dict | None = None
+    try:
+        url = f"{SMITHERY_URL}/{urllib.parse.quote(name)}"
+        with urllib.request.urlopen(
+                urllib.request.Request(url, headers=UA),
+                timeout=TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        record = payload if isinstance(payload, dict) else None
+    except Exception as e:  # noqa: BLE001
+        log.debug("Smithery had no detail for %r: %s", name, e)
+    # A miss is remembered briefly: it is the lasting answer for a server that is
+    # simply not there, and re-asking on every search would be rude to a host
+    # that has already declined.
+    _detail_cache[name] = (now + (_DETAIL_TTL if record else _DETAIL_MISS_TTL),
+                           record)
+    return record
+
+
+def _http_schema(record: dict) -> dict:
+    """The config schema of the connection Smithery would serve over HTTP."""
+    for connection in record.get("connections") or []:
+        if not isinstance(connection, dict):
+            continue
+        if str(connection.get("type") or "").lower() == "http":
+            schema = connection.get("configSchema")
+            if isinstance(schema, dict):
+                return schema
+    schema = record.get("configSchema")
+    return schema if isinstance(schema, dict) else {}
+
+
+def _declared_keys(schema: object) -> tuple[list[str], dict[str, str]]:
+    """The headers a server's config schema asks for, and what each one is.
+
+    Every property says where its value belongs - ``x-from: {"header":
+    "x-api-key"}`` - and describes it in the provider's own words, which is what
+    tells a user that this key is HasData's and not Smithery's. A schema with no
+    ``required`` list still means the values are wanted: that is how the
+    DuckDuckGo entry reads, and its server refuses a call without one.
+    """
+    properties = (schema or {}).get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return [], {}
+    names: list[str] = []
+    help_text: dict[str, str] = {}
+    for spec in properties.values():
+        spec = spec if isinstance(spec, dict) else {}
+        source = spec.get("x-from")
+        header = ""
+        if isinstance(source, dict):
+            header = str(source.get("header") or "").strip()
+        if not header:
+            continue
+        if header not in names:
+            names.append(header)
+        text = " ".join(str(spec.get("description") or "").split())
+        if text:
+            help_text[header] = text
+    return names, help_text
 
 
 def _pick_remote(entry: dict) -> dict | None:
@@ -280,8 +383,6 @@ def _fetch(query: str, limit: int) -> list[dict]:
     for attempt in range(2):
         try:
             with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-                import json
-
                 payload = json.loads(response.read().decode("utf-8",
                                                             errors="replace"))
             return payload.get("servers") or []
@@ -323,8 +424,6 @@ def _fetch_smithery(query: str, limit: int) -> list[dict]:
            f"&pageSize={max(1, min(50, limit))}")
     request = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        import json
-
         payload = json.loads(response.read().decode("utf-8", errors="replace"))
     return payload.get("servers") or []
 
@@ -374,12 +473,13 @@ def _smithery_normalise(item: dict) -> dict | None:
     if not name:
         return None
     command, args, required_env = _command_from_text(item.get("description"))
-    # Most Smithery servers are hosted on their gateway and reached with a
-    # Smithery key, and their listings say so only by being remote. Saying that
-    # is more use than "no launch command published".
+    # Most Smithery servers are hosted on their gateway, and their listings say
+    # so only by being remote. Until the endpoint is worked out (see
+    # `_adopt_hosted`), the honest thing to report is the missing endpoint -
+    # the key is asked for once there is somewhere to send it.
     hint = ""
     if not command and item.get("remote"):
-        hint = "hosted by Smithery; needs their API key"
+        hint = "hosted by Smithery; no endpoint published for it"
     return _finish({
         "name": name,
         "source": "smithery",
@@ -395,6 +495,9 @@ def _smithery_normalise(item: dict) -> dict | None:
         "requires_headers": [],
         "header_hints": {},
         "runtime": command,
+        # Whether Smithery actually deploys it, which is what lets the entry be
+        # given their gateway address without asking about it again.
+        "deployed": bool(item.get("isDeployed")),
         "verified": bool(item.get("verified")),
         "uses": int(item.get("useCount") or 0),
         "latest": True,
@@ -408,6 +511,82 @@ def _smithery_candidates(query: str, limit: int) -> list[dict]:
         if candidate is not None:
             out.setdefault(candidate["name"], candidate)
     return list(out.values())
+
+
+def _hosted_updates(candidate: dict, twin: dict | None,
+                    record: dict | None) -> dict | None:
+    """What a hosted entry needs to become an ordinary HTTP server.
+
+    Returns None when there is nowhere to send it, which is the only case where
+    "hosted" is the honest answer.
+    """
+    if twin and twin.get("transport") == "http" and twin.get("url"):
+        # The official registry publishes the endpoint outright, so it wins over
+        # anything derived here.
+        return {
+            "url": twin["url"],
+            "requires_headers": list(twin.get("requires_headers") or []),
+            "header_hints": dict(twin.get("header_hints") or {}),
+            "key_help": dict(twin.get("key_help") or {}),
+            "endpoint_from": twin["name"],
+        }
+
+    record = record or {}
+    url = _gateway_url(candidate.get("name") or "") if candidate.get("deployed") else ""
+    if not url:
+        # Not deployed on their gateway: their detail record may still name a
+        # host, which is the only other place it can be.
+        url = _clean_url(record.get("deploymentUrl"))
+    if not url:
+        return None
+
+    headers = [SMITHERY_AUTH_HEADER]
+    declared, declared_help = _declared_keys(_http_schema(record))
+    for name in declared:
+        if name not in headers:
+            headers.append(name)
+    return {
+        "url": url,
+        "requires_headers": headers,
+        # Only the gateway's own key has a published shape to imitate. A
+        # server's own key is whatever the provider issues, so it gets words
+        # instead of a template - pasting "Bearer " in front of a HasData key
+        # would be wrong and would fail as a 401 that explains nothing.
+        "header_hints": {SMITHERY_AUTH_HEADER: SMITHERY_AUTH_TEMPLATE},
+        "key_help": {SMITHERY_AUTH_HEADER: SMITHERY_KEY_HELP, **declared_help},
+        "endpoint_from": "smithery",
+    }
+
+
+def _adopt_hosted(candidates: list[dict], official: dict[str, dict]) -> None:
+    """Give every "hosted, no way in" entry an endpoint and a place for its key.
+
+    A Smithery listing marks a server remote and says nothing else, so these
+    cards could only report that and stop. Two things are knowable: their gateway
+    serves a deployed server at its qualified name, and their detail endpoint
+    says which values the server itself wants. The gateway holds for every
+    listing, so a detail call that fails costs the extra keys but never leaves
+    the card dead.
+    """
+    hosted = [c for c in candidates if "hosted" in (c.get("blocked_kinds") or [])]
+    if not hosted:
+        return
+    records: dict[str, dict | None] = {}
+    with ThreadPoolExecutor(max_workers=_DETAIL_WORKERS) as pool:
+        for candidate, record in zip(hosted, pool.map(
+                lambda c: _fetch_smithery_detail(c["name"]), hosted)):
+            records[candidate["name"]] = record
+
+    for candidate in hosted:
+        twin = official.get(f"ai.smithery/{candidate['name'].replace('/', '-')}")
+        updates = _hosted_updates(candidate, twin, records.get(candidate["name"]))
+        if not updates:
+            continue
+        candidate.update({"transport": "http", "runtime": "remote", **updates})
+        candidate.pop("blocked_hint", None)
+        # Re-judged rather than assumed: with the endpoint in place the missing
+        # values are now the only thing standing between this and a click.
+        _finish(candidate)
 
 
 async def search(query: str, limit: int = 12,
@@ -435,31 +614,9 @@ async def search(query: str, limit: int = 12,
             # stays authoritative when both carry the same server.
             merged.setdefault(candidate["name"], candidate)
 
-    # A hosted Smithery listing says only that much: their registry marks a
-    # server remote without publishing where to reach it, so it read as
-    # "hosted by Smithery; needs their API key" with no way to act on the key.
-    # The official registry publishes the endpoint for the same server under
-    # `ai.smithery/<owner>-<slug>`, so when both sources carry it the published
-    # endpoint is adopted and the entry becomes an ordinary HTTP server that
-    # wants an Authorization header.
     official = {c["name"]: c for c in merged.values()
                 if c.get("source") == "registry"}
-    for name, candidate in merged.items():
-        if candidate.get("blocked_kinds") != ["hosted"]:
-            continue
-        twin = official.get(f"ai.smithery/{name.replace('/', '-')}")
-        if not twin or twin.get("transport") != "http" or not twin.get("url"):
-            continue
-        candidate.update({
-            "transport": "http",
-            "url": twin["url"],
-            "requires_headers": list(twin.get("requires_headers") or []),
-            "header_hints": dict(twin.get("header_hints") or {}),
-            "runtime": "remote",
-            "endpoint_from": twin["name"],
-        })
-        candidate.pop("blocked_hint", None)
-        _finish(candidate)
+    _adopt_hosted(list(merged.values()), official)
 
     return list(merged.values())
 
