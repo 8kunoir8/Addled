@@ -42,7 +42,18 @@ _LAUNCHERS = {
 
 
 def _runtime_available(launcher: str) -> bool:
-    return bool(shutil.which(launcher))
+    if shutil.which(launcher):
+        return True
+    # `uvx` is on almost nothing. Addled can install it, and when it has, a
+    # server launched with it runs even though a plain shell would not find it:
+    # stdio.py puts that directory on PATH for the child process.
+    if launcher in ("uv", "uvx"):
+        try:
+            from backend.tools import uv
+            return bool(uv.find(f"{launcher}.exe"))
+        except Exception as e:  # noqa: BLE001
+            log.debug("Could not consult the uv installer: %s", e)
+    return False
 
 
 def _clean_url(value: object) -> str:
@@ -78,25 +89,52 @@ def _pick_package(entry: dict) -> dict | None:
 
 
 def _finish(candidate: dict, hint: str = "") -> dict:
-    """Decide whether an entry can be used, and say why not if it cannot."""
+    """Decide whether an entry can be used, and say why not if it cannot.
+
+    The env/header reasons are recomputed from the declared names every time,
+    minus whatever values are already held, so storing a key is enough to turn a
+    blocked entry into an addable one — no re-fetch, and the agent's automatic
+    pass sees exactly what the user sees.
+    """
+    from backend.mcp_client import credentials
+
+    # Kept on the candidate so a later recompute (after a key is saved) still
+    # knows this one was hosted rather than merely undocumented.
+    if hint:
+        candidate["blocked_hint"] = hint
+    hint = str(candidate.get("blocked_hint") or "")
+
     reasons: list[str] = []
+    # Why it is blocked, as categories: the dashboard needs to tell "waiting for
+    # a value you can type" from "nothing you can do here" so it can offer the
+    # input and enable the button. Reason strings are for reading, these are for
+    # deciding.
+    kinds: list[str] = []
     if hint:
         reasons.append(hint)
+        kinds.append("hosted")
     elif candidate.get("transport") == "stdio":
         launcher = str(candidate.get("command") or "")
         if not launcher:
             reasons.append("no launch command published")
+            kinds.append("command")
         elif not _runtime_available(launcher):
             reasons.append(
                 f"needs '{launcher}' on PATH"
                 + (" (install Node.js)" if launcher == "npx"
                    else " (install uv)" if launcher == "uvx" else ""))
-    if candidate.get("requires_env"):
-        reasons.append("needs " + ", ".join(candidate["requires_env"]))
-    if candidate.get("requires_headers"):
-        reasons.append("needs an API key for "
-                       + ", ".join(candidate["requires_headers"]))
+            kinds.append("runtime")
+    missing_env = credentials.missing_env(candidate.get("requires_env"))
+    if missing_env:
+        reasons.append("needs " + ", ".join(missing_env))
+        kinds.append("env")
+    missing_headers = credentials.missing_headers(
+        candidate.get("requires_headers"))
+    if missing_headers:
+        reasons.append("needs an API key for " + ", ".join(missing_headers))
+        kinds.append("headers")
     candidate["blocked_reason"] = "; ".join(reasons)
+    candidate["blocked_kinds"] = kinds
     candidate["runnable"] = not reasons
     return candidate
 
@@ -129,6 +167,7 @@ def normalise(raw: dict) -> dict | None:
         "requires_headers": [],
         "runnable": False,
         "blocked_reason": "",
+        "blocked_kinds": [],
         "latest": bool(((raw.get("_meta") or {})
                         .get("io.modelcontextprotocol.registry/official") or {})
                        .get("isLatest", True)),
@@ -173,7 +212,13 @@ def normalise(raw: dict) -> dict | None:
 
 def to_spec(candidate: dict, *, trusted: bool = False,
             auto: bool = False) -> dict:
-    """The server definition to hand to the manager."""
+    """The server definition to hand to the manager.
+
+    Required env vars and headers are filled from the stored credentials, which
+    is what lets this be one path for the user's click and the agent's automatic
+    install: by the time a spec is built, the values are already held.
+    """
+    from backend.mcp_client import credentials
     from backend.mcp_client.manager import _sanitise, skill_name  # noqa: F401
 
     name = candidate.get("name") or ""
@@ -186,8 +231,9 @@ def to_spec(candidate: dict, *, trusted: bool = False,
         "command": candidate.get("command") or "",
         "args": list(candidate.get("args") or []),
         "url": candidate.get("url") or "",
-        "env": {},
-        "headers": {},
+        "env": credentials.subset_env(candidate.get("requires_env")),
+        "headers": credentials.subset_headers(
+            candidate.get("requires_headers")),
         "enabled": True,
         "trusted": bool(trusted),
         # Marks a server nobody chose by hand, so the idle sweep knows which
@@ -393,14 +439,21 @@ async def suggest(task: str, limit: int = 8) -> list[dict]:
 
 
 async def install(name: str, *, trusted: bool = False, auto: bool = False,
-                  extra_args: object = None) -> dict:
+                  extra_args: object = None, env: object = None,
+                  headers: object = None) -> dict:
     """Add a market server by registry name and connect it.
 
     ``extra_args`` exists because registry entries often leave required
     command-line arguments undeclared: the filesystem servers want a directory
     to serve and say so only on stderr once they start. Without this the entry
     is added and then fails with no way to fix it from the UI.
+
+    ``env`` and ``headers`` are the values for the variables the listing
+    declares. They are stored first, so an entry that was blocked only for want
+    of a key becomes addable — and stays addable for the agent's own pass later,
+    and for any other listing that wants the same variable.
     """
+    from backend.mcp_client import credentials
     from backend.mcp_client.manager import mcp_manager
 
     candidates = await search(name, limit=20)
@@ -412,6 +465,11 @@ async def install(name: str, *, trusted: bool = False, auto: bool = False,
     if exact is None:
         return {"success": False,
                 "error": f"'{name}' is not in the MCP registry"}
+
+    if env or headers:
+        credentials.save(env, headers)
+        _finish(exact)
+
     if not exact["runnable"]:
         return {"success": False, "candidate": exact,
                 "error": f"'{name}' cannot run yet: {exact['blocked_reason']}"}

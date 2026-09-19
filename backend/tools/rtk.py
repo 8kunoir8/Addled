@@ -34,7 +34,6 @@ What the download does and does not guarantee, because the difference matters:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -42,12 +41,19 @@ import shutil
 import sys
 import time
 import urllib.error
-import urllib.request
 import zipfile
-from io import BytesIO
 from pathlib import Path
 
 log = logging.getLogger("addled.tools.rtk")
+
+# The download, verification and extraction primitives are shared with the uv
+# installer for MCP servers — one implementation of a security-relevant path,
+# not two. See backend/tools/download.py for what they guarantee.
+from backend.tools.download import (API_ROOT, ALLOWED_HOSTS,  # noqa: F401
+                                    MAX_ARCHIVE_BYTES, MAX_EXE_BYTES,
+                                    MIN_EXE_BYTES, USER_AGENT, extract_exe,
+                                    fetch_bytes, fetch_json, resolve_asset,
+                                    verify_download)
 
 # Both projects publish Windows x86_64 builds as zips with the exe inside.
 TARGET = "x86_64-pc-windows-msvc.zip"
@@ -57,20 +63,6 @@ SOURCES = (
     ("rtk-ai/rtk", "rtk.exe", True),
     ("BurntSushi/ripgrep", "rg.exe", False),
 )
-
-API_ROOT = "https://api.github.com/repos"
-# Redirects from a release asset land on objects.githubusercontent.com, so both
-# hosts have to be allowed. Anything else is refused rather than fetched.
-ALLOWED_HOSTS = {"api.github.com", "github.com", "objects.githubusercontent.com"}
-
-USER_AGENT = "Addled/1.0 (rtk installer)"
-
-# A debug-symbols-free rtk is ~9 MB and ripgrep ~4 MB. The floor is what stops
-# an HTML error page being written out as an executable; the ceiling stops a
-# runaway download.
-MIN_EXE_BYTES = 400 * 1024
-MAX_EXE_BYTES = 64 * 1024 * 1024
-MAX_ARCHIVE_BYTES = 96 * 1024 * 1024
 
 PROVENANCE = "installed.json"
 
@@ -241,112 +233,6 @@ def status() -> dict:
     }
 
 
-# -- io primitives (module level, so the suite can drive the whole flow) -------
-
-
-def fetch_json(url: str, timeout: int = 60) -> dict:
-    _require_allowed(url)
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
-                                                  "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def fetch_bytes(url: str, on_progress=None, timeout: int = 300) -> bytes:
-    _require_allowed(url)
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        total = int(response.headers.get("Content-Length") or 0)
-        if total > MAX_ARCHIVE_BYTES:
-            raise ValueError(f"archive is {total} bytes, larger than allowed")
-        chunks: list[bytes] = []
-        received = 0
-        while True:
-            chunk = response.read(64 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            received += len(chunk)
-            if received > MAX_ARCHIVE_BYTES:
-                raise ValueError("archive exceeded the allowed size mid-download")
-            if on_progress:
-                on_progress(received, total)
-    return b"".join(chunks)
-
-
-def _require_allowed(url: str) -> None:
-    from urllib.parse import urlparse
-    parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise ValueError(f"refusing a non-https download: {url}")
-    if parsed.hostname not in ALLOWED_HOSTS:
-        raise ValueError(f"refusing a download from {parsed.hostname}")
-
-
-def resolve_asset(repo: str, suffix: str = TARGET) -> dict:
-    """The release asset to use: url, size, digest, tag."""
-    release = fetch_json(f"{API_ROOT}/{repo}/releases/latest")
-    assets = release.get("assets") or []
-    asset = next((a for a in assets if str(a.get("name", "")).endswith(suffix)), None)
-    if not asset:
-        raise ValueError(f"no {suffix} asset in the latest {repo} release")
-    url = str(asset.get("browser_download_url") or "")
-    _require_allowed(url)
-    return {
-        "repo": repo,
-        "tag": str(release.get("tag_name") or ""),
-        "name": str(asset.get("name") or ""),
-        "url": url,
-        "size": int(asset.get("size") or 0),
-        # GitHub publishes `sha256:<hex>` here for newer releases. Absent on
-        # older ones, in which case the declared byte count is all there is.
-        "digest": str(asset.get("digest") or ""),
-    }
-
-
-def extract_exe(archive: bytes, exe_name: str, destination: Path) -> Path:
-    """Take one exe out of the archive, refusing anything implausible."""
-    with zipfile.ZipFile(BytesIO(archive)) as bundle:
-        names = [n for n in bundle.namelist()
-                 if n.endswith(f"/{exe_name}") or n == exe_name]
-        if not names:
-            raise ValueError(f"{exe_name} is not in the archive")
-        data = bundle.read(names[0])
-    if len(data) < MIN_EXE_BYTES:
-        raise ValueError(f"{exe_name} is only {len(data)} bytes")
-    if len(data) > MAX_EXE_BYTES:
-        raise ValueError(f"{exe_name} is {len(data)} bytes, larger than allowed")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    # Written beside the target and moved into place, so a failure never leaves
-    # a half-written executable for `find()` to hand to the terminal.
-    staging = destination.with_suffix(".part")
-    staging.write_bytes(data)
-    os.replace(staging, destination)
-    return destination
-
-
-def verify_download(archive: bytes, asset: dict) -> str:
-    """Check the bytes against what the API said, and return the digest."""
-    digest = hashlib.sha256(archive).hexdigest()
-    published = asset.get("digest") or ""
-    if published.startswith("sha256:"):
-        expected = published.split(":", 1)[1].strip().lower()
-        if expected != digest:
-            raise ValueError(
-                f"the download does not match the sha256 GitHub publishes for "
-                f"it (expected {expected[:16]}…, got {digest[:16]}…)")
-    elif asset.get("size"):
-        if len(archive) != int(asset["size"]):
-            raise ValueError(
-                f"the download is {len(archive)} bytes, and the release says "
-                f"{asset['size']}")
-    else:
-        # No digest and no size: still refuse to install something we cannot
-        # describe. This has not been seen, and it fails closed if it happens.
-        raise ValueError("the release gives no size or digest to verify against")
-    return digest
-
-
 # -- the install --------------------------------------------------------------
 
 
@@ -420,7 +306,7 @@ def download_all(with_rg: bool = True) -> None:
         for repo, exe_name, needed in SOURCES:
             if not needed and not with_rg:
                 continue
-            asset = resolve_asset(repo)
+            asset = resolve_asset(repo, TARGET)
             _emit("downloading", 5, f"{asset['name']} ({asset['tag']})")
 
             def on_progress(received: int, expected: int, _name=asset["name"]) -> None:

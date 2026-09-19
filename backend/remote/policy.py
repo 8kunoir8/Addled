@@ -55,6 +55,7 @@ REMOTE_FORBIDDEN_METHODS = {
     # clicks the button locally. Being in this set also means the generic reason
     # below describes it correctly.
     "system.rtkInstall",
+    "system.uvInstall",
 }
 
 # Action types held back from remote sessions unless deliberately opened.

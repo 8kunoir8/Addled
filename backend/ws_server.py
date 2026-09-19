@@ -926,6 +926,27 @@ def _register_default_handlers():
             remote=policy.is_remote(ws),
         )
 
+    async def system_uv_status(params: dict, ws) -> dict:
+        """Whether uv/uvx are available to launch PyPI-packaged MCP servers.
+
+        The market refuses those entries with "needs 'uvx' on PATH (install
+        uv)", and this is what lets the dashboard offer to act on that instead
+        of leaving it as a reason with no remedy.
+        """
+        from backend.tools import uv
+        return uv.status()
+
+    async def system_uv_install(params: dict, ws) -> dict:
+        """Download uv, on the user's explicit instruction.
+
+        Returns as soon as the download starts; progress arrives on
+        `system.uvProgress`, and `system.uvStatus` reports the outcome.
+        """
+        from backend.remote import policy
+        from backend.tools import uv
+        return await uv.install(force=bool(params.get("force")),
+                                remote=policy.is_remote(ws))
+
     async def desktop_status(params: dict, ws) -> dict:
         from backend.actions.desktop_control import desktop_control
         from backend.config import config
@@ -1038,7 +1059,12 @@ def _register_default_handlers():
             return {"success": False, "servers": [], "error": str(e)}
 
     async def mcp_install(params: dict, ws) -> dict:
-        """Add a server from the registry and connect it."""
+        """Add a server from the registry and connect it.
+
+        ``env`` and ``headers`` carry the values for the variables the listing
+        declared it needs. They are stored first, so the entry is judged against
+        what we now hold rather than what the listing assumes nobody has.
+        """
         from backend.mcp_client import market
         name = str(params.get("name") or "").strip()
         if not name:
@@ -1049,7 +1075,26 @@ def _register_default_handlers():
                 trusted=bool(params.get("trusted")),
                 auto=bool(params.get("auto")),
                 extra_args=params.get("args"),
+                env=params.get("env"),
+                headers=params.get("headers"),
             )
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def mcp_credentials(params: dict, ws) -> dict:
+        """Which env vars and headers we hold a value for — names only.
+
+        Passing `env`/`headers` stores values; an empty string for a name
+        removes it, which is how the dashboard clears one. Values are never
+        returned: the UI has no business reading back a credential it stored.
+        """
+        from backend.mcp_client import credentials
+        env = params.get("env")
+        headers = params.get("headers")
+        if env is None and headers is None:
+            return {"success": True, **credentials.known()}
+        try:
+            return {"success": True, **credentials.save(env, headers)}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -2999,6 +3044,8 @@ def _register_default_handlers():
     _server.register("system.getProviders", system_get_providers)
     _server.register("system.rtkStatus", system_rtk_status)
     _server.register("system.rtkInstall", system_rtk_install)
+    _server.register("system.uvStatus", system_uv_status)
+    _server.register("system.uvInstall", system_uv_install)
     _server.register("desktop.status", desktop_status)
     _server.register("desktop.grant", desktop_grant)
     _server.register("desktop.revoke", desktop_revoke)
@@ -3020,6 +3067,7 @@ def _register_default_handlers():
     _server.register("mcp.tools", mcp_tools)
     _server.register("mcp.searchMarket", mcp_search_market)
     _server.register("mcp.install", mcp_install)
+    _server.register("mcp.credentials", mcp_credentials)
     _server.register("mcp.sweep", mcp_sweep)
 
     # Phase 5 Goals engine

@@ -266,6 +266,22 @@ function McpSection({settings,update,saving,status}: any){
   const [marketHits,setMarketHits]=useState<any[]|null>(null);
   const [marketBusy,setMarketBusy]=useState(false);
   const [extraArgs,setExtraArgs]=useState<Record<string,string>>({});
+  // The values for variables a listing declares it needs, keyed by variable
+  // name — the thing that was missing entirely: the market said "needs
+  // HASDATA_API_KEY" and there was nowhere to put one.
+  const [creds,setCreds]=useState<Record<string,string>>({});
+
+  const missingVars=(c:any):string[]=>[...(c?.requires_env||[]),...(c?.requires_headers||[])];
+  const filled=(c:any):boolean=>missingVars(c).every((v:string)=>Boolean((creds[v]||'').trim()));
+  // Blocked *only* by values the user can type here. A missing runtime or a
+  // hosted server is not something this card can fix, so the button stays off
+  // until that is dealt with rather than promising something it cannot do.
+  const onlyNeedsValues=(c:any):boolean=>{
+    const kinds:string[]=c?.blocked_kinds||[];
+    return missingVars(c).length>0 && kinds.length>0
+      && kinds.every((k:string)=>k==='env'||k==='headers');
+  };
+  const canAdd=(c:any):boolean=>Boolean(c?.runnable)||(onlyNeedsValues(c)&&filled(c));
 
   const load=useCallback(async()=>{
     if(wsState!=='connected')return;
@@ -314,13 +330,24 @@ function McpSection({settings,update,saving,status}: any){
     setMarketBusy(false);
   };
 
-  const installServer=async(name:string,args?:string)=>{
+  const installServer=async(name:string,args?:string,c?:any)=>{
     if(wsState!=='connected')return;
     setBusy('install'); setErr(null);
     try{
-      const out=await send('mcp.install',{name,args:args||''});
+      // Only the names this listing declared, so a value typed for one server is
+      // never sent to another.
+      const env:Record<string,string>={};
+      const headers:Record<string,string>={};
+      for(const key of (c?.requires_env||[])){
+        const v=(creds[key]||'').trim(); if(v)env[key]=v;
+      }
+      for(const key of (c?.requires_headers||[])){
+        const v=(creds[key]||'').trim(); if(v)headers[key]=v;
+      }
+      const out=await send('mcp.install',{name,args:args||'',env,headers});
       if(out?.status)setLive(out.status); else await load();
       if(out&&out.success===false)setErr(out.error||'Could not add that server');
+      else setCreds({});
     }catch(e:any){ setErr(String(e?.message||e)); }
     setBusy(null);
   };
@@ -460,6 +487,21 @@ function McpSection({settings,update,saving,status}: any){
                 placeholder="optional — some servers need these and never say so"
                 className={`${inp} flex-1`}/>
             </div>}
+          {missingVars(c).length>0&&<div className="mt-1 space-y-1">
+            {missingVars(c).map((v:string)=><div key={v} className="flex items-center gap-2">
+              <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[#d29922]" title={v}>{v}</span>
+              <input type="password" autoComplete="off" value={creds[v]||''}
+                onChange={e=>setCreds({...creds,[v]:e.target.value})}
+                placeholder={(c.requires_headers||[]).includes(v)?'value for this header':'value for this variable'}
+                className={`${inp} flex-1`}/>
+            </div>)}
+            <p className="text-[10px] text-[#8b949e]">
+              Kept by name, so the next server wanting one of these reuses it — including when the
+              agent finds and adds a server on its own. Values are never read back out.
+            </p>
+          </div>}
+          {(c.blocked_kinds||[]).includes('runtime')&&String(c.command||'')==='uvx'&&
+            <div className="mt-1"><UvInstall compact send={send} connected={wsState==='connected'}/></div>}
           <div className="mt-1 flex items-center justify-between gap-2">
             <span className="min-w-0 truncate text-[10px]"
               title={c.runnable?(c.transport==='stdio'?`${c.command} ${(c.args||[]).join(' ')}`:c.url):c.blocked_reason}>
@@ -469,9 +511,9 @@ function McpSection({settings,update,saving,status}: any){
                 </span>
                 :<span className="text-[#d29922]">{c.blocked_reason}</span>}
             </span>
-            <button onClick={()=>installServer(c.name,extraArgs[c.name])}
-              disabled={!c.runnable||busy==='install'||wsState!=='connected'}
-              title={c.runnable?'':'Needs setup before it can run'}
+            <button onClick={()=>installServer(c.name,extraArgs[c.name],c)}
+              disabled={!canAdd(c)||busy==='install'||wsState!=='connected'}
+              title={c.runnable?'':onlyNeedsValues(c)?(filled(c)?'Ready to add':'Fill in the values above'):'Needs setup before it can run'}
               className={btn}>Add &amp; connect</button>
           </div>
         </div>)}
@@ -1224,6 +1266,99 @@ function WikiSection({ settings, update, saving, status }: any) {
   </div>;
 }
 
+/**
+ * Install uv, the runtime the market's PyPI-packaged servers are launched with.
+ *
+ * Most machines have Node (so `npx` works) and almost none have `uv`, which made
+ * every PyPI entry in the market say "needs 'uvx' on PATH (install uv)" with no
+ * way to act on it. Same shape as the token saver: downloaded on request,
+ * verified against the sha256 GitHub publishes, into Addled's own tools folder.
+ */
+function UvInstall({ compact, send, connected }:{compact?:boolean;send:any;connected:boolean}) {
+  const [uv,setUv]=useState<any>(null);
+  const [busy,setBusy]=useState(false);
+  const [note,setNote]=useState('');
+
+  const refresh=useCallback(()=>{
+    if(!connected)return;
+    send('system.uvStatus',{}).then((r:any)=>{ setUv(r||null); if(!r?.installing)setNote(''); }).catch(()=>{});
+  },[connected,send]);
+  useEffect(()=>{refresh();},[refresh]);
+  useEffect(()=>{
+    if(!uv?.installing)return;
+    const timer=setInterval(refresh,1000);
+    return ()=>clearInterval(timer);
+  },[uv?.installing,refresh]);
+
+  const start=async()=>{
+    if(!connected||busy)return;
+    setBusy(true); setNote('');
+    try{
+      const r=await send('system.uvInstall',{force:Boolean(uv?.available)});
+      if(r?.success)setNote('Downloading…');
+      else if(r?.already_installed)setNote('Already installed.');
+      else if(r?.already_running)setNote('Already downloading.');
+      else setNote(r?.error||'The download could not start.');
+    }catch(e:any){ setNote(e?.message||'The download could not start.'); }
+    setBusy(false);
+    setTimeout(refresh,300); setTimeout(refresh,3000);
+  };
+
+  const pct=Math.max(0,Math.min(100,Number(uv?.percent)||0));
+  const status = !uv ? 'Checking…'
+    : uv.source==='path' ? `✓ ${uv.version||'installed'} on PATH`
+    : uv.available ? `✓ ${uv.version||'installed'} — PyPI servers can run`
+    : 'Not installed — PyPI-packaged servers cannot run';
+  const button = uv&&uv.supported&&!uv.installing&&(
+    <button onClick={start} disabled={busy||!connected}
+      className="text-xs px-2 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:border-[#484f58] disabled:opacity-50">
+      {uv.own?.installed?'Reinstall':uv.available?'Install Addled\u2019s copy':'Install uv'}
+    </button>
+  );
+
+  if(compact){
+    return <div className="flex flex-wrap items-center gap-2 text-[10px]">
+      <span className={uv?.available?'text-[#3fb950]':'text-[#d29922]'}>{status}</span>
+      {button}
+      {uv?.installing&&<span className="text-[#8b949e]">{pct}% — {uv.detail||uv.phase}</span>}
+      {note&&<span className="text-[#8b949e]">{note}</span>}
+    </div>;
+  }
+  return <>
+    <SettingRow label="uv runtime" description="Optional — needed by MCP servers packaged for PyPI, which the market lists as &quot;needs uvx on PATH&quot;">
+      <div className="flex items-center gap-2">
+        <span className={`text-xs ${uv?.available?'text-[#3fb950]':'text-[#d29922]'}`}>{status}</span>
+        {button}
+      </div>
+    </SettingRow>
+    <p className="text-xs text-[#8b949e] mb-2">
+      uv is a single third-party runtime, fetched from its GitHub releases and checked against the
+      sha256 GitHub publishes for it. Addled never bundles it and never installs it on its own — the
+      npm half of the MCP market works without it.
+    </p>
+    {uv?.installing&&(
+      <SettingRow label="Downloading" description={uv.detail||uv.phase}>
+        <div className="flex items-center gap-2 w-40">
+          <div className="flex-1 h-1.5 bg-[#21262d] rounded overflow-hidden">
+            <div className="h-full bg-[#3380FF] transition-all" style={{width:`${pct}%`}}/>
+          </div>
+          <span className="text-xs text-[#8b949e]">{pct}%</span>
+        </div>
+      </SettingRow>
+    )}
+    {uv&&!uv.installing&&uv.own?.installed&&(
+      <SettingRow label="Addled's copy" description={`${uv.own.version||'version unknown'} — installed ${uv.own.installed_at||'unknown'}`}>
+        <span className="text-xs text-[#8b949e] break-all">{uv.install_dir}</span>
+      </SettingRow>
+    )}
+    {uv&&!uv.supported&&(
+      <p className="text-xs text-[#8b949e]">This download is the Windows build of uv. On this machine, put <code>uvx</code> on PATH and it will be used.</p>
+    )}
+    {uv?.error&&<p className="text-xs text-[#d29922]">{uv.error}</p>}
+    {note&&<p className="text-xs text-[#8b949e]">{note}</p>}
+  </>;
+}
+
 function ToolsSection({ settings, update, saving, status, send, connected }: any) {
   const t=settings?.tools||{};
   const [rtk, setRtk] = useState<any>(null);
@@ -1299,6 +1434,7 @@ function ToolsSection({ settings, update, saving, status, send, connected }: any
       every Addled build; it does not any more, so a fresh copy has none until you install it here.
       Nothing depends on it — without it, commands run unchanged and their whole output reaches the model.
     </p>
+    <UvInstall send={send} connected={connected}/>
     {rtk?.installing && (
       <SettingRow label="Downloading" description={rtk.detail || rtk.phase}>
         <div className="flex items-center gap-2 w-40">

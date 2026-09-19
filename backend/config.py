@@ -307,6 +307,12 @@ DEFAULT_SETTINGS: dict = {
         "enabled": True,
         "autoconnect": True,
         "servers": [],
+        # Values a listing declared it needs before it can run — environment
+        # variables and headers, keyed by variable name. Held here rather than
+        # on one server so a variable is answered once and reused wherever it is
+        # asked for, including when the agent installs a server on its own.
+        # Never returned to the dashboard; it reports which names are known.
+        "credentials": {"env": {}, "headers": {}},
         # The official MCP registry, browsable from Settings -> MCP.
         "market_enabled": True,
         # Let the agent find and start an unconfigured server when a task needs

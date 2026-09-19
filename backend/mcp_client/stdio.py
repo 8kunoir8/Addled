@@ -68,6 +68,17 @@ class McpStdioClient:
         extra = self.spec.get("env") or {}
         if isinstance(extra, dict):
             env.update({str(k): str(v) for k, v in extra.items()})
+        # The uv Addled installed is not on the machine's PATH, and a server it
+        # launches may itself call `uvx` or `uv`. Ours goes first so the copy
+        # that was verified is the one used.
+        try:
+            from backend.tools import uv
+            dirs = uv.path_entries()
+            if dirs:
+                env["PATH"] = os.pathsep.join(
+                    dirs + [env.get("PATH", "")]).strip(os.pathsep)
+        except Exception:  # noqa: BLE001
+            pass
         return env
 
     async def start(self) -> dict:
@@ -82,6 +93,15 @@ class McpStdioClient:
         # found: npx". shutil.which does the PATHEXT search.
         from shutil import which
         resolved = which(argv[0])
+        if not resolved and argv[0] in ("uv", "uvx"):
+            # Installed by Addled into its own tools directory, which is not on
+            # the machine's PATH, and the market offers servers that need it.
+            # Without this the entry is addable and then cannot start.
+            try:
+                from backend.tools import uv
+                resolved = uv.find(f"{argv[0]}.exe")
+            except Exception:  # noqa: BLE001
+                resolved = None
         if resolved:
             argv[0] = resolved
 

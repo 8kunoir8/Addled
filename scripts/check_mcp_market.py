@@ -455,6 +455,182 @@ def smithery_checks(market) -> None:
           [c["source"] for c in both])
 
 
+def credential_checks(market) -> None:
+    """A listing that needs a key becomes addable once one is stored.
+
+    This is what the market could not do before: it named the variable and there
+    was nowhere to put a value, so those entries were permanently unaddable. The
+    gate has to open for a value the user supplied, and stay shut for a server
+    blocked on something a value cannot fix.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import backend.config as config_mod
+    from backend.mcp_client import credentials
+
+    # The settings file is real on this machine and a suite must not write a
+    # fake key into it. Point the singleton at a temporary file instead.
+    original_path = config_mod.SETTINGS_PATH
+    original_data = config_mod.config._data
+    config_mod.SETTINGS_PATH = Path(tempfile.mkdtemp()) / "settings.json"
+    config_mod.config._data = dict(config_mod.DEFAULT_SETTINGS)
+    config_mod.config._dirty = False
+    try:
+        entry = {
+            "name": "acme/keyed", "title": "Keyed", "version": "1.0.0",
+            "packages": [{
+                "registryType": "npm", "identifier": "keyed-mcp",
+                "version": "1.0.0",
+                "environmentVariables": [
+                    {"name": "ACME_API_KEY", "isRequired": True}],
+            }],
+        }
+        with mock.patch.object(market, "_runtime_available", lambda l: True):
+            before = market.normalise(entry)
+            check("an entry needing an unheld variable is blocked",
+                  before["runnable"] is False
+                  and before["blocked_kinds"] == ["env"],
+                  str(before.get("blocked_kinds")))
+            check("and the reason names the variable",
+                  "ACME_API_KEY" in before["blocked_reason"],
+                  before["blocked_reason"])
+            check("and its spec carries no value",
+                  market.to_spec(before)["env"] == {},
+                  str(market.to_spec(before)["env"]))
+
+            credentials.save({"ACME_API_KEY": "secret-value"})
+            after = market._finish(dict(before))
+            check("storing the value makes it runnable",
+                  after["runnable"] is True and after["blocked_kinds"] == [],
+                  str(after)[:200])
+            check("and the value reaches the spec",
+                  market.to_spec(after)["env"] == {
+                      "ACME_API_KEY": "secret-value"},
+                  str(market.to_spec(after)["env"]))
+            check("while the declared requirement is left intact",
+                  after["requires_env"] == ["ACME_API_KEY"],
+                  str(after.get("requires_env")))
+
+        # Only names come back, never values: the dashboard has no business
+        # reading a credential it just stored.
+        names = credentials.known()
+        check("known() reports names only",
+              names == {"env": ["ACME_API_KEY"], "headers": []},
+              str(names))
+        check("and a stored value is never returned",
+              "secret-value" not in str(names), "a value was echoed")
+
+        # A server blocked for a reason no value can fix stays blocked.
+        hosted = market._finish({
+            "name": "hosted/thing", "source": "smithery", "transport": "stdio",
+            "command": "", "args": [], "requires_env": [],
+            "requires_headers": [], "blocked_hint":
+                "hosted by Smithery; needs their API key"})
+        check("a hosted entry is not unblocked by storing something",
+              hosted["runnable"] is False
+              and "hosted" in hosted["blocked_kinds"],
+              str(hosted.get("blocked_kinds")))
+
+        headers_entry = {
+            "name": "acme/remote", "title": "Remote",
+            "remotes": [{"url": "https://example.com/mcp",
+                         "headers": [{"name": "Authorization"}]}],
+        }
+        keyed = market.normalise(headers_entry)
+        check("a remote needing a header is blocked for a header",
+              keyed["runnable"] is False and keyed["blocked_kinds"] == ["headers"],
+              str(keyed.get("blocked_kinds")))
+        credentials.save(None, {"Authorization": "Bearer xyz"})
+        check("and its value reaches the spec's headers",
+              market.to_spec(market._finish(dict(keyed)))["headers"]
+              == {"Authorization": "Bearer xyz"},
+              str(market.to_spec(market._finish(dict(keyed)))["headers"]))
+
+        # An empty string clears, which is the only way to remove one.
+        credentials.save({"ACME_API_KEY": ""})
+        check("an empty value clears the stored one",
+              credentials.known()["env"] == [], str(credentials.known()))
+    finally:
+        config_mod.SETTINGS_PATH = original_path
+        config_mod.config._data = original_data
+
+
+async def keyed_install_checks(market) -> None:
+    """install() accepts the values and judges the entry against them."""
+    import tempfile
+    from pathlib import Path
+
+    import backend.config as config_mod
+
+    # Same reason as above: a suite must not write a fake key into the real
+    # settings file of the machine it runs on.
+    original_path = config_mod.SETTINGS_PATH
+    original_data = config_mod.config._data
+    config_mod.SETTINGS_PATH = Path(tempfile.mkdtemp()) / "settings.json"
+    config_mod.config._data = dict(config_mod.DEFAULT_SETTINGS)
+    config_mod.config._dirty = False
+
+    specs: list[dict] = []
+
+    class RecordingManager:
+        def add(self, spec):
+            specs.append(spec)
+            return {"success": True}
+
+        async def connect(self, server_id):
+            return {"success": True}
+
+        def status(self):
+            return {"servers": []}
+
+    try:
+        with mock.patch.object(market, "_runtime_available", lambda l: True), \
+             mock.patch.object(market, "search",
+                               lambda *a, **k: _keyed_candidates()), \
+             mock.patch("backend.mcp_client.manager.mcp_manager",
+                        RecordingManager()):
+            refused = await market.install("acme/keyed")
+            check("without a value, install refuses and says why",
+                  refused.get("success") is False
+                  and "ACME_API_KEY" in str(refused.get("error")),
+                  str(refused)[:200])
+            check("and nothing was added", specs == [], str(specs)[:120])
+
+            out = await market.install("acme/keyed",
+                                       env={"ACME_API_KEY": "given-now"})
+            check("with one supplied, install proceeds",
+                  out.get("success") is True, str(out)[:200])
+            check("and the value reaches the server it was given for",
+                  bool(specs)
+                  and specs[-1].get("env", {}).get("ACME_API_KEY") == "given-now",
+                  str(specs[-1].get("env")) if specs else "nothing added")
+
+            # The whole point of storing it: the next pass — the agent's own —
+            # finds the entry addable without being handed the value again.
+            again = await market.install("acme/keyed")
+            check("and a later pass needs no value at all",
+                  again.get("success") is True, str(again)[:200])
+    finally:
+        config_mod.SETTINGS_PATH = original_path
+        config_mod.config._data = original_data
+
+
+async def _keyed_candidates():
+    """The same listing, judged fresh, with no credentials yet stored."""
+    from backend.mcp_client import market
+    entry = {
+        "name": "acme/keyed", "title": "Keyed", "version": "1.0.0",
+        "packages": [{
+            "registryType": "npm", "identifier": "keyed-mcp",
+            "version": "1.0.0",
+            "environmentVariables": [
+                {"name": "ACME_API_KEY", "isRequired": True}],
+        }],
+    }
+    return [market.normalise(entry)]
+
+
 def main() -> int:
     from backend.mcp_client import market
 
@@ -469,6 +645,8 @@ def main() -> int:
         sweep_checks()
         stderr_checks()
     smithery_checks(market)
+    credential_checks(market)
+    asyncio.run(keyed_install_checks(market))
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")

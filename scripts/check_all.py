@@ -43,6 +43,7 @@ SUITES = [
     "check_reply_language.py",
     "check_packaging.py",
     "check_rtk.py",
+    "check_uv.py",
     "check_secrets.py",
 ]
 
