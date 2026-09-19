@@ -40,6 +40,7 @@ SUITES = [
     "check_guide.py",
     "check_parity.py",
     "check_packaging.py",
+    "check_rtk.py",
 ]
 
 

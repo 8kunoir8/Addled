@@ -301,6 +301,7 @@ export const GUIDE: GuideEntry[] = [
       'Search the market when you want a capability that is missing. Addled searches public skill repositories, shows what it found with its match score, and installs only what you approve.',
       'Use the forge when nothing suitable exists: describe what you want and Addled writes a new skill for it, which you then review like any other file.',
       'Skills you installed appear in the same list and can be removed from it.',
+      'Install the token saver from Settings → Tools if you want long command output compressed before the model reads it — git, pip, pytest, npm, gh, docker. It is a 6 MB download of two other projects\' binaries (rtk and ripgrep) from their GitHub releases, verified against the sha256 GitHub publishes for them. It is not bundled, so a fresh copy of Addled has none until you click Install; without it, commands run unchanged.',
     ],
     routes: [{ href: '/skills', label: 'Skills' }],
     settingsTabs: ['tools'],

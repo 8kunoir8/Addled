@@ -50,6 +50,11 @@ REMOTE_FORBIDDEN_METHODS = {
     # caller could bind `C:\\` and then write anywhere, so the workspace choice
     # stays a local decision. The contained methods remain available remotely.
     "code.bind",
+    # Downloading an executable onto the machine Addled runs on is not something
+    # a browser session should be able to ask for, even though the user themself
+    # clicks the button locally. Being in this set also means the generic reason
+    # below describes it correctly.
+    "system.rtkInstall",
 }
 
 # Action types held back from remote sessions unless deliberately opened.

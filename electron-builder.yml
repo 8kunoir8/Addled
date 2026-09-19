@@ -72,9 +72,15 @@ extraResources:
       # NOT excluded: `backend/voice/models/**`. Those 339 MB are fetched once
       # by scripts/fetch_voice_models.py and bundled on purpose, because the
       # offline voice needs them present.
-  - from: tools/rtk
-    to: tools/rtk
-    filter: ['**/*']
+  #
+  # There was a `tools/rtk` entry here, copying 13 MB of rtk.exe and rg.exe.
+  # `tools/` is ignored by git, so those binaries were never in the repository:
+  # they were fetched by hand on one machine and then copied into every build.
+  # Two things followed — a fresh clone could not produce the same installer,
+  # and the release carried binaries that no review could see. The app installs
+  # them itself now, from Settings → Tools, into this machine
+  # (backend/tools/rtk.py). `check_packaging.py` refuses a gitignored source
+  # that is not declared below, so re-adding this entry means saying why.
   - from: dashboard/out
     to: dashboard
     filter: ['**/*']

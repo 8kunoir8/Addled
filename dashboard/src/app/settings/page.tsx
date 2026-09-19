@@ -1227,17 +1227,99 @@ function WikiSection({ settings, update, saving, status }: any) {
 function ToolsSection({ settings, update, saving, status, send, connected }: any) {
   const t=settings?.tools||{};
   const [rtk, setRtk] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
+
+  const refresh=useCallback(()=>{
+    if (!connected) return;
+    send('system.rtkStatus', {}).then((r: any) => {
+      setRtk(r || null);
+      // The download's own progress row replaces the note as soon as the
+      // backend reports it running, so the note would otherwise sit there
+      // saying "Downloading…" forever once it had finished.
+      if (r && !r.installing) setNote((n) => (n === 'Downloading…' ? '' : n));
+    }).catch(() => {});
+  },[connected, send]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Poll while a download is running. The backend also broadcasts progress, but
+  // a poll cannot miss one, and it is what notices the end of the run — the
+  // broadcast that carries the outcome may arrive before this component has
+  // finished rendering the previous one.
   useEffect(() => {
-    if (connected) send('system.rtkStatus', {}).then((r: any) => setRtk(r || null)).catch(() => {});
-  }, [connected, send]);
+    if (!rtk?.installing) return;
+    const timer = setInterval(refresh, 1000);
+    return () => clearInterval(timer);
+  }, [rtk?.installing, refresh]);
+
+  const startInstall=async(force:boolean)=>{
+    if (!connected || busy) return;
+    setBusy(true); setNote('');
+    try {
+      const r = await send('system.rtkInstall', { force });
+      if (r?.success) setNote('Downloading…');
+      else if (r?.already_installed) setNote('Already installed.');
+      else if (r?.already_running) setNote('Already downloading.');
+      else setNote(r?.error || 'The download could not start.');
+    } catch (e:any) {
+      setNote(e?.message || 'The download could not start.');
+    } finally {
+      setBusy(false);
+      // The first poll picks up "installing", which starts the interval; the
+      // rest cover a download that finishes between polls.
+      setTimeout(refresh, 300);
+      setTimeout(refresh, 3000);
+    }
+  };
+
   const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('tools',skey,!t[skey])} className={`w-10 h-5 rounded-full transition-colors ${t[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${t[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const pct = Math.max(0, Math.min(100, Number(rtk?.percent)||0));
   return <div className="space-y-1">
     <Toggle label="Token saver (RTK)" desc="Auto-compress git / pip / pytest / npm / gh / docker command output before it reaches the model — saves provider credits" skey="rtk_enabled"/>
-    <SettingRow label="RTK binary">
-      <span className={`text-xs ${rtk?.available ? 'text-[#3fb950]' : 'text-[#d29922]'}`}>
-        {rtk ? (rtk.available ? '✓ bundled — compression active' : 'Not bundled — commands run uncompressed') : 'Checking…'}
-      </span>
+    <SettingRow label="RTK binary" description="Optional — downloaded on request, not shipped with Addled">
+      <div className="flex items-center gap-2">
+        <span className={`text-xs ${rtk?.available ? 'text-[#3fb950]' : 'text-[#d29922]'}`}>
+          {!rtk ? 'Checking…'
+            : rtk.source === 'path' ? `✓ ${rtk.version || 'installed'} on PATH — compression active`
+            : rtk.available ? `✓ ${rtk.version || 'installed'} — compression active`
+            : 'Not installed — commands run uncompressed'}
+        </span>
+        {rtk && rtk.supported && !rtk.installing && (
+          <button onClick={()=>startInstall(Boolean(rtk.available))} disabled={busy || !connected}
+            className="text-xs px-2 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:border-[#484f58] disabled:opacity-50">
+            {rtk.own?.installed ? 'Reinstall' : 'Install'}
+          </button>
+        )}
+      </div>
     </SettingRow>
+    <p className="text-xs text-[#8b949e] mb-2">
+      The token saver is 6 MB of third-party binaries (rtk and ripgrep) fetched from their GitHub
+      releases and checked against the sha256 GitHub publishes for them. It used to travel inside
+      every Addled build; it does not any more, so a fresh copy has none until you install it here.
+      Nothing depends on it — without it, commands run unchanged and their whole output reaches the model.
+    </p>
+    {rtk?.installing && (
+      <SettingRow label="Downloading" description={rtk.detail || rtk.phase}>
+        <div className="flex items-center gap-2 w-40">
+          <div className="flex-1 h-1.5 bg-[#21262d] rounded overflow-hidden">
+            <div className="h-full bg-[#3380FF] transition-all" style={{width:`${pct}%`}}/>
+          </div>
+          <span className="text-xs text-[#8b949e]">{pct}%</span>
+        </div>
+      </SettingRow>
+    )}
+    {rtk && !rtk.installing && rtk.own?.installed && (
+      <SettingRow label="Addled's copy" description={`${rtk.own.version || 'version unknown'} — verified against the sha256 GitHub publishes for the release, installed ${rtk.own.installed_at || 'unknown'}`}>
+        <span className="text-xs text-[#8b949e] break-all">{rtk.install_dir}</span>
+      </SettingRow>
+    )}
+    {rtk && !rtk.supported && (
+      <p className="text-xs text-[#8b949e]">The token saver is only published for Windows. On this machine, put <code>rtk</code> on PATH and it will be used.</p>
+    )}
+    {(rtk?.error || note) && (
+      <p className={`text-xs ${rtk?.error ? 'text-[#f85149]' : 'text-[#8b949e]'}`}>{rtk?.error || note}</p>
+    )}
   </div>;
 }
 

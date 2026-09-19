@@ -885,14 +885,24 @@ def _register_default_handlers():
         }
 
     async def system_rtk_status(params: dict, ws) -> dict:
-        """Whether the RTK token-saver binary is available."""
-        from backend.actions.terminal import _find_rtk
-        from backend.config import config
-        path = _find_rtk()
-        return {"available": path is not None,
-                "path": path,
-                "enabled": bool(config.get("tools", "rtk_enabled",
-                                            default=True))}
+        """Whether the token-saver binaries are present, and how far an
+        install has got. The dashboard draws the Install button from this."""
+        from backend.tools import rtk
+        return rtk.status()
+
+    async def system_rtk_install(params: dict, ws) -> dict:
+        """Download rtk + ripgrep, on the user's explicit instruction.
+
+        Returns as soon as the download starts; progress arrives on
+        `system.rtkProgress`, and `system.rtkStatus` reports the outcome.
+        """
+        from backend.remote import policy
+        from backend.tools import rtk
+        return await rtk.install(
+            force=bool(params.get("force")),
+            with_rg=bool(params.get("rg", True)),
+            remote=policy.is_remote(ws),
+        )
 
     async def desktop_status(params: dict, ws) -> dict:
         from backend.actions.desktop_control import desktop_control
@@ -2707,6 +2717,7 @@ def _register_default_handlers():
     async def browser_install_approve(params: dict, ws) -> dict:
         """Run a dashboard-approved backend install (auto_install=ask flow)."""
         from backend.browser.auto_install import approve
+        from backend.browser.auto_install import approve
         return await approve(str(params.get("backend", "")))
 
     # ---- Local model (llamafile) — ask-then-download flow -------------------
@@ -2965,6 +2976,7 @@ def _register_default_handlers():
     _server.register("system.status", system_status)
     _server.register("system.getProviders", system_get_providers)
     _server.register("system.rtkStatus", system_rtk_status)
+    _server.register("system.rtkInstall", system_rtk_install)
     _server.register("desktop.status", desktop_status)
     _server.register("desktop.grant", desktop_grant)
     _server.register("desktop.revoke", desktop_revoke)

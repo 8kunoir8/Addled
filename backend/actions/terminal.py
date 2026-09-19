@@ -38,9 +38,11 @@ DANGEROUS_COMMANDS = {
 
 
 # ---- RTK (Rust Token Killer) integration -----------------------------------
-# When the bundled rtk.exe is available, eligible single commands are rewritten
-# to their RTK equivalents so the agent sees compact output (60-90% fewer
-# tokens) instead of raw dumps. Purely optional — raw passthrough otherwise.
+# When rtk.exe is available, eligible single commands are rewritten to their RTK
+# equivalents so the agent sees compact output (60-90% fewer tokens) instead of
+# raw dumps. Purely optional — raw passthrough otherwise, and the binary is
+# something the user installs from Settings → Tools rather than something the
+# installer carries (see backend/tools/rtk.py).
 
 RTK_PREFIXES = (
     "git ", "pip ", "python -m pip", "pytest", "python -m pytest",
@@ -49,15 +51,9 @@ RTK_PREFIXES = (
 
 
 def _find_rtk() -> str | None:
-    """Locate rtk.exe: PATH first, then the bundled copy (tools/rtk/)."""
-    import shutil
-    found = shutil.which("rtk")
-    if found:
-        return found
-    bundled = Path(__file__).resolve().parents[2] / "tools" / "rtk" / "rtk.exe"
-    if bundled.is_file():
-        return str(bundled)
-    return None
+    """Locate rtk.exe: PATH first, then the copies the app installed."""
+    from backend.tools import rtk
+    return rtk.find("rtk.exe")
 
 
 def _rtk_rewrite(command: str, rtk: str | None) -> tuple[str, bool]:
@@ -105,7 +101,7 @@ class TerminalExecutor:
         command, rewritten = _rtk_rewrite(command, rtk_path)
         env = None
         if rewritten and rtk_path:
-            # make the bundled rg.exe (ripgrep) visible to rtk.exe
+            # make rg.exe (ripgrep) visible to rtk.exe, wherever it was installed
             rtk_dir = str(Path(rtk_path).parent)
             env = {**os.environ,
                    "PATH": rtk_dir + os.pathsep + os.environ.get("PATH", "")}

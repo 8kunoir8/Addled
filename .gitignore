@@ -12,7 +12,10 @@ backend/memory/goals/
 backend/memory/models/
 backend/memory/market_skills/
 backend/memory/forged_skills/
-tools/
+# Vendored binaries at the repository root (rtk, ripgrep). Anchored: an
+# unanchored `tools/` also matched `backend/tools/`, so a new backend package
+# would have been silently ignored and never committed.
+/tools/
 backend/memory/.vault*
 backend/memory/*.log
 dashboard/.next/

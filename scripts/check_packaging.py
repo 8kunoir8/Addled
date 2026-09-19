@@ -65,11 +65,49 @@ SHIPPED_DESPITE_IGNORED = {
         "scripts/fetch_voice_models.py and bundled on purpose",
 }
 
+# extraResources sources (relative to the repository) that git ignores and that
+# are still shipped, each with the reason it is allowed. A source not named here
+# may not be ignored by git: that combination is how `tools/rtk` shipped 13 MB
+# of binaries that were in no repository and in every installer.
+DELIBERATE_SOURCES = {
+    "dashboard/out":
+        "the built dashboard, which is a build output by definition",
+    "python-bundle":
+        "the embedded Python runtime from scripts/bundle_python.py, which is "
+        "what makes the installer self-contained",
+}
+
+# Sources that must never be shipped, however they are declared.
+FORBIDDEN_SOURCES = {"tools", "tools/rtk", "backend/memory", "dist"}
+
 # Nothing that looks like these may ship at all, whatever the filters say.
 FORBIDDEN_NAMES = re.compile(
     r"(^|/)(settings\.json|chat_history\.json|user_profile\.json|"
     r"models_catalog\.json|maintenance_state\.json|session_context\.json|"
     r"[^/]*\.db|[^/]*\.db-(wal|shm)|[^/]*\.log|[^/]*\.jsonl)$")
+
+
+def extra_resource_sources(yaml_text: str) -> list[str]:
+    """Every `from:` path in extraResources, in order."""
+    sources: list[str] = []
+    inside = False
+    for line in yaml_text.splitlines():
+        if line.startswith("extraResources:"):
+            inside = True
+            continue
+        if inside and line and not line.startswith((" ", "\t", "#")):
+            break
+        stripped = line.strip()
+        if inside and stripped.startswith("- from:"):
+            sources.append(stripped.split(":", 1)[1].strip().strip("'\""))
+    return sources
+
+
+def git_ignored(path: str) -> bool:
+    """Whether git would ignore this path, whether or not it exists."""
+    proc = subprocess.run(["git", "-C", ROOT, "check-ignore", "-q", "--", path],
+                          capture_output=True, text=True)
+    return proc.returncode == 0
 
 
 def extra_resource_filters(yaml_text: str, source: str) -> list[str]:
@@ -167,6 +205,22 @@ def main() -> int:
     yaml_text = read("electron-builder.yml")
     patterns = extra_resource_filters(yaml_text, "backend")
 
+    # ---- every packaged source is accounted for ---------------------------
+    sources = extra_resource_sources(yaml_text)
+    check("extraResources is readable", len(sources) >= 4, str(sources))
+    check("and does not ship a hand-fetched binary directory",
+          not (set(sources) & FORBIDDEN_SOURCES),
+          f"declared: {sorted(set(sources) & FORBIDDEN_SOURCES)}")
+    for source in sources:
+        if not git_ignored(source):
+            continue
+        check(f"the ignored source '{source}' is declared, with a reason",
+              source in DELIBERATE_SOURCES,
+              "a gitignored source ships content git cannot show in review")
+    for declared in DELIBERATE_SOURCES:
+        check(f"'{declared}' is still packaged",
+              declared in sources, "the declaration no longer matches anything")
+
     check("the backend extraResources filter is readable and non-trivial",
           len(patterns) >= 2 and patterns[0] == "**/*", str(patterns)[:200])
     check("and it excludes bytecode",
@@ -214,6 +268,13 @@ def main() -> int:
     check("nothing that looks like state or a credential ships",
           not forbidden, f"e.g. {forbidden[:5]}")
 
+    # Tracking one of these is the other way this state reaches a clone —
+    # `.gitignore` only prevents an *accidental* add, not a deliberate one.
+    tracked_state = [p for p in git("ls-files", "--", "backend")
+                     if FORBIDDEN_NAMES.search(p)]
+    check("no database, log or config is tracked by git",
+          not tracked_state, f"e.g. {tracked_state[:5]}")
+
     # ---- the deploy script must exclude the same set ----------------------
     script = read(os.path.join("scripts", "deploy_to_install.ps1"))
     check("the deploy derives its excludes from git rather than a list",
@@ -255,13 +316,16 @@ def main() -> int:
         check(f"the deploy excludes {ignored_path}", covered,
               "a deploy would copy it over the installed app")
 
-    # The three files the old hand-written list had drifted past. Named
-    # explicitly because they are what the bug actually looked like.
+    # The files the old hand-written list had drifted past. They are gone from
+    # the working tree now, so a list of what exists cannot name them — what
+    # matters is that git would ignore each one the moment it came back, because
+    # git is what the deploy reads.
     for name in ("backend/memory/vectors.db", "backend/memory/triples.db",
                  "backend/memory/addled.log", "backend/memory/egress.jsonl",
                  "backend/memory/facts.json", "backend/memory/settings.json"):
-        check(f"the deploy excludes {name}", name in deploy_files,
-              "not covered by the derived list")
+        check(f"git ignores {name}", git_ignored(name),
+              "the deploy derives its excludes from git, so this is the rule "
+              "that has to hold")
 
     if fails:
         print(f"FAIL: {len(fails)} packaging check(s) failed")
