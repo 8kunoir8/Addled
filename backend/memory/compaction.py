@@ -198,13 +198,31 @@ async def maybe_compact() -> bool:
         _locked = False
 
 
+def compose_rolling(items: list[str]) -> str | None:
+    """Format already-selected summaries, or None when there are none."""
+    lines = [f"- {s}" for s in items if s]
+    if not lines:
+        return None
+    return ("[Earlier in this conversation] Summaries of earlier parts of "
+            f"this conversation:\n" + "\n".join(lines) + "\n"
+            "Use them for continuity — mention only when relevant.")
+
+
 def build_rolling_context(max_entries: int = 5) -> str | None:
-    """Continuity block for long conversations, or None when empty."""
+    """Continuity block for long conversations, or None when empty.
+
+    Only the conversation that produced these entries may see them. They are
+    *mid-session* continuity, and `maybe_compact()` already treats a change of
+    conversation as "start a fresh rolling summary" — but this reader never
+    checked, so a compaction of a thread that had ended weeks earlier was
+    announced to every new chat as "[Earlier in this conversation]".
+    """
     state = _load()
     entries = state.get("entries", [])
     if not entries:
         return None
-    lines = "\n".join(f"- {e['summary']}" for e in entries[-max_entries:])
-    return ("[Earlier in this conversation] Summaries of earlier parts of "
-            f"this conversation:\n{lines}\n"
-            "Use them for continuity — mention only when relevant.")
+    from backend.memory.chat_history import chat_history
+    current = chat_history.current_conversation_id
+    if current is None or state.get("conversation_id") != current:
+        return None
+    return compose_rolling([e["summary"] for e in entries[-max_entries:]])

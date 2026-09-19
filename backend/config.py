@@ -239,7 +239,11 @@ DEFAULT_SETTINGS: dict = {
         "semantic_embeddings": True,
         "hybrid_search": True,
         "recall_top_k": 3,
-        "min_similarity": 0.05,
+        # Below roughly a third of a cosine, "most similar" stops meaning
+        # "related". At the 0.05 this shipped with, a greeting recalled whatever
+        # memory happened to be nearest, and the model answered that instead of
+        # the question.
+        "min_similarity": 0.35,
         "compaction_threshold": 40,
         "auto_facts": False,
         "graph_extract": False,
@@ -507,6 +511,19 @@ class _Config:
         else:
             self._data = dict(DEFAULT_SETTINGS)
             self.save()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Repair a stored value that an earlier default left harmful.
+
+        The deep merge cannot do this on its own: a value already on disk always
+        wins, so a bad shipped default would survive in every install that
+        predates the fix. Only the exact old default is replaced, so a value the
+        user chose is left alone.
+        """
+        if self._data.get("memory", {}).get("min_similarity") == 0.05:
+            self.set("memory", "min_similarity",
+                     value=DEFAULT_SETTINGS["memory"]["min_similarity"])
 
     def save(self):
         """Persist settings to disk."""

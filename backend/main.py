@@ -105,6 +105,15 @@ def main():
     else:
         log.info("Already onboarded — skipping wizard")
 
+    # ---- session boundary ----------------------------------------------------
+    # A run starts a fresh conversation. The pointer a previous run left behind
+    # used to continue an old thread invisibly: the dashboard showed a blank chat
+    # while the model was handed the last twenty messages of a month-old one.
+    from backend.memory.chat_history import chat_history
+    _previous = chat_history.start_session()
+    if _previous:
+        log.info("Fresh session — previous conversation was %s", _previous)
+
     # ---- start WebSocket server (runs in background) --------------------------
     from backend.ws_server import start_ws_server, get_server
     import asyncio

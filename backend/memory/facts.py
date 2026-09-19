@@ -99,15 +99,24 @@ def clear_facts() -> int:
     return len(facts)
 
 
-def build_facts_context(max_facts: int = 20) -> str | None:
-    """System-prompt block with the durable facts, or None when empty."""
-    facts = get_facts(max_facts)
-    if not facts:
+def compose_facts(items: list[str]) -> str | None:
+    """Format already-selected facts, or None when there are none."""
+    items = [t for t in items if t]
+    if not items:
         return None
-    lines = "\n".join(f"- {f['text']}" for f in facts)
+    lines = "\n".join(f"- {t}" for t in items)
     return ("[Core memory] Durable facts saved about the user (preferences, "
             f"decisions, context):\n{lines}\n"
             "Treat these as true unless the user contradicts them.")
+
+
+def build_facts_context(max_facts: int = 20) -> str | None:
+    """System-prompt block with every durable fact.
+
+    Callers that have a user message to hand should use
+    `relevance.facts_block()` instead, which drops the unrelated ones.
+    """
+    return compose_facts([f["text"] for f in get_facts(max_facts)])
 
 
 async def auto_extract_facts() -> int:

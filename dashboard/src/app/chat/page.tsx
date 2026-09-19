@@ -105,6 +105,38 @@ export default function ChatPage() {
       m.timestamp > 0 ? m : { ...m, timestamp: Date.now() }));
   }, []);
 
+  // The backend owns "the current conversation", so adopt its view once we are
+  // connected. Without this the two disagreed: this page restored its own cached
+  // messages (or just the greeting) while the pipeline was handing the model a
+  // different thread — which looked like the agent answering a question nobody
+  // had asked.
+  useEffect(() => {
+    if (wsState !== 'connected') return;
+    const cached = getChatMessages();
+    const last = cached[cached.length - 1];
+    if (last && last.role === 'assistant' && last.streaming) {
+      return;  // a request is in flight — the recovery effect below owns this
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await send('chat.history', { max: 60 });
+        if (cancelled) return;
+        const msgs: Message[] = (r?.messages || [])
+          .filter((m: any) => m && m.content)
+          .map((m: any) => ({
+            role: m.role === 'user' ? 'user' : 'assistant',
+            content: String(m.content ?? ''),
+            timestamp: Number(m.timestamp || 0) * 1000,
+          }));
+        setMessages(msgs.length ? msgs : [GREETING]);
+      } catch {
+        /* keep what we already have */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [wsState, send]);
+
   // Apply replies that landed in the store after this component (re)mounted —
   // e.g. the user switched to another tab mid-request and came back.
   useEffect(() => subscribeChatMessages((msgs) => {

@@ -143,12 +143,17 @@ def clear_summaries() -> int:
     return len(entries)
 
 
+def compose_session_block(items: list[str]) -> str | None:
+    """Format already-selected summaries, or None when there are none."""
+    lines = [f"- {s}" for s in items if s]
+    if not lines:
+        return None
+    return ("[Session memory] What you and the user have been working on in "
+            f"recent sessions:\n" + "\n".join(lines) + "\n"
+            "Use this for continuity — mention it only when relevant.")
+
+
 def build_session_context(limit: int = 3) -> str | None:
     """Block injected into chat for long-run continuity."""
-    summaries = get_recent_summaries(limit)
-    if not summaries:
-        return None
-    lines = "\n".join(f"- {s['summary']}" for s in summaries)
-    return ("[Session memory] What you and the user have been working on in "
-            f"recent sessions:\n{lines}\n"
-            "Use this for continuity — mention it only when relevant.")
+    return compose_session_block([s["summary"]
+                                  for s in get_recent_summaries(limit)])

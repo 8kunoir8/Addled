@@ -68,19 +68,17 @@ def auto_learn() -> dict:
     profile = _load()
     changed = False
 
-    # preferences ← durable facts (unique, capped)
+    # preferences are no longer copied from facts. The facts block already
+    # injects every fact verbatim, so the copy put each one in the prompt twice
+    # — and, being part of an always-on block, it kept a stale fact alive no
+    # matter how unrelated it was. Older builds wrote them here; prune them.
     try:
-        from backend.memory.facts import get_facts
-        facts = [f["text"] for f in get_facts(10)]
-        if facts:
-            merged = list(profile.get("preferences") or [])
-            for f in facts:
-                if f not in merged:
-                    merged.append(f)
-            merged = merged[-30:]
-            if merged != profile.get("preferences"):
-                profile["preferences"] = merged
-                changed = True
+        facts = _fact_texts()
+        current = list(profile.get("preferences") or [])
+        pruned = [p for p in current if p and _norm(p) not in facts]
+        if pruned != current:
+            profile["preferences"] = pruned
+            changed = True
     except Exception:
         pass
 
@@ -115,11 +113,29 @@ def auto_learn() -> dict:
     return profile
 
 
+def _norm(text: str) -> str:
+    """Whitespace-and-case-insensitive form, for comparing a preference to a fact."""
+    return " ".join((text or "").split()).lower()
+
+
+def _fact_texts() -> set[str]:
+    """Normalised text of every fact, so the profile can drop the copies."""
+    try:
+        from backend.memory.facts import get_facts
+        return {_norm(f.get("text", "")) for f in get_facts(200)}
+    except Exception:
+        return set()
+
+
 def build_profile_context() -> str | None:
     """System-prompt block, or None when there is nothing to say."""
     profile = _load()
     parts = []
-    prefs = [p for p in profile.get("preferences") or [] if p][:10]
+    # A preference that is really a fact would be injected twice; the facts
+    # block owns those, so skip any whose text matches one.
+    facts = _fact_texts()
+    prefs = [p for p in profile.get("preferences") or []
+             if p and _norm(p) not in facts][:10]
     rituals = [r for r in profile.get("rituals") or [] if r][:8]
     if prefs:
         parts.append("Preferences: " + "; ".join(prefs))

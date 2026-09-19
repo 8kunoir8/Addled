@@ -516,9 +516,12 @@ async def _run_chat_pipeline_inner(
             if not sys_prompt.strip():
                 sys_prompt = (f"You are {agent_name}, a helpful AI desktop "
                               "companion with access to system tools.")
-        # Core memory: durable facts the agent saved about the user
-        from backend.memory.facts import build_facts_context
-        facts_ctx = build_facts_context()
+        # Core memory: durable facts the agent saved about the user. Only the
+        # ones that relate to what was just said — an unrelated fact is not
+        # context, it is something the model can end up answering instead of the
+        # question (see backend/memory/relevance.py).
+        from backend.memory import relevance
+        facts_ctx = await relevance.facts_block(message)
         if facts_ctx:
             sys_prompt = sys_prompt + "\n\n" + facts_ctx
 
@@ -528,9 +531,11 @@ async def _run_chat_pipeline_inner(
         if profile_ctx:
             sys_prompt = sys_prompt + "\n\n" + profile_ctx
 
-        # Episodic timeline: recent day summaries (persistent identity)
-        from backend.memory.journal import build_timeline_context
-        timeline_ctx = build_timeline_context()
+        # Episodic timeline: recent day summaries (persistent identity), gated
+        # like the facts — "yesterday we..." is worth its tokens only when the
+        # day is about this.
+        from backend.memory import relevance
+        timeline_ctx = await relevance.timeline_block(message)
         if timeline_ctx:
             sys_prompt = sys_prompt + "\n\n" + timeline_ctx
 
@@ -604,9 +609,10 @@ async def _run_chat_pipeline_inner(
         except Exception:
             pass
 
-        # Session continuity: recent session summaries (long-run memory)
-        from backend.memory.session_summary import build_session_context
-        session_ctx = build_session_context()
+        # Session continuity: recent session summaries (long-run memory), gated
+        # the same way
+        from backend.memory import relevance
+        session_ctx = await relevance.summaries_block(message)
         if session_ctx:
             user_messages.insert(0, {"role": "user", "content": session_ctx})
 

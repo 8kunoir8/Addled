@@ -145,20 +145,23 @@ async def _summarize_day(date_str: str) -> dict:
     return {"date": date_str, "summary": summary[:120]}
 
 
-def build_timeline_context(days: int = 3) -> str | None:
-    """System-prompt block with recent day summaries (newest first)."""
-    if not JOURNAL_DIR.exists():
-        return None
-    lines = []
-    for meta in list_days(limit=days):
-        if meta.get("summary"):
-            lines.append(f"- {meta['date']}: {meta['summary']}")
+def compose_timeline(items: list[tuple[str, str]]) -> str | None:
+    """Format already-selected (date, summary) pairs, or None when empty."""
+    lines = [f"- {date}: {summary}" for date, summary in items if summary]
     if not lines:
         return None
     return ("[Recent days] What happened recently, in the agent's own "
             "timeline:\n" + "\n".join(lines) +
             "\nReference these naturally when relevant (e.g. 'yesterday "
             "we...').")
+
+
+def build_timeline_context(days: int = 3) -> str | None:
+    """System-prompt block with recent day summaries (newest first)."""
+    if not JOURNAL_DIR.exists():
+        return None
+    return compose_timeline([(meta["date"], meta.get("summary") or "")
+                             for meta in list_days(limit=days)])
 
 
 def _prune() -> None:

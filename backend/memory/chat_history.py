@@ -114,6 +114,24 @@ class ChatHistory:
         self._load()
         return self._data.get("current_conversation")
 
+    def start_session(self) -> str | None:
+        """Begin a new conversation for this run, returning the one that was open.
+
+        `current_conversation` used to survive a restart, so a new launch quietly
+        carried on whatever thread was left open — on this machine a conversation
+        from 2026-08-16, whose last twenty messages went to the model as context
+        for a bare "yoo apakabar ?" while the dashboard, reading only its own
+        cache, showed a blank chat. Dropping the pointer makes the first message
+        of the run open a fresh conversation; the older ones stay on disk for the
+        conversations list, the Memory page and semantic recall.
+        """
+        self._load()
+        previous = self._data.get("current_conversation")
+        if previous is not None:
+            self._data["current_conversation"] = None
+            self._save()
+        return previous
+
     def clear(self, conversation_id: str | None = None):
         """Clear a conversation or all conversations."""
         self._load()
