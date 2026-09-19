@@ -136,6 +136,7 @@ async def chat_with_tools(
     system_prompt: str = "",
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
     model: str | None = None,
+    tools: list[str] | None = None,
 ) -> dict:
     """
     Run a chat completion with automatic tool execution.
@@ -148,9 +149,18 @@ async def chat_with_tools(
     ``model`` is chosen by the request router (see backend.providers.router).
     When it is None the provider uses its own configured default, which is the
     behaviour Addled had before routing existed.
+
+    ``tools`` narrows the catalogue to those skill names. None means every
+    enabled skill, which is what the chat page, the character, voice and the
+    bots all use. A list is for a caller that wants a defined subset — it is
+    the same catalogue either way, not a second one, so a skill is offered on
+    every path unless the caller deliberately restricts it.
     """
     provider_id = getattr(provider, "provider_id", "unknown")
     uses_native = provider_id in NATIVE_TOOL_PROVIDERS
+    # None means "no filter"; an empty list means "no tools", which is a
+    # distinction a caller passing a restricted set depends on.
+    only = set(tools) if tools is not None else None
 
     # Build full message list
     full_messages = []
@@ -168,9 +178,9 @@ async def chat_with_tools(
         })
         try:
             if uses_native:
-                final = await _call_native_tools(provider, full_messages, model)
+                final = await _call_native_tools(provider, full_messages, model, only)
             else:
-                final = await _call_prompt_tools(provider, full_messages, model)
+                final = await _call_prompt_tools(provider, full_messages, model, only)
             final_text = (final.get("response") or "").strip()
             if final_text and not final.get("tool_calls"):
                 return {
@@ -192,9 +202,9 @@ async def chat_with_tools(
         rounds += 1
 
         if uses_native:
-            result = await _call_native_tools(provider, full_messages, model)
+            result = await _call_native_tools(provider, full_messages, model, only)
         else:
-            result = await _call_prompt_tools(provider, full_messages, model)
+            result = await _call_prompt_tools(provider, full_messages, model, only)
 
         # No tool call — normal text response
         if not result.get("tool_calls"):
@@ -289,9 +299,10 @@ async def chat_with_tools(
 
 
 async def _call_native_tools(provider, messages: list[dict],
-                             model: str | None = None) -> dict:
+                             model: str | None = None,
+                             only: set[str] | None = None) -> dict:
     """Use native function-calling API (OpenAI/DeepSeek/Gemini)."""
-    tools = skill_registry.to_openai_tools()
+    tools = skill_registry.to_openai_tools(only)
 
     try:
         try:
@@ -304,7 +315,7 @@ async def _call_native_tools(provider, messages: list[dict],
             )
         except TypeError:
             # Provider doesn't accept a tools kwarg → prompt-injected tools
-            return await _call_prompt_tools(provider, messages, model)
+            return await _call_prompt_tools(provider, messages, model, only)
 
         if not result.ok:
             # Log it. Returning the message only puts it in the chat: a user
@@ -356,9 +367,10 @@ async def _call_native_tools(provider, messages: list[dict],
 
 
 async def _call_prompt_tools(provider, messages: list[dict],
-                             model: str | None = None) -> dict:
+                             model: str | None = None,
+                             only: set[str] | None = None) -> dict:
     """For providers without native tool support: inject tools into prompt."""
-    tools_text = skill_registry.to_prompt_tools()
+    tools_text = skill_registry.to_prompt_tools(only)
 
     # Inject tools into the last user message or system message
     modified_messages = list(messages)

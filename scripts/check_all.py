@@ -38,6 +38,7 @@ SUITES = [
     "check_mcp_market.py",
     "check_code_editor.py",
     "check_guide.py",
+    "check_parity.py",
 ]
 
 

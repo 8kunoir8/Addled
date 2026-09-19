@@ -344,12 +344,14 @@ export const GUIDE: GuideEntry[] = [
     icon: '🎯',
     summary: 'Work that takes longer than one reply, and several agents at once.',
     what:
-      'A goal is an objective Addled works on across turns rather than answering once: it can be started, checked on and cancelled, and it keeps its own state between attempts. Tasks are timed jobs — something to do at a time, or on a repeat. The swarm runs several agents on the same objective at once, each with a different angle, and merges what they produce; it is slower and more expensive than a single turn and worth it when a problem genuinely benefits from parallel attempts.',
+      'A goal is an objective Addled works on across turns rather than answering once: it can be started, checked on and cancelled, and it keeps its own state between attempts. Tasks are timed jobs — something to do at a time, or on a repeat. The swarm runs several agents on the same objective at once, each with a different angle, and merges what they produce; it is slower and more expensive than a single turn and worth it when a problem genuinely benefits from parallel attempts. Every agent works through the same pipeline as the Chat page, so it has the same skills and tools: an agent reads files, searches the web and runs procedures rather than only writing prose.',
     how: [
       'Open the Goals page and describe the objective. Addled plans, works, and reports back as it goes.',
       'Watch progress on the page; a goal can be cancelled at any point and keeps whatever it produced.',
       'Schedule a task for work that should happen later or repeatedly.',
       'Use the Swarm page when one attempt is not enough: give it the objective and a count, and compare the results it comes back with.',
+      'Give an agent a task that needs a tool — "what is the size of this file?" — and it will use one. The badge on its card says what it may use: "all skills & tools" unless it was deliberately given a narrower set.',
+      'Stop removes an agent and cancels the work it was doing, so a run you no longer want does not keep costing you.',
       'Expect a goal or a swarm to take minutes, not seconds. They are local loops around your provider, and their speed is the model\'s speed.',
     ],
     routes: [
@@ -377,6 +379,8 @@ export const GUIDE: GuideEntry[] = [
       'Open a file from the tree, edit it, and press Ctrl+S to save. Ctrl+F finds inside the file.',
       'Use the search panel to find a word across the whole workspace and jump to the line.',
       'Ask for a change in the box at the bottom. Addled proposes an edit, you see the diff, and nothing is written until you press Apply. Unsaved editor text is saved first, so the diff always describes what you are looking at.',
+      'When the change depends on the rest of the project, let Addled read it: the suggestions run with read-only tools, so it can look up a helper or a convention instead of guessing. It still cannot write — approving the diff is the only way a file changes.',
+      'Keep suggested edits to files under about 12,000 characters. Addled rewrites the whole file in one answer, and a longer file is refused with that reason rather than half-answered, because a partial answer would read as a deletion.',
       'Create a new file by typing its path in the tree.',
       'Checkpoint before large changes: an applied edit keeps the previous version beside the file as a .bak.',
     ],

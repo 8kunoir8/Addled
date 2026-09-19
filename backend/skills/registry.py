@@ -515,22 +515,31 @@ class SkillRegistry:
     def list_category(self, category: str) -> list[SkillDefinition]:
         return [s for s in self._skills.values() if s.category == category]
 
-    def to_openai_tools(self) -> list[dict]:
-        return [s.to_openai_tool() for s in self.enabled_list_all()]
+    def to_openai_tools(self, only: set[str] | None = None) -> list[dict]:
+        """`only` narrows the catalogue to those skill names; None means all."""
+        return [s.to_openai_tool() for s in self.enabled_list_all()
+                if only is None or s.name in only]
 
     def to_claude_tools(self) -> list[dict]:
         return [s.to_claude_tool() for s in self.enabled_list_all()]
 
-    def to_prompt_tools(self) -> str:
+    def to_prompt_tools(self, only: set[str] | None = None) -> str:
         """For providers without native tool support: append to the prompt.
 
         Deliberately terse. This text is added to the user's own message, so
         every token here is a token the model cannot spend on the question.
+
+        `only` narrows the catalogue to those skill names; None means every
+        enabled skill. An empty set is honoured as "no tools" rather than being
+        treated as "no filter" — the difference matters to a caller that has
+        deliberately given an agent a restricted set.
         """
         lines = ["\n## Tools",
                  'Call one with: ```tool\n{"tool": "name", "params": {}}\n```',
                  "A trailing '?' marks an optional argument.", ""]
         for skill in self.enabled_list_all():
+            if only is not None and skill.name not in only:
+                continue
             lines.append(skill.to_prompt_desc())
         return "\n".join(lines)
 

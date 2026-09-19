@@ -273,6 +273,17 @@ def _extract_code(text: str) -> str:
     return body
 
 
+# Tools the Code page's "Ask the model" box may use. Read-only on purpose: the
+# change it produces is reviewed as a diff and applied by the user, and none of
+# these can write, so that review step cannot be skipped by the model itself.
+_CODE_EDIT_TOOLS = ("code_read", "read_file", "list_dir", "search_files",
+                    "file_info")
+
+# The editor rewrites a whole file in one reply, so the file has to fit with
+# room to think. Above this a partial answer would diff as a mass deletion.
+_CODE_EDIT_MAX_CHARS = 12000
+
+
 async def _analyze_attachments(provider, attachments: list[dict],
                               vision_model: str | None = None) -> list[str]:
     """Route attachments to the right model:
@@ -333,8 +344,40 @@ async def _analyze_attachments(provider, attachments: list[dict],
     return notes
 
 
-async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
-    """Shared chat pipeline — used by chat.send and the voice listener."""
+async def run_chat_pipeline(
+    message: str,
+    params: dict | None = None,
+    *,
+    persona: str | None = None,
+    tools: list[str] | None = None,
+    record: bool = True,
+    announce: bool = True,
+    max_tool_rounds: int | None = None,
+    force_role: str | None = None,
+    provider: object | None = None,
+) -> dict:
+    """The one place a turn is run, for every way in.
+
+    The Chat page, the floating character, voice, the bots, scheduled tasks,
+    swarm agents and code edits all arrive here. That is deliberate: a
+    capability added to this pipeline reaches all of them, and one added
+    somewhere else reaches whichever path happened to be edited. The swarm used
+    to call the provider directly, so it had no tools at all.
+
+    persona          replaces the configured chat prompt as the base. The
+                     injected context is still appended, so a persona changes
+                     who is answering, not what it can find out.
+    tools            narrows the tool catalogue. None means every enabled skill,
+                     which is what chat, the character and the bots use.
+    record           False for a turn that is a task rather than a conversation:
+                     skips the chat history, the journal, the memory writes and
+                     the mood events.
+    announce         False to leave the character alone (swarm workers).
+    max_tool_rounds  overrides the caller's default of 5.
+    force_role       picks the routing role directly instead of classifying the
+                     message.
+    provider         an already-resolved provider. None asks the registry.
+    """
     params = params or {}
     from backend.config import config
 
@@ -348,40 +391,51 @@ async def run_chat_pipeline(message: str, params: dict | None = None) -> dict:
         pass
 
     # Character shows the THINKING animation while the LLM works
-    if _engine_ref is not None:
+    if announce and _engine_ref is not None:
         _engine_ref._chat_busy = True
         try:
             _engine_ref.sig_agent_state.emit("thinking")
         except Exception:
             pass
     try:
-        response = await _run_chat_pipeline_inner(message, params)
+        response = await _run_chat_pipeline_inner(
+            message, params, persona=persona, tools=tools, record=record,
+            max_tool_rounds=max_tool_rounds, force_role=force_role,
+            provider=provider)
+        # The inner pipeline reports what the model actually returned. Only
+        # here does an empty answer become something to show the user, because
+        # a caller like the code editor has to be able to tell "the model said
+        # nothing" apart from "the model wrote this sentence".
+        if isinstance(response, dict) and not (response.get("response") or "").strip():
+            response["response"] = "I couldn't process that request."
         # Surface provider/connection failures as the ERROR character state
         text = response.get("response", "") if isinstance(response, dict) else ""
-        try:
-            from backend.character.mood import mood_engine
-            if text.startswith(("[Not connected:", "[Provider")):
-                mood_engine.event("task_failure")
-            else:
-                mood_engine.event("chat_reply")
-        except Exception:
-            pass
-        # Episodic timeline: journal every real turn
-        try:
-            from backend.memory.journal import record
-            record("user", message)
-            if not text.startswith(("[Not connected:", "[Provider")):
-                record("assistant", text[:500])
-        except Exception:
-            pass
-        if text.startswith(("[Not connected:", "[Provider")) and _engine_ref is not None:
+        if record:
+            try:
+                from backend.character.mood import mood_engine
+                if text.startswith(("[Not connected:", "[Provider")):
+                    mood_engine.event("task_failure")
+                else:
+                    mood_engine.event("chat_reply")
+            except Exception:
+                pass
+            # Episodic timeline: journal every real turn, not a swarm worker's
+            try:
+                from backend.memory.journal import record as journal_record
+                journal_record("user", message)
+                if not text.startswith(("[Not connected:", "[Provider")):
+                    journal_record("assistant", text[:500])
+            except Exception:
+                pass
+        if (announce and text.startswith(("[Not connected:", "[Provider"))
+                and _engine_ref is not None):
             try:
                 _engine_ref.sig_agent_state.emit("error")
             except Exception:
                 pass
         return response
     finally:
-        if _engine_ref is not None:
+        if announce and _engine_ref is not None:
             _engine_ref._chat_busy = False
 
 
@@ -410,7 +464,17 @@ async def _speak_reply(text: str, voice: str | None = None) -> dict:
                 pass
 
 
-async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> dict:
+async def _run_chat_pipeline_inner(
+    message: str,
+    params: dict | None = None,
+    *,
+    persona: str | None = None,
+    tools: list[str] | None = None,
+    record: bool = True,
+    max_tool_rounds: int | None = None,
+    force_role: str | None = None,
+    provider: object | None = None,
+) -> dict:
     from backend.config import config
 
     # params is optional; several paths below read from it unconditionally.
@@ -433,20 +497,25 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         if config.get("safety", "egress_guard", default=True):
             message, _hits = egress.scrub(message)
 
-        provider = get_provider()
+        provider = provider or get_provider()
         egress.record("chat.send", {
             "provider": getattr(provider, "provider_id", "?"),
             "payload_chars": len(message),
         })
         agent_name = config.agent_name
-        sys_prompt = config.get("chat", "system_prompt", default="") or ""
-        sys_prompt = sys_prompt.replace("{agent_name}", agent_name)
-        if agent_name != "Addled":
-            # also fix persisted prompts that hardcode the old name
-            sys_prompt = sys_prompt.replace("Addled", agent_name)
-        if not sys_prompt.strip():
-            sys_prompt = (f"You are {agent_name}, a helpful AI desktop "
-                          "companion with access to system tools.")
+        if persona:
+            # A caller with its own identity: a swarm agent's role, or the code
+            # editor's output contract.
+            sys_prompt = persona
+        else:
+            sys_prompt = config.get("chat", "system_prompt", default="") or ""
+            sys_prompt = sys_prompt.replace("{agent_name}", agent_name)
+            if agent_name != "Addled":
+                # also fix persisted prompts that hardcode the old name
+                sys_prompt = sys_prompt.replace("Addled", agent_name)
+            if not sys_prompt.strip():
+                sys_prompt = (f"You are {agent_name}, a helpful AI desktop "
+                              "companion with access to system tools.")
         # Core memory: durable facts the agent saved about the user
         from backend.memory.facts import build_facts_context
         facts_ctx = build_facts_context()
@@ -728,7 +797,10 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
                 has_attachments=bool(attachments),
                 image_only=image_only,
                 code_hint=code_hint,
-                force_role=explicit_role,
+                # A caller that knows the shape of its work picks the role
+                # directly: a swarm worker is always reasoning, a code edit is
+                # always code, even when the instruction is one short line.
+                force_role=explicit_role or force_role,
             )
             log.debug("Chat route: role=%s model=%s provider=%s",
                       role, route_model,
@@ -741,8 +813,10 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
             provider=provider,
             messages=user_messages,
             system_prompt=sys_prompt,
-            max_tool_rounds=params.get("maxToolRounds", 5),
+            max_tool_rounds=(max_tool_rounds
+                             or params.get("maxToolRounds", 5)),
             model=route_model,
+            tools=tools,
         )
 
         response_text = result.get("response", "")
@@ -750,24 +824,26 @@ async def _run_chat_pipeline_inner(message: str, params: dict | None = None) -> 
         tool_results = result.get("tool_results", [])
 
         if response_text and not response_text.startswith("[Provider:") and not response_text.startswith("[Not connected:"):
-            chat_history.add_message("user", message)
-            chat_history.add_message("assistant", response_text,
-                tokens={"in": result.get("tokens", 0), "out": 0})
-            # Remember for the long term
-            from backend.memory.recall import remember_async
-            await remember_async("user", message)
-            await remember_async("assistant", response_text)
+            if record:
+                chat_history.add_message("user", message)
+                chat_history.add_message("assistant", response_text,
+                    tokens={"in": result.get("tokens", 0), "out": 0})
+                # Remember for the long term
+                from backend.memory.recall import remember_async
+                await remember_async("user", message)
+                await remember_async("assistant", response_text)
             return {
                 "response": response_text,
                 "tokens": result.get("tokens", 0),
-                "conversationId": chat_history.current_conversation_id,
+                "conversationId": (chat_history.current_conversation_id
+                                   if record else None),
                 "toolRounds": tool_rounds,
                 "toolResults": len(tool_results),
                 "memoryRecall": bool(memory_ctx),
                 "role": role,
                 "model": route_model or "",
             }
-        return {"response": response_text or "I couldn't process that request.",
+        return {"response": response_text,
                 "tokens": result.get("tokens", 0), "conversationId": None,
                 "role": role, "model": route_model or ""}
     except Exception as e:
@@ -1927,64 +2003,136 @@ def _register_default_handlers():
             return {"content": f"// Error: {e}", "language": "text"}
 
     async def code_edit(params: dict, ws) -> dict:
+        """Propose a change to one file, for the user to review as a diff.
+
+        Runs through the shared chat pipeline with a code persona and a
+        read-only tool subset, so the editor can look at the rest of the
+        project before answering instead of guessing at it — the same
+        capability chat has.
+
+        It cannot write. The Code page's whole safety property is that a change
+        is shown as a diff and applied by the user, so the tools below are
+        read-only on purpose: write_file here would quietly retire that review
+        step.
+        """
         from backend.code.diff_engine import generate_diff
         wp = params.get("workspaceId", "")
-        instruction = params.get("instruction", "")
-        # Generate a diff from the instruction using LLM
+        fp = params.get("filePath", "")
+        instruction = (params.get("instruction") or "").strip()
+
+        if not instruction:
+            return {"diffs": [], "status": "error",
+                    "message": "Describe the change you want first."}
+        if not fp or not wp:
+            return {"diffs": [], "status": "error",
+                    "message": "Open a file in the workspace first."}
+
+        original = ""
+        from backend.code import OutsideWorkspace, resolve_in_workspace
         try:
-            from backend.providers.registry import get_provider
-            provider = get_provider()
-            # Read the target file if specified
-            fp = params.get("filePath", "")
-            original = ""
-            if fp and wp:
-                from backend.code import (OutsideWorkspace,
-                                          resolve_in_workspace)
-                try:
-                    full = resolve_in_workspace(wp, fp)
-                except OutsideWorkspace as e:
-                    return {"diffs": [], "status": "refused",
-                            "message": str(e)}
-                if full.is_file():
-                    original = full.read_text(encoding='utf-8',
-                                              errors='replace')
-            prompt = f"Given this instruction: '{instruction}'\n\n"
-            if original:
-                prompt += f"And this original code:\n```\n{original[:3000]}\n```\n\n"
-            prompt += "Return ONLY the complete modified code. No explanations."
-            # Working guidelines apply to code generation too. The strict
-            # output contract still comes last, and the reply is parsed
-            # tolerantly below, so a chatty model cannot corrupt the diff.
-            try:
-                from backend.guidelines import inject as guidelines
-                gblock = guidelines.system_block(code_task=True)
-                if gblock:
-                    prompt = f"{gblock}\n\n{prompt}"
-            except Exception as e:
-                log.debug("code.edit guideline injection failed: %s", e)
-            # Editing code is the canonical reasoning-role task.
-            try:
-                from backend.providers import router
-                _role, _model = router.pick(
-                    getattr(provider, "provider_id", "unknown"),
-                    instruction, force_role="reasoning")
-            except Exception:
-                _model = None
-            result = await provider.chat(
-                [{"role": "user", "content": prompt}],
-                model=_model, max_tokens=4000, temperature=0.3)
-            if result.ok and original:
-                modified = _extract_code(result.response)
-                if modified:
-                    diff = generate_diff(original, modified, fp)
-                    _pending_edits[f"{wp}::{fp}"] = modified
-                    return {"diffs": [diff], "status": "pending",
-                            "editId": f"{wp}::{fp}",
-                            "message": "Edit ready for review. Approve with code.apply."}
-        except Exception:
-            pass
-        return {"diffs": [{"instruction": instruction, "status": "pending",
-                "message": "Edit ready for review. Apply to see changes."}]}
+            full = resolve_in_workspace(wp, fp)
+        except OutsideWorkspace as e:
+            return {"diffs": [], "status": "refused", "message": str(e)}
+        if not full.is_file():
+            return {"diffs": [], "status": "error",
+                    "message": f"{fp} does not exist yet — save it first."}
+        try:
+            original = full.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return {"diffs": [], "status": "error",
+                    "message": f"Could not read {fp}: {e}"}
+
+        if not original.strip():
+            return {"diffs": [], "status": "error",
+                    "message": f"{fp} is empty — write the first version by hand, "
+                               "then ask for changes."}
+
+        # The model rewrites the file whole, so it has to fit in one reply with
+        # room to think. This used to send the first 3000 characters and diff
+        # the answer against the *whole* file, which meant a long file came back
+        # as "everything after 3000 characters was deleted".
+        if len(original) > _CODE_EDIT_MAX_CHARS:
+            return {"diffs": [], "status": "too_large",
+                    "message": (f"{fp} is {len(original):,} characters. The editor "
+                                f"rewrites a whole file at a time and stops at "
+                                f"{_CODE_EDIT_MAX_CHARS:,} — above that a partial "
+                                f"reply would be read as a deletion. Split the "
+                                f"file, or make this change by hand.")}
+
+        # Working guidelines apply to code generation too.
+        guidelines_block = ""
+        try:
+            from backend.guidelines import inject as guidelines
+            guidelines_block = guidelines.system_block(code_task=True) or ""
+        except Exception as e:
+            log.debug("code.edit guideline injection failed: %s", e)
+
+        persona = (
+            "You are the code editor inside Addled. You are given one file from "
+            "the user's project and an instruction for changing it.\n\n"
+            "You have read-only tools for that project. Use them when the change "
+            "depends on anything you have not seen — how a helper is defined, "
+            "what a module exports, which convention the neighbours follow. "
+            "Reading beats assuming.\n\n"
+            "You cannot write files. Your answer is a proposal that the user "
+            "reviews as a diff, so never say a change has been made."
+        )
+        if guidelines_block:
+            persona = f"{persona}\n\n{guidelines_block}"
+
+        # Said last, in the same turn as the file, because this decides whether
+        # the reply can be parsed at all.
+        contract = (
+            "Reply with the complete modified file and nothing else — no "
+            "explanation, no summary, no questions, no diff syntax, no notes "
+            "about what you changed. Every line of the file must be there, "
+            "including the lines you did not touch."
+        )
+        message = (f"{instruction}\n\n"
+                   f"File: {fp}\n```\n{original}\n```\n\n{contract}")
+
+        try:
+            # The inner pipeline, not run_chat_pipeline: the outer function turns
+            # an empty reply into "I couldn't process that request.", which is
+            # right for a chat bubble and wrong here — it would be read as the
+            # new contents of the file. This has to be able to see "the model
+            # said nothing" as nothing.
+            result = await _run_chat_pipeline_inner(
+                message,
+                persona=persona,
+                tools=list(_CODE_EDIT_TOOLS),
+                # A code edit is a task, not a conversation: it should not
+                # appear in the chat history or be written to memory.
+                record=False,
+                # Editing code is the canonical reasoning-role task.
+                force_role="reasoning",
+                max_tool_rounds=5,
+            )
+        except Exception as e:
+            log.exception("code.edit pipeline failed")
+            return {"diffs": [], "status": "error",
+                    "message": f"The edit failed: {e}"}
+
+        text = (result or {}).get("response", "") or ""
+        if not text or text.startswith(("[Not connected:", "[Provider:")):
+            return {"diffs": [], "status": "error",
+                    "message": text or "The model returned nothing."}
+
+        modified = _extract_code(text)
+        if not modified:
+            return {"diffs": [], "status": "error",
+                    "message": "The model returned no code to apply."}
+        if modified.strip() == original.strip():
+            return {"diffs": [], "status": "unchanged",
+                    "message": "The model returned the file unchanged."}
+
+        diff = generate_diff(original, modified, fp)
+        # Held until the user approves it with code.apply.
+        _pending_edits[f"{wp}::{fp}"] = modified
+        return {"diffs": [diff], "status": "pending",
+                "editId": f"{wp}::{fp}",
+                "toolCalls": (result or {}).get("toolResults", 0),
+                "message": "Edit ready for review. Approve with code.apply."}
 
     async def code_apply(params: dict, ws) -> dict:
         """Apply a reviewed code edit. Requires explicit content OR a pending

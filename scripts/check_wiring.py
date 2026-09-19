@@ -11,6 +11,12 @@ Two kinds of check:
   Instead each module is checked for the routing call plus the invariant that
   every ``provider.chat(`` in it is routed.
 
+Swarm agents are the exception in both directions: they no longer call the
+provider at all. An agent's task goes through ``run_chat_pipeline``, which is
+what gives it the tools chat has, so the routing assertion has to follow the
+role into that call rather than look for a ``for_provider`` beside a
+``provider.chat`` that is no longer there.
+
 Run from the project root:
     .\\python-bundle\\python.exe -s .\\scripts\\check_wiring.py
 """
@@ -33,7 +39,6 @@ STRUCTURAL = {
     "backend/memory/knowledge_graph.py": "utility",
     "backend/memory/journal.py": "utility",
     "backend/skills/forge.py": "reasoning",
-    "backend/swarm/orchestrator.py": "reasoning",
     "backend/goals/planner.py": "reasoning",
     "backend/wiki/ingest.py": "reasoning",
 }
@@ -87,21 +92,56 @@ async def behavioural():
           str(_models(swarm_provider)))
 
 
+def _read(relative: str) -> str:
+    path = os.path.join(ROOT, relative.replace("/", os.sep))
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _code_only(source: str) -> str:
+    """Source with docstrings and comments removed.
+
+    The counter below looks for ``provider.chat(``. Without this, a module that
+    *describes* a call it no longer makes — "this used to call provider.chat()
+    directly" — reads as an unrouted call site, and the fix looks like a bug.
+    """
+    source = re.sub(r'"""(?:.|\n)*?"""', "", source)
+    source = re.sub(r"'''(?:.|\n)*?'''", "", source)
+    return re.sub(r"#[^\n]*", "", source)
+
+
 def structural():
     for relative, role in STRUCTURAL.items():
-        path = os.path.join(ROOT, relative.replace("/", os.sep))
         try:
-            with open(path, "r", encoding="utf-8") as handle:
-                source = handle.read()
+            source = _read(relative)
         except OSError as e:
             check(f"{relative} readable", False, str(e))
             continue
-        calls = len(re.findall(r"provider\.chat\(", source))
+        code = _code_only(source)
+        calls = len(re.findall(r"provider\.chat\(", code))
         routed = len(re.findall(
-            r'for_provider\(provider,\s*"%s"\)' % role, source))
+            r'for_provider\(provider,\s*"%s"\)' % role, code))
         check(f"{relative} routes its chat calls ({role})",
               calls > 0 and calls == routed,
               f"{calls} provider.chat call(s), {routed} routed")
+
+    # The swarm went the other way: it used to call the provider with a
+    # reasoning-role model, and now it hands the task to the shared pipeline
+    # with that role forced, so the role still has to be asserted somewhere.
+    try:
+        swarm_code = _code_only(_read("backend/swarm/orchestrator.py"))
+    except OSError as e:
+        check("backend/swarm/orchestrator.py readable", False, str(e))
+        return
+    check("swarm agents route through the shared pipeline",
+          "run_chat_pipeline(" in swarm_code,
+          "the swarm no longer uses the pipeline, so it lost its tools")
+    check("and force the reasoning role rather than guessing it",
+          'force_role="reasoning"' in swarm_code,
+          "no reasoning role on the pipeline call")
+    check("an agent no longer calls the provider itself",
+          "provider.chat(" not in swarm_code,
+          "a direct provider call came back")
 
 
 def contract():

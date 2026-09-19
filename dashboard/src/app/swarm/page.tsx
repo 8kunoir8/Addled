@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useWS } from '@/lib/useWS';
 
-interface Agent { id:string; name:string; emoji:string; type:string; status:'offline'|'ready'|'running'|'error'; currentTask?:string; tools:string[]; }
+interface Agent { id:string; name:string; emoji:string; type:string; status:'offline'|'ready'|'running'|'error'; currentTask?:string; tools:string[]|null; allTools?:boolean; }
 
 const EMOJI_MAP: Record<string, string> = {
   coder: '👨‍💻', writer: '✍️', analyst: '📊', planner: '🎯',
@@ -38,7 +38,10 @@ export default function SwarmPage() {
           type: a.type as string,
           status: (a.status as Agent['status']) || 'ready',
           currentTask: a.currentTask as string | undefined,
-          tools: (a.tools as string[]) || ['all'],
+          // null from the backend means every enabled skill. It used to read
+          // "chat", which looked like a tool and was not one.
+          tools: (a.tools as string[]) || null,
+          allTools: (a.allTools as boolean) ?? !a.tools,
         })));
       }
       setError('');
@@ -117,7 +120,11 @@ export default function SwarmPage() {
                 <span className={`w-2 h-2 rounded-full ${STATUS_DOT[agent.status]}`}/>
               </div>
               {agent.currentTask&&<p className="text-xs text-[#8b949e] mb-2">📋 {agent.currentTask}</p>}
-              <div className="flex flex-wrap gap-1 mb-3">{agent.tools.map(t=><span key={t} className="text-[10px] px-1.5 py-0.5 bg-[#21262d] rounded text-[#8b949e]">{t}</span>)}</div>
+              <div className="flex flex-wrap gap-1 mb-3">
+                {agent.allTools
+                  ? <span className="text-[10px] px-1.5 py-0.5 bg-[#1f2d3d] rounded text-[#79b8ff]" title="Every enabled skill">all skills &amp; tools</span>
+                  : (agent.tools||[]).map(t=><span key={t} className="text-[10px] px-1.5 py-0.5 bg-[#21262d] rounded text-[#8b949e]">{t}</span>)}
+              </div>
               {results[agent.id]&&(
                 <p className={`text-xs mb-2 whitespace-pre-wrap break-words max-h-32 overflow-y-auto ${results[agent.id].ok?'text-[#e8eaed]':'text-[#f85149]'}`}>{results[agent.id].text.slice(0,800)}</p>
               )}
