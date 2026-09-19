@@ -156,7 +156,10 @@ async def run():
     await tool_loop.chat_with_tools(
         provider=prompt_provider, messages=[{"role": "user", "content": "hi"}],
         tools=["read_file"])
-    sent = prompt_provider.payloads[0][-1]["content"]
+    # The catalogue is its own message before the question now, so the payload is
+    # searched as a whole rather than only its last message.
+    sent = "\n".join(str(m.get("content") or "")
+                     for m in prompt_provider.payloads[0])
     check("a prompt-tools provider gets the filtered catalogue in its prompt",
           "read_file(" in sent, sent[-400:])
     check("and no skill outside the subset is offered to it",
@@ -242,7 +245,8 @@ async def run():
     check("the default path still answers",
           result.get("response") == "a plain answer", str(result)[:200])
     check("and is offered every enabled skill",
-          "read_file(" in fake.payloads[0][-1]["content"],
+          any("read_file(" in str(m.get("content") or "")
+              for m in fake.payloads[0]),
           "the chat path lost its tools")
     check("record=False keeps the turn out of the chat history",
           result.get("conversationId") is None, str(result)[:200])

@@ -405,19 +405,30 @@ async def _call_prompt_tools(provider, messages: list[dict],
                              model: str | None = None,
                              only: set[str] | None = None,
                              reply_directive: str = "") -> dict:
-    """For providers without native tool support: inject tools into prompt."""
+    """For providers without native tool support: give it the catalogue first.
+
+    The catalogue is its own message immediately before the user's, rather than
+    appended to it. Glued on, a twenty-character question became ~6,600
+    characters of English tool instructions with the question buried at the top,
+    and the model then treated its own previous answer as the thing to continue:
+    asked "cukup untuk sekarang" right after a 42-item list, it wrote the list
+    out again (three samples: 516, 564 and 1920 characters, up to 32 items
+    repeated). Separated, the same turn answers in ~200 characters and repeats
+    nothing. The question is also what the model reads last again, which is where
+    a small model looks to find out what it was asked.
+    """
     tools_text = skill_registry.to_prompt_tools(only)
 
-    # Inject tools into the last user message or system message
     modified_messages = list(messages)
     if modified_messages and modified_messages[-1]["role"] == "user":
-        modified_messages[-1] = {
-            "role": "user",
-            "content": modified_messages[-1]["content"] + tools_text,
-        }
+        question = modified_messages.pop()
+        if tools_text:
+            modified_messages.append({"role": "user", "content": tools_text})
+        modified_messages.append(question)
     # After the catalogue, not before it: the catalogue is the bulk of what the
     # model reads before answering, so a language rule placed earlier is what it
-    # overrides (see backend/language.py).
+    # overrides (see backend/language.py). It rides the last message, which is
+    # the user's question again.
     modified_messages = _with_directive(modified_messages, reply_directive)
 
     # Everything above plus the catalogue has to fit the provider's window.

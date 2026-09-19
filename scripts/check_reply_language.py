@@ -2,9 +2,14 @@
 
 Asked in Indonesian, Addled answered in English. The rule existed — it was one
 sentence in the system prompt — and it lost to placement: `_call_prompt_tools`
-appends the tool catalogue to the user's *last* message, and that catalogue is
-thousands of tokens of English tool documentation. So the final thing the model
-read before generating was English, and it answered in English.
+puts thousands of tokens of English tool documentation between the rule and the
+answer. So the final thing the model read before generating was English, and it
+answered in English.
+
+The catalogue now travels in its own message with the user's question after it
+(glued on, a follow-up made the model re-answer its previous turn — see the note
+in tool_loop.py), so the directive sits at the end of the question, after the
+catalogue.
 
 The failure was intermittent, which is why it is worth a suite rather than a fix:
 "halo, apa kabar? kamu bisa bantu aku apa aja ya?" came back in Indonesian while
@@ -14,8 +19,9 @@ ada ?" — a longer answer, more influenced by the catalogue — came back in En
 What is asserted:
   1. the reply language is detected for the languages this app answers in, and
      left unstated (None) rather than guessed when it is not clear;
-  2. the directive is appended **after** the catalogue, which is the whole fix —
-     a test that only checks presence would pass with the old placement;
+  2. the directive rides the message the model reads last and the catalogue is
+     the message before it — a test that only checks presence would pass with
+     the old placement, where both were buried behind the catalogue;
   3. English gets no directive, because the local model has 8192 tokens and a
      no-op instruction spends them;
   4. the directive is not stacked once per tool round, since `full_messages` is
@@ -135,20 +141,28 @@ async def main() -> int:
     check("an undetectable message still states the rule",
           "same language" in unknown, unknown[:120])
 
-    # ---- 3. placement: after the catalogue, in the last user message ----
+    # ---- 3. placement: the catalogue in its own message, the directive last ----
     provider = FakeProvider()
     labelled = [{"role": "user", "content": INDONESIAN}]
     await tool_loop._call_prompt_tools(provider, labelled,
                                        only={"read_file"},
                                        reply_directive=id_directive)
-    sent = last_user_content(provider.payloads[-1])
-    check("the catalogue is appended to the user's own message",
-          "read_file(" in sent, "the mechanism under test is gone")
-    check("the directive is in that message too",
+    payload = provider.payloads[-1]
+    sent = last_user_content(payload)
+    check("the catalogue no longer shares the user's message",
+          "read_file(" not in sent,
+          "the catalogue is glued to the question again")
+    check("it is the message immediately before the question",
+          len(payload) >= 2
+          and "read_file(" in str(payload[-2].get("content") or ""),
+          str([m.get("role") for m in payload]))
+    check("so the question is what the model reads last",
+          sent.startswith(INDONESIAN), sent[:80])
+    check("with the directive at the end of it, after the catalogue",
           id_directive in sent, sent[-200:])
-    check("and comes AFTER the catalogue",
-          sent.index(id_directive) > sent.index("read_file("),
-          "the directive precedes the catalogue, which is the bug")
+    check("and the caller's message list is left alone",
+          labelled[0]["content"] == INDONESIAN and len(labelled) == 1,
+          "the question was rewritten in place")
 
     # ---- 4. no stacking across rounds ----------------------------------
     reused = [{"role": "user", "content": INDONESIAN}]
@@ -192,9 +206,12 @@ async def main() -> int:
         turn = last_user_content(payload)
         check("the pipeline sends the Indonesian directive",
               "Indonesian" in turn, turn[-200:])
-        check("after the catalogue it sends with every turn",
-              "read_file(" in turn
-              and turn.index("Indonesian") > turn.index("read_file("),
+        check("on the question, which is the last thing sent",
+              turn.startswith(INDONESIAN) and "read_file(" not in turn,
+              turn[:200])
+        check("with the catalogue in the message before it",
+              len(payload) >= 2
+              and "read_file(" in str(payload[-2].get("content") or ""),
               "the directive is not last in the turn being answered")
 
         live_en = FakeProvider()
