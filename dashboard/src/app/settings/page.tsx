@@ -342,7 +342,17 @@ function McpSection({settings,update,saving,status}: any){
         const v=(creds[key]||'').trim(); if(v)env[key]=v;
       }
       for(const key of (c?.requires_headers||[])){
-        const v=(creds[key]||'').trim(); if(v)headers[key]=v;
+        const raw=(creds[key]||'').trim();
+        if(!raw) continue;
+        // The registry declares what the value looks like — Smithery's is
+        // "Bearer {smithery_api_key}" — and the scheme is part of it. A key
+        // pasted without it fails with a 401 that explains nothing, so a bare
+        // token is wrapped in the declared scheme. Anything with a space is
+        // taken as deliberate and left alone.
+        const hint=String((c?.header_hints||{})[key]||'');
+        const scheme=hint.includes(' ')?hint.split(' ')[0]:'';
+        headers[key]=(scheme && /^[A-Za-z]+$/.test(scheme) && !raw.includes(' '))
+          ? `${scheme} ${raw}` : raw;
       }
       const out=await send('mcp.install',{name,args:args||'',env,headers});
       if(out?.status)setLive(out.status); else await load();
@@ -492,12 +502,13 @@ function McpSection({settings,update,saving,status}: any){
               <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[#d29922]" title={v}>{v}</span>
               <input type="password" autoComplete="off" value={creds[v]||''}
                 onChange={e=>setCreds({...creds,[v]:e.target.value})}
-                placeholder={(c.requires_headers||[]).includes(v)?'value for this header':'value for this variable'}
+                placeholder={String((c.header_hints||{})[v]||((c.requires_headers||[]).includes(v)?'value for this header':'value for this variable'))}
                 className={`${inp} flex-1`}/>
             </div>)}
             <p className="text-[10px] text-[#8b949e]">
               Kept by name, so the next server wanting one of these reuses it — including when the
               agent finds and adds a server on its own. Values are never read back out.
+              {Object.keys(c.header_hints||{}).length>0&&' The placeholder is what the registry expects, scheme included.'}
             </p>
           </div>}
           {(c.blocked_kinds||[]).includes('runtime')&&String(c.command||'')==='uvx'&&

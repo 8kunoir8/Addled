@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import time
 import urllib.parse
 import urllib.request
 
@@ -70,10 +71,19 @@ def _pick_remote(entry: dict) -> dict | None:
         url = _clean_url(remote.get("url"))
         if not url:
             continue
-        headers = [str(h.get("name") or "").strip()
-                   for h in (remote.get("headers") or [])
-                   if isinstance(h, dict) and h.get("name")]
-        return {"url": url, "requires_headers": [h for h in headers if h]}
+        declared = [h for h in (remote.get("headers") or [])
+                    if isinstance(h, dict) and h.get("name")]
+        # The value is usually a template — Smithery publishes
+        # "Bearer {smithery_api_key}" — and it is the only thing that says what
+        # shape the credential has. Without it the field accepts a bare key and
+        # the connection fails with a 401 nobody can explain.
+        hints = {str(h.get("name")).strip():
+                 str(h.get("value") or h.get("description") or "").strip()
+                 for h in declared}
+        return {"url": url,
+                "requires_headers": [str(h.get("name")).strip()
+                                     for h in declared],
+                "header_hints": hints}
     return None
 
 
@@ -165,6 +175,7 @@ def normalise(raw: dict) -> dict | None:
         "url": "",
         "requires_env": [],
         "requires_headers": [],
+        "header_hints": {},
         "runnable": False,
         "blocked_reason": "",
         "blocked_kinds": [],
@@ -201,6 +212,7 @@ def normalise(raw: dict) -> dict | None:
             "transport": "http",
             "url": remote["url"],
             "requires_headers": remote["requires_headers"],
+            "header_hints": remote.get("header_hints") or {},
             "runtime": "remote",
         })
     else:
@@ -253,14 +265,34 @@ def _version_key(version: str) -> tuple:
 
 
 def _fetch(query: str, limit: int) -> list[dict]:
+    """Registry entries for a query, with one retry.
+
+    Its search endpoint is slow and does time out. A single retry costs nothing
+    a user notices and keeps the whole source out of the bin — dropping it
+    silently is what made a search look like it contained nothing but
+    Smithery-hosted servers, and took away the endpoints some of those entries
+    need (see the adoption in `search`).
+    """
     url = (f"{REGISTRY_URL}?search={urllib.parse.quote(query)}"
            f"&limit={max(1, min(50, limit))}")
     request = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        import json
+    last: Exception | None = None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                import json
 
-        payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    return payload.get("servers") or []
+                payload = json.loads(response.read().decode("utf-8",
+                                                            errors="replace"))
+            return payload.get("servers") or []
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if attempt == 0:
+                time.sleep(0.8)
+    # Warning rather than debug: a source that failed changes what the user sees,
+    # and "why is every result blocked" is otherwise unanswerable from the log.
+    log.warning("The MCP registry did not answer for %r: %s", query, last)
+    raise last
 
 
 def _registry_candidates(query: str, limit: int) -> list[dict]:
@@ -361,6 +393,7 @@ def _smithery_normalise(item: dict) -> dict | None:
         "url": "",
         "requires_env": sorted(required_env),
         "requires_headers": [],
+        "header_hints": {},
         "runtime": command,
         "verified": bool(item.get("verified")),
         "uses": int(item.get("useCount") or 0),
@@ -401,6 +434,33 @@ async def search(query: str, limit: int = 12,
             # First source listed wins a name clash, so the official registry
             # stays authoritative when both carry the same server.
             merged.setdefault(candidate["name"], candidate)
+
+    # A hosted Smithery listing says only that much: their registry marks a
+    # server remote without publishing where to reach it, so it read as
+    # "hosted by Smithery; needs their API key" with no way to act on the key.
+    # The official registry publishes the endpoint for the same server under
+    # `ai.smithery/<owner>-<slug>`, so when both sources carry it the published
+    # endpoint is adopted and the entry becomes an ordinary HTTP server that
+    # wants an Authorization header.
+    official = {c["name"]: c for c in merged.values()
+                if c.get("source") == "registry"}
+    for name, candidate in merged.items():
+        if candidate.get("blocked_kinds") != ["hosted"]:
+            continue
+        twin = official.get(f"ai.smithery/{name.replace('/', '-')}")
+        if not twin or twin.get("transport") != "http" or not twin.get("url"):
+            continue
+        candidate.update({
+            "transport": "http",
+            "url": twin["url"],
+            "requires_headers": list(twin.get("requires_headers") or []),
+            "header_hints": dict(twin.get("header_hints") or {}),
+            "runtime": "remote",
+            "endpoint_from": twin["name"],
+        })
+        candidate.pop("blocked_hint", None)
+        _finish(candidate)
+
     return list(merged.values())
 
 

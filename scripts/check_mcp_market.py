@@ -32,6 +32,33 @@ def check(name: str, ok: bool, detail: object = "") -> None:
         FAILS.append(name)
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def temp_settings():
+    """Point the settings singleton at a temporary file.
+
+    Credentials are stored through `config.set`, and this machine's settings.json
+    is real: a suite must not write a fake key into it.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import backend.config as config_mod
+
+    original_path = config_mod.SETTINGS_PATH
+    original_data = config_mod.config._data
+    config_mod.SETTINGS_PATH = Path(tempfile.mkdtemp()) / "settings.json"
+    config_mod.config._data = dict(config_mod.DEFAULT_SETTINGS)
+    config_mod.config._dirty = False
+    try:
+        yield config_mod
+    finally:
+        config_mod.SETTINGS_PATH = original_path
+        config_mod.config._data = original_data
+
+
 def npm_entry(name: str = "acme/thing", version: str = "1.2.3",
               env: list | None = None) -> dict:
     package = {
@@ -469,14 +496,7 @@ def credential_checks(market) -> None:
     import backend.config as config_mod
     from backend.mcp_client import credentials
 
-    # The settings file is real on this machine and a suite must not write a
-    # fake key into it. Point the singleton at a temporary file instead.
-    original_path = config_mod.SETTINGS_PATH
-    original_data = config_mod.config._data
-    config_mod.SETTINGS_PATH = Path(tempfile.mkdtemp()) / "settings.json"
-    config_mod.config._data = dict(config_mod.DEFAULT_SETTINGS)
-    config_mod.config._dirty = False
-    try:
+    with temp_settings():
         entry = {
             "name": "acme/keyed", "title": "Keyed", "version": "1.0.0",
             "packages": [{
@@ -551,26 +571,10 @@ def credential_checks(market) -> None:
         credentials.save({"ACME_API_KEY": ""})
         check("an empty value clears the stored one",
               credentials.known()["env"] == [], str(credentials.known()))
-    finally:
-        config_mod.SETTINGS_PATH = original_path
-        config_mod.config._data = original_data
 
 
 async def keyed_install_checks(market) -> None:
     """install() accepts the values and judges the entry against them."""
-    import tempfile
-    from pathlib import Path
-
-    import backend.config as config_mod
-
-    # Same reason as above: a suite must not write a fake key into the real
-    # settings file of the machine it runs on.
-    original_path = config_mod.SETTINGS_PATH
-    original_data = config_mod.config._data
-    config_mod.SETTINGS_PATH = Path(tempfile.mkdtemp()) / "settings.json"
-    config_mod.config._data = dict(config_mod.DEFAULT_SETTINGS)
-    config_mod.config._dirty = False
-
     specs: list[dict] = []
 
     class RecordingManager:
@@ -584,36 +588,33 @@ async def keyed_install_checks(market) -> None:
         def status(self):
             return {"servers": []}
 
-    try:
-        with mock.patch.object(market, "_runtime_available", lambda l: True), \
-             mock.patch.object(market, "search",
-                               lambda *a, **k: _keyed_candidates()), \
-             mock.patch("backend.mcp_client.manager.mcp_manager",
-                        RecordingManager()):
-            refused = await market.install("acme/keyed")
-            check("without a value, install refuses and says why",
-                  refused.get("success") is False
-                  and "ACME_API_KEY" in str(refused.get("error")),
-                  str(refused)[:200])
-            check("and nothing was added", specs == [], str(specs)[:120])
+    with temp_settings(), \
+         mock.patch.object(market, "_runtime_available", lambda l: True), \
+         mock.patch.object(market, "search",
+                           lambda *a, **k: _keyed_candidates()), \
+         mock.patch("backend.mcp_client.manager.mcp_manager",
+                    RecordingManager()):
+        refused = await market.install("acme/keyed")
+        check("without a value, install refuses and says why",
+              refused.get("success") is False
+              and "ACME_API_KEY" in str(refused.get("error")),
+              str(refused)[:200])
+        check("and nothing was added", specs == [], str(specs)[:120])
 
-            out = await market.install("acme/keyed",
-                                       env={"ACME_API_KEY": "given-now"})
-            check("with one supplied, install proceeds",
-                  out.get("success") is True, str(out)[:200])
-            check("and the value reaches the server it was given for",
-                  bool(specs)
-                  and specs[-1].get("env", {}).get("ACME_API_KEY") == "given-now",
-                  str(specs[-1].get("env")) if specs else "nothing added")
+        out = await market.install("acme/keyed",
+                                   env={"ACME_API_KEY": "given-now"})
+        check("with one supplied, install proceeds",
+              out.get("success") is True, str(out)[:200])
+        check("and the value reaches the server it was given for",
+              bool(specs)
+              and specs[-1].get("env", {}).get("ACME_API_KEY") == "given-now",
+              str(specs[-1].get("env")) if specs else "nothing added")
 
-            # The whole point of storing it: the next pass — the agent's own —
-            # finds the entry addable without being handed the value again.
-            again = await market.install("acme/keyed")
-            check("and a later pass needs no value at all",
-                  again.get("success") is True, str(again)[:200])
-    finally:
-        config_mod.SETTINGS_PATH = original_path
-        config_mod.config._data = original_data
+        # The whole point of storing it: the next pass — the agent's own —
+        # finds the entry addable without being handed the value again.
+        again = await market.install("acme/keyed")
+        check("and a later pass needs no value at all",
+              again.get("success") is True, str(again)[:200])
 
 
 async def _keyed_candidates():
@@ -629,6 +630,85 @@ async def _keyed_candidates():
         }],
     }
     return [market.normalise(entry)]
+
+
+async def smithery_endpoint_checks(market) -> None:
+    """A hosted Smithery listing gets the endpoint the registry publishes.
+
+    Smithery's own registry marks a server remote without saying where to reach
+    it, so the entry said "hosted by Smithery; needs their API key" and a key had
+    nowhere to go. The official registry publishes the same server's endpoint,
+    with the header shape — "Bearer {smithery_api_key}" — so the entry becomes an
+    ordinary HTTP server that wants an Authorization value.
+    """
+    from backend.mcp_client import credentials
+
+    twin = market.normalise({
+        "name": "ai.smithery/hasdata-duckduckgo-mcp", "title": "DuckDuckGo",
+        "remotes": [{
+            "type": "streamable-http",
+            "url": "https://server.smithery.ai/@hasdata/duckduckgo-mcp/mcp",
+            "headers": [{"name": "Authorization",
+                         "value": "Bearer {smithery_api_key}",
+                         "description": "Bearer token for Smithery authentication"}],
+        }],
+    })
+    check("the published header shape is kept",
+          twin["header_hints"].get("Authorization") == "Bearer {smithery_api_key}",
+          str(twin.get("header_hints")))
+
+    hosted = market._smithery_normalise({
+        "qualifiedName": "hasdata/duckduckgo-mcp", "displayName": "DuckDuckGo MCP",
+        "description": "no config block in this listing", "remote": True,
+    })
+    check("a hosted listing on its own is blocked with no endpoint",
+          hosted["blocked_kinds"] == ["hosted"] and not hosted["url"],
+          str(hosted.get("blocked_kinds")))
+
+    with mock.patch.object(market, "_registry_candidates", lambda q, l: [twin]), \
+         mock.patch.object(market, "_smithery_candidates", lambda q, l: [hosted]):
+        hits = await market.search("duckduckgo")
+    merged = next((c for c in hits if c["name"] == "hasdata/duckduckgo-mcp"), None)
+    check("the hosted entry adopts the published endpoint",
+          merged and merged["transport"] == "http"
+          and merged["url"].endswith("/mcp"),
+          str(merged)[:220] if merged else "entry missing")
+    check("and now asks for an Authorization value rather than being hosted",
+          merged and merged["blocked_kinds"] == ["headers"]
+          and "hosted" not in merged["blocked_reason"],
+          str(merged.get("blocked_reason")) if merged else "entry missing")
+    check("with the shape to type",
+          merged and merged["header_hints"].get("Authorization")
+          == "Bearer {smithery_api_key}",
+          str(merged.get("header_hints")) if merged else "entry missing")
+    check("and it says which entry the endpoint came from",
+          merged and merged.get("endpoint_from")
+          == "ai.smithery/hasdata-duckduckgo-mcp",
+          str(merged.get("endpoint_from")) if merged else "entry missing")
+
+    # With the key stored, it is addable — the whole point of the feature.
+    with temp_settings():
+        credentials.save(None, {"Authorization": "Bearer sk-test"})
+        check("and storing the key makes it addable",
+              market._finish(dict(merged or {}))["runnable"] is True,
+              str((merged or {}).get("blocked_reason")))
+        spec = market.to_spec(merged)
+        check("with the key in the spec's headers",
+              spec["headers"].get("Authorization") == "Bearer sk-test",
+              str(spec.get("headers")))
+
+    # A listing with no twin in the official registry stays honestly blocked.
+    lonely = market._smithery_normalise({
+        "qualifiedName": "nobody/private-server", "remote": True,
+        "description": "",
+    })
+    with mock.patch.object(market, "_registry_candidates", lambda q, l: [twin]), \
+         mock.patch.object(market, "_smithery_candidates", lambda q, l: [lonely]):
+        hits = await market.search("privatethatdoesnotexist")
+    kept = next((c for c in hits if c["name"] == "nobody/private-server"), None)
+    check("a hosted entry with no published endpoint stays blocked",
+          kept and kept["blocked_kinds"] == ["hosted"],
+          str(kept.get("blocked_kinds")) if kept else "entry missing")
 
 
 def main() -> int:
@@ -647,6 +727,7 @@ def main() -> int:
     smithery_checks(market)
     credential_checks(market)
     asyncio.run(keyed_install_checks(market))
+    asyncio.run(smithery_endpoint_checks(market))
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")
