@@ -70,18 +70,21 @@ DEFAULT_SETTINGS: dict = {
                 "name": "DeepSeek",
                 "base_url": "https://api.deepseek.com",
                 "api_key": "",
-                "default_model": "deepseek-v4-pro",
+                "default_model": "deepseek-flash",
                 # Cheap/fast model for ordinary conversation, the stronger model
                 # for analysis. Empty values fall back to "default_model".
+                # `deepseek-v4-flash` and `deepseek-chat` still answer, but the
+                # API resolves both to `deepseek-flash`, so the canonical id is
+                # used here and the aliases are not offered.
                 "roles": {
-                    "chat": "deepseek-v4-flash",
+                    "chat": "deepseek-flash",
                     "reasoning": "deepseek-v4-pro",
                     "vision": "",
                     # Non-thinking model: these jobs cap output at 200-400 tokens
                     # and a reasoning model wastes part of that budget thinking.
-                    "utility": "deepseek-chat",
+                    "utility": "deepseek-flash",
                 },
-                "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"],
+                "models": ["deepseek-flash", "deepseek-v4-pro"],
                 "vision": True,
                 "vision_mode": "local",
                 "vision_model": "microsoft/Florence-2-base",
