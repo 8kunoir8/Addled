@@ -570,7 +570,10 @@ async def _run_chat_pipeline_inner(
                        "we...', 'you mentioned before that...'). Do not force "
                        "it when nothing fits.")
 
-        # Language mirroring: answer in the user's language
+        # Language mirroring. This line is the general statement; the binding one
+        # is `reply_directive` below, which lands *after* the tool catalogue in
+        # the turn being answered. Kept because a cloud model honours it and it
+        # costs a line.
         sys_prompt += ("\n\nAlways reply in the same language the user "
                        "writes or speaks in.")
 
@@ -814,6 +817,18 @@ async def _run_chat_pipeline_inner(
         except Exception as e:
             log.debug("Model routing failed, using provider default: %s", e)
 
+        # The reply language, stated where it is read last. Everything above is
+        # English, and the tool catalogue that follows is thousands of tokens of
+        # it appended to the user's own message — which is what a small model
+        # answers in. Asked in Indonesian, Addled replied in English.
+        # See backend/language.py.
+        try:
+            from backend.language import reply_directive
+            reply_lang = reply_directive(message)
+        except Exception as e:
+            log.debug("reply-language detection failed: %s", e)
+            reply_lang = ""
+
         # Use the provider-agnostic tool-use loop
         result = await chat_with_tools(
             provider=provider,
@@ -823,6 +838,7 @@ async def _run_chat_pipeline_inner(
                              or params.get("maxToolRounds", 5)),
             model=route_model,
             tools=tools,
+            reply_directive=reply_lang,
         )
 
         response_text = result.get("response", "")

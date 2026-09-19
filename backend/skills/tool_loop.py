@@ -137,6 +137,7 @@ async def chat_with_tools(
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
     model: str | None = None,
     tools: list[str] | None = None,
+    reply_directive: str = "",
 ) -> dict:
     """
     Run a chat completion with automatic tool execution.
@@ -155,6 +156,12 @@ async def chat_with_tools(
     bots all use. A list is for a caller that wants a defined subset — it is
     the same catalogue either way, not a second one, so a skill is offered on
     every path unless the caller deliberately restricts it.
+
+    ``reply_directive`` goes last in the turn being answered, after the tool
+    catalogue. That placement is the point: the catalogue is appended to this
+    same message and is thousands of tokens of English, which is enough to make
+    a small model answer in English whatever the system prompt said. See
+    backend/language.py.
     """
     provider_id = getattr(provider, "provider_id", "unknown")
     uses_native = provider_id in NATIVE_TOOL_PROVIDERS
@@ -178,9 +185,11 @@ async def chat_with_tools(
         })
         try:
             if uses_native:
-                final = await _call_native_tools(provider, full_messages, model, only)
+                final = await _call_native_tools(provider, full_messages, model,
+                                                 only, reply_directive)
             else:
-                final = await _call_prompt_tools(provider, full_messages, model, only)
+                final = await _call_prompt_tools(provider, full_messages, model,
+                                                 only, reply_directive)
             final_text = (final.get("response") or "").strip()
             if final_text and not final.get("tool_calls"):
                 return {
@@ -202,9 +211,11 @@ async def chat_with_tools(
         rounds += 1
 
         if uses_native:
-            result = await _call_native_tools(provider, full_messages, model, only)
+            result = await _call_native_tools(provider, full_messages, model,
+                                              only, reply_directive)
         else:
-            result = await _call_prompt_tools(provider, full_messages, model, only)
+            result = await _call_prompt_tools(provider, full_messages, model,
+                                              only, reply_directive)
 
         # No tool call — normal text response
         if not result.get("tool_calls"):
@@ -298,11 +309,34 @@ async def chat_with_tools(
     }
 
 
+def _with_directive(messages: list[dict], directive: str) -> list[dict]:
+    """A copy of `messages` with the reply-language line at the very end.
+
+    Left alone when there is nothing to attach it to, or when the last message is
+    not the user's: inventing a turn to carry an instruction would put words into
+    the conversation that nobody wrote.
+
+    The copy matters as much as the placement — `full_messages` is reused across
+    tool rounds, so appending in place would stack the directive once per round.
+    """
+    if not directive or not messages:
+        return messages
+    last = messages[-1]
+    if last.get("role") != "user":
+        return messages
+    out = list(messages)
+    out[-1] = {**last,
+               "content": (last.get("content") or "") + "\n\n" + directive}
+    return out
+
+
 async def _call_native_tools(provider, messages: list[dict],
                              model: str | None = None,
-                             only: set[str] | None = None) -> dict:
+                             only: set[str] | None = None,
+                             reply_directive: str = "") -> dict:
     """Use native function-calling API (OpenAI/DeepSeek/Gemini)."""
     tools = skill_registry.to_openai_tools(only)
+    messages = _with_directive(messages, reply_directive)
 
     try:
         try:
@@ -315,7 +349,8 @@ async def _call_native_tools(provider, messages: list[dict],
             )
         except TypeError:
             # Provider doesn't accept a tools kwarg → prompt-injected tools
-            return await _call_prompt_tools(provider, messages, model, only)
+            return await _call_prompt_tools(provider, messages, model, only,
+                                            reply_directive)
 
         if not result.ok:
             # Log it. Returning the message only puts it in the chat: a user
@@ -368,7 +403,8 @@ async def _call_native_tools(provider, messages: list[dict],
 
 async def _call_prompt_tools(provider, messages: list[dict],
                              model: str | None = None,
-                             only: set[str] | None = None) -> dict:
+                             only: set[str] | None = None,
+                             reply_directive: str = "") -> dict:
     """For providers without native tool support: inject tools into prompt."""
     tools_text = skill_registry.to_prompt_tools(only)
 
@@ -379,6 +415,10 @@ async def _call_prompt_tools(provider, messages: list[dict],
             "role": "user",
             "content": modified_messages[-1]["content"] + tools_text,
         }
+    # After the catalogue, not before it: the catalogue is the bulk of what the
+    # model reads before answering, so a language rule placed earlier is what it
+    # overrides (see backend/language.py).
+    modified_messages = _with_directive(modified_messages, reply_directive)
 
     # Everything above plus the catalogue has to fit the provider's window.
     # The local model's context is 8192, so an unbudgeted request is rejected

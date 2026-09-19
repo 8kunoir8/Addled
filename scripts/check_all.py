@@ -40,6 +40,7 @@ SUITES = [
     "check_guide.py",
     "check_parity.py",
     "check_chat_scope.py",
+    "check_reply_language.py",
     "check_packaging.py",
     "check_rtk.py",
     "check_secrets.py",
