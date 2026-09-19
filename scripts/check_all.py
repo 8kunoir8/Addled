@@ -41,6 +41,7 @@ SUITES = [
     "check_parity.py",
     "check_packaging.py",
     "check_rtk.py",
+    "check_secrets.py",
 ]
 
 

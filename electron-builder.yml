@@ -34,7 +34,13 @@ extraResources:
   #
   # The patterns below mirror `.gitignore` deliberately. `scripts/check_packaging.py`
   # fails if the two ever drift, so a new kind of data file cannot start
-  # shipping just because it was added to one list and not the other.
+  # shipping just because it was added to one list and not the other. That is
+  # what makes this list safe to keep: `.gitignore` ignores everything under
+  # `backend/memory/` except the code, so any file that appears there must be
+  # excluded here too, and the check says so by name when it is not.
+  #
+  # A blanket `!memory/**` is not possible: electron-builder's filter only
+  # subtracts, and the memory modules are .py files in the same directory.
   - from: backend
     to: backend
     filter:

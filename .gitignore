@@ -4,20 +4,10 @@ python-bundle/
 build_cache/
 .env
 *.log
-backend/memory/*.db
-backend/memory/*.db-shm
-backend/memory/*.db-wal
-backend/memory/*.json
-backend/memory/goals/
-backend/memory/models/
-backend/memory/market_skills/
-backend/memory/forged_skills/
 # Vendored binaries at the repository root (rtk, ripgrep). Anchored: an
 # unanchored `tools/` also matched `backend/tools/`, so a new backend package
 # would have been silently ignored and never committed.
 /tools/
-backend/memory/.vault*
-backend/memory/*.log
 dashboard/.next/
 dashboard/node_modules/
 bots/auth/
@@ -25,44 +15,27 @@ __pycache__/
 *.pyc
 *.spec
 build/
-backend/memory/*.jsonl
 
-backend/memory/skins/
+# ── backend/memory/ ──────────────────────────────────────────────────────────
+# The application's code and this machine's runtime state share one directory,
+# and the state must never be committed: it holds the config (with the provider
+# keys), the conversations, the memory databases, the logs and the egress trail.
+#
+# Naming extensions was a losing game. `*.db`, `*.json`, `*.log` and `*.jsonl`
+# were listed, so anything else dropped in there — a `.txt`, a `.sqlite`, a
+# `.bak` — was committable by `git add -A` and, worse, copied into the installer
+# by `extraResources`, which does not read this file at all. So the whole
+# directory is ignored and the code is named back in.
+backend/memory/*
+!backend/memory/*.py
+!backend/memory/integrations/
 
-
-# Voice models (fetched by scripts/fetch_voice_models.py)
-backend/voice/models/
-
-
-# Scheduler runtime state
-backend/memory/integrations/scheduled_tasks.json
-backend/memory/integrations/scheduler_state.json
-
-# Skill usage telemetry (runtime counters)
-backend/memory/integrations/skill_telemetry.json
-
-# Everything else in integrations/ is this machine's state too (initiative,
-# reflection, ...), while calendar_events.json is the calendar's starting state
-# rather than a record of use. Naming the three files above was not enough: a
-# fourth appeared and the deploy, which derives its exclude list from this
-# file, would have copied it over the installed app's. Kept tracked on purpose.
-backend/memory/integrations/*.json
+# Integrations are per machine too, except the calendar's starting state, which
+# is tracked on purpose.
+backend/memory/integrations/*
 !backend/memory/integrations/calendar_events.json
 
-# Records of use, not repository content
-backend/memory/snapshots/
-backend/memory/projects/
-backend/memory/conversations/
-backend/memory/logs/
-
-# Guideline packs (fetched from upstream by backend/guidelines/store.py)
-backend/memory/guidelines/
-
-# Wiki pages and journal days are the user's own notes, not repository content
-backend/memory/wiki/
-backend/memory/journal/
-
-# Procedures are learned from this machine's own activity, so they differ per
-# user and are not repository content. The built-in seeds live in code.
-backend/memory/sop/
+# Fetched by scripts/fetch_voice_models.py and bundled on purpose: the offline
+# voice needs them present, so this is the one ignored directory that ships.
+backend/voice/models/
 
