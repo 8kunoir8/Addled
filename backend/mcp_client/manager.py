@@ -135,12 +135,22 @@ class McpManager:
     # -- lifecycle --------------------------------------------------------
 
     async def start(self) -> dict:
-        """Connect the servers that are enabled and set to auto-connect."""
+        """Connect the enabled servers at startup.
+
+        The autoconnect setting is about starting the app, not about refusing an
+        explicit request — see `reload`.
+        """
         if not self.enabled():
             return {"skipped": "mcp is disabled"}
         if bool(config.get("mcp", "autoconnect", default=True)) is False:
             return {"skipped": "autoconnect is off"}
         self._started = True
+        return await self._connect_enabled()
+
+    async def _connect_enabled(self) -> dict:
+        """Connect every enabled server, whatever the autoconnect preference."""
+        if not self.enabled():
+            return {"skipped": "mcp is disabled"}
         results = {}
         for spec in self._config_servers():
             if not bool(spec.get("enabled", True)):
@@ -166,8 +176,15 @@ class McpManager:
                 log.debug("MCP '%s' disconnect failed: %s", sid, e)
 
     async def reload(self) -> dict:
+        """Reconnect everything enabled, whatever the autoconnect preference.
+
+        This is an explicit request, so it must not be gated the way `start()`
+        is: with autoconnect off, reload used to reach `start()`, skip, and
+        return — so "Reconnect all" did nothing and reported success.
+        """
         await self.stop()
-        return await self.start()
+        self._started = True
+        return await self._connect_enabled()
 
     async def connect(self, server_id: str) -> dict:
         spec = self._spec(server_id)

@@ -89,6 +89,10 @@ export default function ChatPage() {
   const [processingFiles, setProcessingFiles] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [anchors, setAnchors] = useState<{type: string; text: string}[]>([]);
+  // What the turn can use and what it used, sent by the backend before and
+  // after answering. Not cleared on a timer like the anchors: this describes
+  // capability, so it stays until the next turn replaces it.
+  const [usage, setUsage] = useState<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
@@ -195,6 +199,11 @@ export default function ChatPage() {
     if (params?.anchors) setAnchors(params.anchors);
     const t = setTimeout(() => setAnchors([]), 12000);
     return () => clearTimeout(t);
+  }), [onNotification]);
+
+  // Tools, skills and MCP servers this chat has, and the ones it just used
+  useEffect(() => onNotification('chat.tools', (params: any) => {
+    if (params) setUsage(params);
   }), [onNotification]);
 
   useEffect(() => {
@@ -370,6 +379,37 @@ export default function ChatPage() {
 
       {/* Input */}
       <div className="border-t border-[#30363d] p-4">
+        {usage && (
+          <div className="flex flex-wrap items-center gap-1.5 mb-2">
+            <span title="Skills the assistant can call right now"
+              className="text-[10px] px-2 py-0.5 rounded-full bg-[#21262d] text-[#8b949e] border border-[#30363d]">
+              🔧 {usage.skills ?? 0} skills
+            </span>
+            {(usage.mcpServers || []).map((s: string) => (
+              <span key={s} title={`MCP server '${s}' is connected`}
+                className="text-[10px] px-2 py-0.5 rounded-full bg-[#3fb95022] text-[#3fb950] border border-[#3fb95044] max-w-[220px] truncate">
+                🧰 {s}
+              </span>
+            ))}
+            {(usage.mcpTools || 0) > 0 && (
+              <span title="Tools contributed by the connected MCP servers"
+                className="text-[10px] px-2 py-0.5 rounded-full bg-[#21262d] text-[#8b949e] border border-[#30363d]">
+                {usage.mcpTools} MCP tools
+              </span>
+            )}
+            {(usage.used || []).length > 0
+              ? (usage.used || []).map((u: string) => (
+                <span key={u} title="Called while answering the last message"
+                  className="text-[10px] px-2 py-0.5 rounded-full bg-[#1f6feb22] text-[#58a6ff] border border-[#1f6feb44] max-w-[280px] truncate">
+                  ✓ used {u}
+                </span>
+              ))
+              : <span title="No tool was called for the last message"
+                  className="text-[10px] px-2 py-0.5 rounded-full bg-[#21262d] text-[#8b949e] border border-[#30363d]">
+                  no tool used
+                </span>}
+          </div>
+        )}
         {anchors.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-2">
             {anchors.map((a, i) => (

@@ -165,6 +165,28 @@ async def run():
     check("and no skill outside the subset is offered to it",
           other is None or f"\n{other}(" not in sent, sent[-400:])
 
+    # The call format rides the question as well as the catalogue. One message
+    # away was far enough for a small model to stop calling tools: the same five
+    # questions called one 4/10 times with the format only in the catalogue and
+    # 10/10 with it on the question.
+    format_provider = FakeProvider(["hello"], provider_id="mock")
+    await tool_loop.chat_with_tools(
+        provider=format_provider,
+        messages=[{"role": "user", "content": "hi"}], tools=["read_file"])
+    last = format_provider.payloads[0][-1]["content"]
+    check("the call format is repeated on the question itself",
+          "```tool" in last, last[-200:])
+    check("with the question still first in that message",
+          last.startswith("hi"), last[:80])
+
+    tool_less = FakeProvider(["hello"], provider_id="mock")
+    await tool_loop.chat_with_tools(
+        provider=tool_less, messages=[{"role": "user", "content": "hi"}],
+        tools=[])
+    check("but a turn with no tools is told nothing about calling one",
+          "```tool" not in tool_less.payloads[0][-1]["content"],
+          str(tool_less.payloads[0][-1])[:200])
+
     # ---- 3. a tool really executes --------------------------------------
     # Whether a skill runs on this machine depends on the display and the
     # file-access mode, so execution is recorded rather than performed here;
@@ -454,6 +476,32 @@ async def run():
                                           announce=False)
     check("a restricted chat turn still answers",
           r.get("response") == "34 bytes", str(r)[:200])
+
+    # ---- 11. what the chat page is told it can use -----------------------
+    # Shown above the box, so "why did it not search the web for me" has an
+    # answer: which skills exist, which MCP servers are connected, and whether
+    # the last turn called anything at all.
+    snapshot = ws_server._tool_usage_snapshot(
+        [{"tool": "read_file", "success": True},
+         {"tool": "read_file", "success": True},
+         {"tool": "web_search", "success": False},
+         {"tool": "", "success": True},
+         None])
+    check("a usage snapshot counts the enabled skills",
+          snapshot["skills"] > 0, str(snapshot)[:200])
+    check("and names each tool the turn called, once",
+          snapshot["used"] == ["read_file", "web_search"],
+          str(snapshot["used"]))
+    check("ignoring entries with no tool name",
+          "" not in snapshot["used"], str(snapshot["used"]))
+    check("it carries the connected MCP servers and their tool count",
+          isinstance(snapshot["mcpServers"], list)
+          and isinstance(snapshot["mcpTools"], int), str(snapshot))
+    ws_src = (Path(ROOT) / "backend" / "ws_server.py").read_text(
+        encoding="utf-8", errors="replace")
+    check("a turn sends it twice: what is available, then what was used",
+          ws_src.count('broadcast_nowait("chat.tools"') == 2,
+          str(ws_src.count('broadcast_nowait("chat.tools"')))
 
 
 async def main():

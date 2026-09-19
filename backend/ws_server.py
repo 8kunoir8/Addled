@@ -344,6 +344,42 @@ async def _analyze_attachments(provider, attachments: list[dict],
     return notes
 
 
+def _tool_usage_snapshot(used: list | None = None) -> dict:
+    """What the chat has to work with, and what it just used.
+
+    The chat page shows this above the box, the way it shows the memory anchors,
+    because "why did it not search the web for me" is otherwise unanswerable:
+    the user cannot see whether a tool exists, which MCP servers are connected,
+    or whether the model chose not to call anything. Counts for what is
+    available, names for what was called.
+    """
+    skills = 0
+    mcp_servers: list[str] = []
+    mcp_tools = 0
+    try:
+        from backend.skills.registry import skill_registry
+        enabled = skill_registry.enabled_list_all()
+        skills = sum(1 for s in enabled if s.category != "mcp")
+    except Exception as e:  # noqa: BLE001
+        log.debug("Could not read the skill catalogue: %s", e)
+    try:
+        from backend.mcp_client.manager import mcp_manager
+        for server in mcp_manager.status().get("servers") or []:
+            if server.get("state") != "ready":
+                continue
+            mcp_servers.append(str(server.get("name") or server.get("id")))
+            mcp_tools += int(server.get("tool_count") or 0)
+    except Exception as e:  # noqa: BLE001
+        log.debug("Could not read the MCP status: %s", e)
+    calls: list[str] = []
+    for entry in used or []:
+        name = str((entry or {}).get("tool") or "").strip()
+        if name and name not in calls:
+            calls.append(name)
+    return {"skills": skills, "mcpServers": mcp_servers,
+            "mcpTools": mcp_tools, "used": calls}
+
+
 async def run_chat_pipeline(
     message: str,
     params: dict | None = None,
@@ -612,6 +648,14 @@ async def _run_chat_pipeline_inner(
         except Exception:
             pass
 
+        # What this turn has to work with. Sent before the model runs so the
+        # chat page can show it while the user waits, then re-sent afterwards
+        # with the tools the turn actually called.
+        try:
+            get_server().broadcast_nowait("chat.tools", _tool_usage_snapshot())
+        except Exception:
+            pass
+
         # Session continuity: recent session summaries (long-run memory), gated
         # the same way
         from backend.memory import relevance
@@ -844,6 +888,15 @@ async def _run_chat_pipeline_inner(
         response_text = result.get("response", "")
         tool_rounds = result.get("tool_rounds", 0)
         tool_results = result.get("tool_results", [])
+
+        # Named, so the chat page can say "used web_search" rather than only
+        # how many. A turn that called nothing says that too, which is the
+        # answer to "why did it not use the tool I know it has".
+        try:
+            get_server().broadcast_nowait("chat.tools",
+                                          _tool_usage_snapshot(tool_results))
+        except Exception:
+            pass
 
         if response_text and not response_text.startswith("[Provider:") and not response_text.startswith("[Not connected:"):
             if record:

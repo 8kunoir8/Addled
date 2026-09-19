@@ -430,6 +430,19 @@ async def _call_prompt_tools(provider, messages: list[dict],
     # overrides (see backend/language.py). It rides the last message, which is
     # the user's question again.
     modified_messages = _with_directive(modified_messages, reply_directive)
+    # The call format is repeated on the question, because one message away is
+    # far enough for a small model to forget it is allowed to call anything:
+    # asked five questions that need a tool, the same turn called one 4 times out
+    # of 10 with the format only in the catalogue and 10 out of 10 with it here —
+    # while the questions that need no tool were unaffected either way.
+    if skill_registry.prompt_tool_count(only) \
+            and modified_messages[-1].get("role") == "user":
+        last = modified_messages[-1]
+        modified_messages[-1] = {
+            **last,
+            "content": (last.get("content") or "") + "\n\n"
+                       + skill_registry.PROMPT_CALL_FORMAT,
+        }
 
     # Everything above plus the catalogue has to fit the provider's window.
     # The local model's context is 8192, so an unbudgeted request is rejected

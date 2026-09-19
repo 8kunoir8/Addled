@@ -127,6 +127,17 @@ async def main():
         check("tool schemas retrieved",
               all(t.get("inputSchema") for t in mcp_manager.tools(SID)["tools"]))
 
+        # "Reconnect all" is an explicit request. With autoconnect off it used
+        # to reach start(), which skips, so the button did nothing and said
+        # nothing — the handler still answered success.
+        await mcp_manager.disconnect(SID)
+        skipped = await mcp_manager.start()
+        check("start() honours autoconnect being off",
+              "skipped" in skipped, str(skipped)[:120])
+        again = await mcp_manager.reload()
+        check("but an explicit reload connects anyway",
+              int((again or {}).get("ready") or 0) >= 1, str(again)[:200])
+
         # ---- 2. tools appear as skills -----------------------------------
         from backend.skills.registry import skill_registry
         mcp_skills = [s for s in skill_registry.list_all()

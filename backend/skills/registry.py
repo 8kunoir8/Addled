@@ -523,19 +523,38 @@ class SkillRegistry:
     def to_claude_tools(self) -> list[dict]:
         return [s.to_claude_tool() for s in self.enabled_list_all()]
 
-    def to_prompt_tools(self, only: set[str] | None = None) -> str:
-        """For providers without native tool support: append to the prompt.
+    # The two lines that say how to call a tool. Kept here, next to the
+    # catalogue that uses them, because the question's message repeats them:
+    # a format stated in two places drifts, and a drift there is a model that
+    # asks for a tool in a shape nothing parses.
+    PROMPT_CALL_FORMAT = ('Call one with: ```tool\n'
+                          '{"tool": "name", "params": {}}\n```')
 
-        Deliberately terse. This text is added to the user's own message, so
-        every token here is a token the model cannot spend on the question.
+    def prompt_tool_count(self, only: set[str] | None = None) -> int:
+        """How many tools `to_prompt_tools(only)` would actually list.
+
+        An empty set means no tools, and a turn with no tools must not be told
+        how to call one — the model would invent a call to something that is
+        not there.
+        """
+        if only is None:
+            return len(self.enabled_list_all())
+        return sum(1 for s in self.enabled_list_all() if s.name in only)
+
+    def to_prompt_tools(self, only: set[str] | None = None) -> str:
+        """For providers without native tool support: the catalogue.
+
+        Deliberately terse. It travels as its own message immediately before the
+        user's question, and its call-format line is repeated on that question
+        (see `tool_loop._call_prompt_tools`), so every token here is a token the
+        model cannot spend on the question.
 
         `only` narrows the catalogue to those skill names; None means every
         enabled skill. An empty set is honoured as "no tools" rather than being
         treated as "no filter" — the difference matters to a caller that has
         deliberately given an agent a restricted set.
         """
-        lines = ["\n## Tools",
-                 'Call one with: ```tool\n{"tool": "name", "params": {}}\n```',
+        lines = ["\n## Tools", self.PROMPT_CALL_FORMAT,
                  "A trailing '?' marks an optional argument.", ""]
         for skill in self.enabled_list_all():
             if only is not None and skill.name not in only:
