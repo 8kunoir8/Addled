@@ -87,6 +87,27 @@ async def main():
                                "url": "ftp://x"})
         check("non-http url is rejected", bad.get("success") is False, str(bad))
 
+        # A failed request has to explain itself. What the card showed before
+        # this was a raw JSON object, or a Cloudflare 530 page whose first 200
+        # characters are a doctype.
+        from backend.mcp_client.http import _explain
+
+        note = _explain(530, '<!DOCTYPE html>\n<html class="no-js ie6 oldie">origi')
+        check("a 5xx blames the other side, not the key",
+              "their side" in note and "DOCTYPE" not in note
+              and "<html" not in note, note)
+        note = _explain(402, '{"error": {"code": "402", "message": '
+                             '"Payment required"}}')
+        check("a 402 says the server bills and cannot be charged here",
+              "bills" in note and note.count("Payment required") == 1, note)
+        note = _explain(401, '{"error":"invalid_token",'
+                             '"error_description":"Invalid token"}')
+        check("a 401 points at the credential, with a way to replace it",
+              "credential" in note and "Forget" in note, note)
+        note = _explain(418, "teapot")
+        check("an unknown code still says something",
+              "418" in note and "teapot" in note, note)
+
         out = await mcp_manager.connect(SID)
         print("connect:", out.get("success"), out.get("error"))
         check("connect succeeds", out.get("success"), str(out.get("error")))

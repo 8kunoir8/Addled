@@ -8,6 +8,7 @@ or as a ``text/event-stream`` frame. Servers may hand out a session id in the
 
 from __future__ import annotations
 
+import json
 import logging
 import urllib.parse
 
@@ -20,6 +21,63 @@ from backend.mcp_client.protocol import (
 log = logging.getLogger("addled.mcp.http")
 
 DEFAULT_TIMEOUT = 30.0
+
+# A failed request has to say what went wrong in words. The raw body is either a
+# JSON object nobody reads at a glance or, as a 530 produced here, a Cloudflare
+# HTML page whose first 200 characters are a doctype - which is what the server
+# card ended up showing.
+_WHAT_IT_MEANS = {
+    401: "the server rejected the credential (HTTP 401) - replace it with "
+         "Forget on the market card, or check the server wants that key",
+    402: "this server bills per request and the charge was refused "
+         "(HTTP 402 Payment required) - it cannot be used on this account",
+    403: "the server refused the credential (HTTP 403)",
+    404: "there is no server at this address any more (HTTP 404)",
+    429: "the server is rate limiting requests (HTTP 429) - try again later",
+}
+
+
+def _body_note(body: str, already: str = "") -> str:
+    """The useful part of an error body, or nothing.
+
+    A JSON message is worth keeping; an HTML page is not - it is written for a
+    browser, not for a program, and says nothing the status code did not.
+    """
+    text = " ".join(str(body or "").split())
+    if not text or text.lstrip().startswith("<"):
+        return ""
+    try:
+        payload = json.loads(text)
+    except Exception:  # noqa: BLE001
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or "").strip()
+            if message:
+                return "" if message.lower() in already.lower() \
+                    else f" - {message}"
+        elif isinstance(error, str) and error.strip():
+            description = str(payload.get("error_description") or "").strip()
+            return (f" - {error.strip()}"
+                    + (f" ({description})" if description else ""))
+    return f" - {text[:120]}"
+
+
+def _explain(status: int, body: str = "") -> str:
+    """What a failed response means, for somebody who did not write the server.
+
+    A status we can explain gets our sentence and nothing else: the server's own
+    wording ("invalid_token") adds nothing to it. Anything else keeps whatever
+    the body said, because then it is the only clue there is.
+    """
+    known = _WHAT_IT_MEANS.get(status)
+    if known is not None:
+        return known
+    if status >= 500:
+        return (f"the server's own host failed (HTTP {status}) - this is "
+                "on their side, not a problem with the address or the key")
+    return f"the server answered HTTP {status}{_body_note(body)}"
 
 
 class McpHttpClient:
@@ -120,8 +178,7 @@ class McpHttpClient:
         if resp.status_code == 202:
             return []
         if resp.status_code >= 400:
-            raise McpError(-32000, f"HTTP {resp.status_code}: "
-                                   f"{resp.text[:200]}")
+            raise McpError(-32000, _explain(resp.status_code, resp.text))
         ctype = (resp.headers.get("content-type") or "").lower()
         if "text/event-stream" in ctype:
             return parse_sse(resp.text)

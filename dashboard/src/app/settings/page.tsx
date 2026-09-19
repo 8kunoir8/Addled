@@ -261,7 +261,7 @@ function McpSection({settings,update,saving,status}: any){
   const [live,setLive]=useState<any>(null);
   const [busy,setBusy]=useState<string|null>(null);
   const [err,setErr]=useState<string|null>(null);
-  const [form,setForm]=useState<any>({name:'',transport:'stdio',command:'',url:'',trusted:false});
+  const [form,setForm]=useState<any>({name:'',transport:'stdio',command:'',url:'',trusted:false,env:''});
   const [marketQuery,setMarketQuery]=useState('');
   const [marketHits,setMarketHits]=useState<any[]|null>(null);
   const [marketBusy,setMarketBusy]=useState(false);
@@ -309,9 +309,30 @@ function McpSection({settings,update,saving,status}: any){
     setBusy(null);
   };
 
+  // KEY=VALUE per line, the way every MCP config file writes them, so a block
+  // copied out of a README can be pasted straight in. Blank lines and comments
+  // are ignored rather than becoming a variable named "#".
+  const parseEnv=(text:string):Record<string,string>=>{
+    const out:Record<string,string>={};
+    for(const line of String(text||'').split('\n')){
+      const trimmed=line.trim();
+      if(!trimmed||trimmed.startsWith('#'))continue;
+      const at=trimmed.indexOf('=');
+      if(at<1)continue;
+      const key=trimmed.slice(0,at).trim();
+      const value=trimmed.slice(at+1).trim().replace(/^["']|["']$/g,'');
+      if(key)out[key]=value;
+    }
+    return out;
+  };
+
   const addServer=async()=>{
     if(!form.name.trim()){ setErr('Give the server a name.'); return; }
     const server:any={name:form.name.trim(),transport:form.transport,enabled:true,trusted:!!form.trusted};
+    // Many servers need a variable to be set (a mode, a key, a path) and there
+    // was no way to give them one here at all.
+    const env=parseEnv(form.env);
+    if(Object.keys(env).length)server.env=env;
     if(form.transport==='stdio'){
       const parts=form.command.trim().split(/\s+/).filter(Boolean);
       if(!parts.length){ setErr('A stdio server needs a command.'); return; }
@@ -322,7 +343,7 @@ function McpSection({settings,update,saving,status}: any){
       server.url=form.url.trim();
     }
     await act('mcp.add',{server},'add');
-    setForm({name:'',transport:form.transport,command:'',url:'',trusted:false});
+    setForm({name:'',transport:form.transport,command:'',url:'',trusted:false,env:''});
   };
 
   const searchMarket=async()=>{
@@ -616,6 +637,12 @@ function McpSection({settings,update,saving,status}: any){
             <input value={form.url} onChange={e=>setForm({...form,url:e.target.value})}
               placeholder="https://example.com/mcp" className={`${inp} flex-1`}/>
           </div>}
+        {form.transport==='stdio'&&<div className="flex items-start gap-2">
+          <span className="w-24 pt-1 text-[11px] text-[#8b949e]">Environment</span>
+          <textarea value={form.env} onChange={e=>setForm({...form,env:e.target.value})}
+            rows={2} placeholder={'MODE=stdio\nKEY=value'}
+            className={`${inp} flex-1 font-mono`}/>
+        </div>}
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
             <input type="checkbox" checked={!!form.trusted}
@@ -629,7 +656,7 @@ function McpSection({settings,update,saving,status}: any){
         </div>
         <p className="text-[10px] text-[#8b949e]">
           To change a server's command or URL, remove it and add it again.
-          Header and environment values are stored in settings.json, never sent to the dashboard.
+          Environment values are set here and stored in settings.json, never sent to the dashboard.
         </p>
       </div>
     </div>
