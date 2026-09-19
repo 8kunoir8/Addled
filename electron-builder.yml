@@ -70,11 +70,11 @@ extraResources:
       - '!memory/projects/**'
       - '!memory/conversations/**'
       - '!memory/logs/**'
-      # Listed one by one: `calendar_events.json` beside them is tracked in git
-      # on purpose, as the calendar's starting state, and ships.
-      - '!memory/integrations/scheduled_tasks.json'
-      - '!memory/integrations/scheduler_state.json'
-      - '!memory/integrations/skill_telemetry.json'
+      # Integrations are per machine, including `calendar_events.json`. It looks
+      # like a seed because it is an empty list, but it is the user's calendar:
+      # shipping it meant an upgrade replaced it with an empty one. The calendar
+      # treats an absent file as an empty list, so it does not need to ship.
+      - '!memory/integrations/**'
       # NOT excluded: `backend/voice/models/**`. Those 339 MB are fetched once
       # by scripts/fetch_voice_models.py and bundled on purpose, because the
       # offline voice needs them present.

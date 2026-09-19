@@ -322,7 +322,11 @@ def main() -> int:
     # git is what the deploy reads.
     for name in ("backend/memory/vectors.db", "backend/memory/triples.db",
                  "backend/memory/addled.log", "backend/memory/egress.jsonl",
-                 "backend/memory/facts.json", "backend/memory/settings.json"):
+                 "backend/memory/facts.json", "backend/memory/settings.json",
+                 # Named because it was the one exception, and it was wrong: the
+                 # calendar is the user's, not a seed for the installer to
+                 # overwrite on every upgrade.
+                 "backend/memory/integrations/calendar_events.json"):
         check(f"git ignores {name}", git_ignored(name),
               "the deploy derives its excludes from git, so this is the rule "
               "that has to hold")

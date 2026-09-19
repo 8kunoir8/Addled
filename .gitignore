@@ -26,14 +26,13 @@ build/
 # `.bak` — was committable by `git add -A` and, worse, copied into the installer
 # by `extraResources`, which does not read this file at all. So the whole
 # directory is ignored and the code is named back in.
+#
+# `integrations/` used to be an exception, for an empty `calendar_events.json`
+# that looked like a seed. It is not: it is the user's calendar, and shipping it
+# meant an upgrade installed the developer's empty one over it. The calendar
+# loads an absent file as an empty list, so nothing needs to ship.
 backend/memory/*
 !backend/memory/*.py
-!backend/memory/integrations/
-
-# Integrations are per machine too, except the calendar's starting state, which
-# is tracked on purpose.
-backend/memory/integrations/*
-!backend/memory/integrations/calendar_events.json
 
 # Fetched by scripts/fetch_voice_models.py and bundled on purpose: the offline
 # voice needs them present, so this is the one ignored directory that ships.
