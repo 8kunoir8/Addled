@@ -217,8 +217,37 @@ async def chat_with_tools(
             result = await _call_prompt_tools(provider, full_messages, model,
                                               only, reply_directive)
 
-        # No tool call — normal text response
+        # No tool call — normal text response, unless the reply was a tool call
+        # the parser could not read. That must never be shown as an answer: the
+        # model's own "I have created the file" is in it, and nothing ran.
         if not result.get("tool_calls"):
+            unreadable = [b for b in (result.get("malformed") or []) if b]
+            if unreadable:
+                log.warning("A tool call could not be read: %s",
+                            unreadable[0][:300])
+                if rounds < max_tool_rounds:
+                    # One corrective round: telling the model what shape to use
+                    # is far cheaper than a user hunting for a file that was
+                    # never written.
+                    hint = ("Your last reply contained a tool call that could "
+                            "not be read, so nothing ran and nothing was "
+                            "created or changed. Reply again with only this "
+                            "shape, with no other text:\n")
+                    hint += skill_registry.PROMPT_CALL_FORMAT
+                    hint += "\n\nWhat you wrote was:\n" + unreadable[0][:400]
+                    full_messages.append({"role": "user", "content": hint})
+                    continue
+                _learn_procedure(messages, all_tool_results)
+                return {
+                    "response": ("I tried to call a tool for that, but the "
+                                 "call could not be read, so nothing ran — "
+                                 "nothing was created or changed. Ask again, "
+                                 "or in smaller steps."),
+                    "tokens": result.get("tokens", 0),
+                    "tool_rounds": rounds,
+                    "tool_results": all_tool_results,
+                    "unreadable": unreadable,
+                }
             _learn_procedure(messages, all_tool_results
                              or result.get("tool_results", []))
             return {
@@ -498,6 +527,7 @@ async def _call_prompt_tools(provider, messages: list[dict],
             "response": visible_response or response_text,
             "tokens": tokens,
             "tool_calls": tool_calls,
+            "malformed": parsed["malformed"],
         }
 
     except Exception as e:
@@ -596,21 +626,165 @@ def _extract_tool_calls(text: str) -> list[dict]:
     return _parse_tool_response(text)["calls"]
 
 
-def _parse_tool_response(text: str) -> dict:
-    """Find tool calls, and the text blocks that should not be shown.
+# `name("argument")`, `name(key=value, ...)` — a Python-shaped call, which is
+# what the catalogue's own `name(arg)` rendering invites a model to write.
+_CALL_SYNTAX = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\((.*)\)\s*$",
+                          re.DOTALL)
 
-    Accepts ```tool, ```json or an unfenced object, on one line or several, so
-    a small model is not required to match one exact format. Returns
-    ``{"calls": [...], "blocks": [raw block, ...]}``.
+
+def _declared_params(name: str) -> list[str]:
+    """The parameter names a skill declares, in the order it declares them.
+
+    A positional argument needs this: `list_dir("E:\\x")` means the first
+    parameter, and only the schema says that it is called `path`.
+    """
+    try:
+        skill = skill_registry.get(_normalise_tool_name(name))
+        properties = (skill.parameters or {}).get("properties") or {}
+        return [str(key) for key in properties]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _split_args(text: str) -> list[str]:
+    """Split an argument list on the commas outside quotes and brackets."""
+    parts: list[str] = []
+    current = ""
+    depth = 0
+    quote = ""
+    escaped = False
+    for char in text:
+        if escaped:
+            current += char
+            escaped = False
+            continue
+        if char == "\\":
+            current += char
+            escaped = True
+            continue
+        if quote:
+            current += char
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+            current += char
+            continue
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        if char == "," and depth <= 0:
+            parts.append(current)
+            current = ""
+            continue
+        current += char
+    if current.strip():
+        parts.append(current)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _literal(text: str):
+    """A written argument as a value: JSON when it parses, else the text."""
+    raw = text.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    return raw
+
+
+def _call_from_syntax(text: str) -> dict | None:
+    """A call written as `name("arg")` / `name(key=value)` rather than JSON.
+
+    Models write this often — it is how a Python-shaped call looks, and the
+    catalogue prints each tool as `name(arguments)`. It matters more than a
+    missed call usually would: with nothing parsed there is no tool round, so
+    the raw text becomes the answer. That is how "I have created the file"
+    reached a user while nothing had run, and how four replies in a row were
+    the model asking to list a directory and getting no answer from anybody.
+    """
+    match = _CALL_SYNTAX.match(str(text or "").strip())
+    if not match:
+        return None
+    name = _normalise_tool_name(match.group(1))
+    if not name:
+        return None
+    if not skill_registry.get(name):
+        # Only a real skill. Call syntax is a guess at what the model meant, and
+        # an unknown name there would otherwise start the market-and-forge path
+        # — writing a generated skill file — on the strength of a guess.
+        return None
+    inner = match.group(2).strip()
+    if not inner:
+        return {"name": name, "params": {}}
+    if inner.startswith("{"):
+        try:
+            as_json = json.loads(inner)
+        except json.JSONDecodeError:
+            as_json = None
+        if isinstance(as_json, dict):
+            return {"name": name, "params": as_json}
+    declared = _declared_params(name)
+    params: dict = {}
+    position = 0
+    for part in _split_args(inner):
+        key, separator, value = part.partition("=")
+        if separator and declared \
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key.strip()):
+            params[key.strip()] = _literal(value)
+            continue
+        params[declared[position] if position < len(declared)
+               else f"arg{position + 1}"] = _literal(part)
+        position += 1
+    return {"name": name, "params": params}
+
+
+def _looks_like_call(text: str) -> bool:
+    """Whether this is a tool call that could not be read.
+
+    Deliberately narrow: a ```python block in an answer is not a call, and a
+    name that is not a skill is prose. Only a real skill name in call syntax,
+    or JSON that names a tool and did not parse, counts.
+    """
+    inner = str(text or "").strip()
+    if not inner:
+        return False
+    if '"tool"' in inner or '"name"' in inner:
+        return True
+    match = _CALL_SYNTAX.match(inner)
+    return bool(match) and bool(
+        skill_registry.get(_normalise_tool_name(match.group(1))))
+
+
+def _parse_tool_response(text: str) -> dict:
+    """Find tool calls, the blocks that should not be shown, and the ones that
+    could not be read.
+
+    Accepts ```tool, ```json or an unfenced object, on one line or several, and
+    a call written as `name("arg")`, so a small model is not required to match
+    one exact format. Returns ``{"calls": [...], "blocks": [...],
+    "malformed": [...]}``.
     """
     if not text:
-        return {"calls": [], "blocks": []}
+        return {"calls": [], "blocks": [], "malformed": []}
 
     calls: list[dict] = []
     blocks: list[str] = []
+    malformed: list[str] = []
 
-    for match in re.finditer(r"```(?:tool|json)?\s*(.*?)```", text, re.DOTALL):
-        inner = match.group(1).strip()
+    # The closing fence is optional on purpose: a reply cut off at the token cap
+    # has no closing fence, and that is exactly the case that used to slip
+    # through as an answer.
+    for match in re.finditer(r"```([A-Za-z]*)[ \t]*\r?\n?(.*?)(?:```|\Z)",
+                             text, re.DOTALL):
+        language = (match.group(1) or "").lower()
+        inner = match.group(2).strip()
+        if not inner:
+            continue
         found = False
         for candidate in _json_objects(inner):
             try:
@@ -620,8 +794,15 @@ def _parse_tool_response(text: str) -> dict:
             if call:
                 calls.append(call)
                 found = True
+        if not found and language in ("", "tool", "json"):
+            call = _call_from_syntax(inner)
+            if call:
+                calls.append(call)
+                found = True
         if found:
             blocks.append(match.group(0))
+        elif _looks_like_call(inner):
+            malformed.append(inner)
 
     if not calls:
         # No fenced block, or nothing usable in it: look at the raw text. A
@@ -634,8 +815,13 @@ def _parse_tool_response(text: str) -> dict:
             if call:
                 calls.append(call)
                 blocks.append(candidate)
+        if not calls:
+            bare = _call_from_syntax(text)
+            if bare:
+                calls.append(bare)
+                blocks.append(text.strip())
 
-    return {"calls": calls, "blocks": blocks}
+    return {"calls": calls, "blocks": blocks, "malformed": malformed}
 
 
 def _tool_result_message(tool_name: str, result: dict, tool_call_id: str | None = None) -> dict:

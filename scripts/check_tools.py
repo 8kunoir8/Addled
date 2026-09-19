@@ -137,6 +137,47 @@ def run_parser_tests():
           calls(tricky)[0]["params"]["command"] == 'echo {"a": 1}',
           str(calls(tricky)))
 
+    # A call written the way the catalogue prints each tool: `name(arguments)`.
+    # Four replies in a row were this shape and were delivered to the user as
+    # the answer, because nothing parsed them and no tool round ever happened.
+    python_call = '```tool\nlist_dir("D:/work")\n```'
+    check("a Python-shaped call is parsed",
+          names(python_call) == ["list_dir"], str(calls(python_call)))
+    check("and its argument lands on the name the schema declares",
+          calls(python_call)[0]["params"] == {"path": "D:/work"},
+          str(calls(python_call)))
+    positional = '```tool\nwrite_file("notes.txt", "hello")\n```'
+    check("a second positional argument takes the next declared name",
+          calls(positional)[0]["params"]
+          == {"path": "notes.txt", "content": "hello"},
+          str(calls(positional)))
+    keyword = '```tool\nlist_dir(path="D:/work", pattern="*.py")\n```'
+    check("keyword arguments are read too",
+          calls(keyword)[0]["params"]
+          == {"path": "D:/work", "pattern": "*.py"},
+          str(calls(keyword)))
+    check("a bare call with no fence works",
+          names('list_dir("D:/work")') == ["list_dir"], "")
+    check("and that block is stripped from what the user sees",
+          bool(_parse_tool_response(python_call)["blocks"]), "")
+    # A guess at call syntax must not invent a call to something that is not a
+    # skill: an unknown name starts the market-and-forge path.
+    check("a call to a name that is not a skill is not invented",
+          calls('```tool\nhalo("apa kabar")\n```') == [], "")
+
+    # A reply cut off at the token cap has no closing fence and half a JSON
+    # object. It has to be reported as unreadable — it is the reply that claimed
+    # the file had been created.
+    truncated = ('Saya telah membuat filenya.\n```tool\n{"tool": "write_file", '
+                 '"params": {"path": "a.txt", "content": "isi panj')
+    parsed = _parse_tool_response(truncated)
+    check("an unterminated call is reported, not answered",
+          parsed["calls"] == [] and len(parsed["malformed"]) == 1,
+          str(parsed)[:200])
+    check("and a complete call behind a missing fence still runs",
+          names('```tool\n{"tool": "list_dir", "params": {"path": "D:"}}')
+          == ["list_dir"], "")
+
     # Nothing to find.
     check("prose yields nothing", calls("I cannot do that.") == [], "")
     check("empty input yields nothing", calls("") == [], "")
@@ -159,8 +200,11 @@ def run_budget_tests():
     from backend.providers import budget
 
     check("text is estimated, not zero",
-          budget.estimate_tokens("a" * 400) == 100,
+          budget.estimate_tokens("a" * 400) == 133,
           str(budget.estimate_tokens("a" * 400)))
+    check("and the estimate errs high rather than low",
+          budget.estimate_tokens("a" * 400) > 400 / 4,
+          "an under-estimate means a request is not trimmed and is rejected")
     check("empty text is zero", budget.estimate_tokens("") == 0)
     check("non-string content is handled",
           budget.message_tokens([{"role": "user", "content": [{"a": 1}]}]) > 0)

@@ -613,6 +613,21 @@ async def _run_chat_pipeline_inner(
         sys_prompt += ("\n\nAlways reply in the same language the user "
                        "writes or speaks in.")
 
+        # Where a file goes. Nothing used to say, so asked for a file "in the
+        # workspace" the model wrote `workspace\notes.txt` — inventing a
+        # subdirectory inside the root it had already been given — and then
+        # reported that longer path as the location, which at least matched
+        # where the file really was.
+        try:
+            from backend.workspace import root as _workspace_root
+            folder = _workspace_root()
+            if folder:
+                sys_prompt += (f"\n\nFiles: the workspace root is {folder}. "
+                               "Give file paths relative to it — "
+                               "'notes.txt', not 'workspace/notes.txt'.")
+        except Exception as e:  # noqa: BLE001
+            log.debug("workspace hint skipped: %s", e)
+
         context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
 
         # Long-term recall: inject relevant past conversation turns

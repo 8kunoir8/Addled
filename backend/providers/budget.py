@@ -21,10 +21,13 @@ import logging
 
 log = logging.getLogger("addled.providers.budget")
 
-# Characters per token. English prose and JSON both land near four; code is
-# denser, so this is a mild underestimate, which is the safe direction for
-# leaving headroom.
-CHARS_PER_TOKEN = 4
+# Characters per token. English prose lands near four, but Indonesian, code and
+# JSON are denser, and this estimate decides whether a request is trimmed. An
+# UNDER-estimate is the unsafe direction: the check passes, nothing is trimmed,
+# and the provider rejects the whole request — which is what "request (8470
+# tokens) exceeds the available context size (8192)" was, seen in a real chat.
+# Three errs the other way and only costs some trimming.
+CHARS_PER_TOKEN = 3
 
 # Never ask for fewer than this, or the model cannot answer at all.
 MIN_REPLY_TOKENS = 256
