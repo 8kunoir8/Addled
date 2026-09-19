@@ -505,6 +505,12 @@ class McpManager:
             "url": url,
             "headers": {str(k): str(v) for k, v in headers.items()}
             if isinstance(headers, dict) else {},
+            # Query parameters a spec carries (Smithery's gateway wants its key
+            # as `api_key`). Whitelisted like every other field: anything not
+            # named here is silently dropped on save.
+            "params": {str(k): str(v)
+                       for k, v in (spec.get("params") or {}).items()}
+            if isinstance(spec.get("params"), dict) else {},
             "enabled": bool(spec.get("enabled", True)),
             "trusted": bool(spec.get("trusted")),
             "auto": bool(spec.get("auto")),

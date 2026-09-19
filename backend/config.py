@@ -531,6 +531,24 @@ class _Config:
             self.set("memory", "min_similarity",
                      value=DEFAULT_SETTINGS["memory"]["min_similarity"])
 
+        # A Smithery key stored as a bearer header: the market used to ask for it
+        # that way, and their gateway refuses `Authorization: Bearer <api key>`
+        # - it reads the key from the `api_key` query parameter - so every server
+        # added then answers "401 invalid token" while holding a perfectly good
+        # key. The value only moves, and the header copy is left alone because
+        # another server may legitimately hold a bearer of its own.
+        stored = self._data.get("mcp", {}).get("credentials")
+        if isinstance(stored, dict):
+            headers = stored.get("headers")
+            bearer = (str((headers or {}).get("Authorization") or "").strip()
+                      if isinstance(headers, dict) else "")
+            params = stored.get("params")
+            params = dict(params) if isinstance(params, dict) else {}
+            if bearer.lower().startswith("bearer ") and not params.get("api_key"):
+                params["api_key"] = bearer[len("bearer "):].strip()
+                self.set("mcp", "credentials",
+                         value={**stored, "params": params})
+
     def save(self):
         """Persist settings to disk."""
         _MEMORY.mkdir(parents=True, exist_ok=True)

@@ -540,7 +540,7 @@ def credential_checks(market) -> None:
         # reading a credential it just stored.
         names = credentials.known()
         check("known() reports names only",
-              names == {"env": ["ACME_API_KEY"], "headers": []},
+              names == {"env": ["ACME_API_KEY"], "headers": [], "params": []},
               str(names))
         check("and a stored value is never returned",
               "secret-value" not in str(names), "a value was echoed")
@@ -677,13 +677,13 @@ async def smithery_endpoint_checks(market) -> None:
           merged and merged["transport"] == "http"
           and merged["url"].endswith("/mcp"),
           str(merged)[:220] if merged else "entry missing")
-    check("and now asks for an Authorization value rather than being hosted",
-          merged and merged["blocked_kinds"] == ["headers"]
-          and "hosted" not in merged["blocked_reason"],
+    check("and asks for the gateway key as a parameter, not a header",
+          merged and merged["blocked_kinds"] == ["params"]
+          and merged["requires_params"] == ["api_key"]
+          and merged["requires_headers"] == [],
           str(merged.get("blocked_reason")) if merged else "entry missing")
-    check("with the shape to type",
-          merged and merged["header_hints"].get("Authorization")
-          == "Bearer {smithery_api_key}",
+    check("because a bearer token is what that gateway rejects",
+          merged and "Authorization" not in (merged.get("header_hints") or {}),
           str(merged.get("header_hints")) if merged else "entry missing")
     check("and it says which entry the endpoint came from",
           merged and merged.get("endpoint_from")
@@ -692,14 +692,42 @@ async def smithery_endpoint_checks(market) -> None:
 
     # With the key stored, it is addable — the whole point of the feature.
     with temp_settings():
-        credentials.save(None, {"Authorization": "Bearer sk-test"})
+        credentials.save(None, None, {"api_key": "sk-test"})
         check("and storing the key makes it addable",
               market._finish(dict(merged or {}))["runnable"] is True,
               str((merged or {}).get("blocked_reason")))
         spec = market.to_spec(merged)
-        check("with the key in the spec's headers",
-              spec["headers"].get("Authorization") == "Bearer sk-test",
+        check("with the key in the spec's query parameters",
+              spec["params"].get("api_key") == "sk-test",
+              str(spec.get("params")))
+        check("and nowhere in its headers",
+              "Authorization" not in (spec.get("headers") or {}),
               str(spec.get("headers")))
+
+    # A twin on somebody else's host keeps what the registry declared for it:
+    # the parameter form is about Smithery's gateway, not about headers in
+    # general.
+    other = market.normalise({
+        "name": "ai.smithery/acme-own-host", "title": "Own host",
+        "remotes": [{"type": "streamable-http",
+                     "url": "https://mcp.example.com/mcp",
+                     "headers": [{"name": "X-Api-Key",
+                                  "value": "opaque value",
+                                  "description": "from the provider"}]}],
+    })
+    elsewhere = market._smithery_normalise({
+        "qualifiedName": "acme/own-host", "remote": True, "description": "",
+        "isDeployed": True})
+    with mock.patch.object(market, "_registry_candidates", lambda q, l: [other]), \
+         mock.patch.object(market, "_smithery_candidates", lambda q, l: [elsewhere]):
+        hits = await market.search("ownhost")
+    hosted_elsewhere = next((c for c in hits if c["name"] == "acme/own-host"), None)
+    check("a twin on the provider's own host keeps its declared header",
+          bool(hosted_elsewhere)
+          and hosted_elsewhere["url"] == "https://mcp.example.com/mcp"
+          and hosted_elsewhere["requires_headers"] == ["X-Api-Key"]
+          and hosted_elsewhere["requires_params"] == [],
+          str(hosted_elsewhere)[:200] if hosted_elsewhere else "entry missing")
 
     # A listing with no twin in the official registry stays honestly blocked.
     lonely = market._smithery_normalise({
@@ -776,28 +804,32 @@ async def hosted_reach_checks(market) -> None:
           == "https://server.smithery.ai/hasdata/duckduckgo-mcp/mcp",
           (hit or {}).get("url"))
     check("and asks for the key its own schema declares, beside the gateway's",
-          bool(hit) and hit.get("requires_headers")
-          == ["Authorization", "x-api-key"],
-          (hit or {}).get("requires_headers"))
-    check("only the gateway key has a shape to imitate",
-          bool(hit) and hit.get("header_hints")
-          == {"Authorization": "Bearer {smithery_api_key}"},
-          (hit or {}).get("header_hints"))
+          bool(hit) and hit.get("requires_params") == ["api_key"]
+          and hit.get("requires_headers") == ["x-api-key"],
+          str((hit or {}).get("requires_params")) + " / "
+          + str((hit or {}).get("requires_headers")))
+    check("the gateway key is sent as a parameter, never as a header",
+          bool(hit) and not (hit.get("header_hints") or {})
+          and "Authorization" not in (hit.get("requires_headers") or []),
+          str((hit or {}).get("header_hints")))
     check("the server's own key is explained in the provider's words",
           bool(hit) and (hit.get("key_help") or {}).get("x-api-key")
           == "Enter your API key from the HasData dashboard.",
           (hit or {}).get("key_help"))
     check("and the gateway key says where to get one",
           bool(hit) and "smithery.ai"
-          in (hit.get("key_help") or {}).get("Authorization", ""),
+          in (hit.get("key_help") or {}).get("api_key", ""),
           (hit or {}).get("key_help"))
-    check("so the card waits on a value, not on hosting",
-          bool(hit) and hit.get("blocked_kinds") == ["headers"]
+    check("so the card waits on values, not on hosting",
+          bool(hit) and hit.get("blocked_kinds") == ["params", "headers"]
           and "hosted" not in (hit or {}).get("blocked_reason", ""),
           (hit or {}).get("blocked_reason"))
+    check("and names exactly what it is still waiting for",
+          bool(hit) and hit.get("missing_values") == ["api_key", "x-api-key"],
+          str((hit or {}).get("missing_values")))
 
     with temp_settings():
-        credentials.save(None, {"Authorization": "Bearer sk-test"})
+        credentials.save(None, None, {"api_key": "sk-test"})
         check("the gateway key alone is not enough when the server wants its own",
               market._finish(dict(hit or {}))["runnable"] is False,
               str((hit or {}).get("blocked_reason")))
@@ -806,10 +838,13 @@ async def hosted_reach_checks(market) -> None:
         check("both values make it addable", ready["runnable"] is True,
               ready.get("blocked_reason"))
         spec = market.to_spec(ready)
-        check("and both reach the spec's headers",
-              spec["headers"] == {"Authorization": "Bearer sk-test",
-                                 "x-api-key": "hd-123"},
-              spec["headers"])
+        check("and each reaches the place it belongs",
+              spec["params"] == {"api_key": "sk-test"}
+              and spec["headers"] == {"x-api-key": "hd-123"},
+              str(spec["params"]) + " / " + str(spec["headers"]))
+        check("and the card stops asking for what it already holds",
+              ready.get("missing_values") == [],
+              str(ready.get("missing_values")))
 
     # A server whose schema declares nothing still needs the gateway key: asked
     # without one, Smithery answers "Missing Authorization header" rather than
@@ -820,8 +855,8 @@ async def hosted_reach_checks(market) -> None:
                                           "isDeployed": True}, None)
     hive = next((c for c in shares if c["name"] == "mcp-hive/hive-servers"), None)
     check("a hosted server that declares no values is still asked for the key",
-          bool(hive) and hive.get("requires_headers") == ["Authorization"]
-          and hive.get("blocked_kinds") == ["headers"],
+          bool(hive) and hive.get("requires_params") == ["api_key"]
+          and hive.get("blocked_kinds") == ["params"],
           str((hive or {}).get("blocked_reason")))
     check("because the address does not need the detail record to exist",
           bool(hive) and hive.get("url")
@@ -861,8 +896,89 @@ async def hosted_reach_checks(market) -> None:
                                           "description": "a variable"}}}}]})
     env_hit = next((c for c in envonly if c["name"] == "acme/envonly"), None)
     check("a value meant for a variable is not shown as a header",
-          bool(env_hit) and env_hit.get("requires_headers") == ["Authorization"],
+          bool(env_hit) and env_hit.get("requires_headers") == [],
           (env_hit or {}).get("requires_headers"))
+
+def param_checks(market) -> None:
+    """A value whose destination is the URL, not a header.
+
+    Smithery's gateway reads its key as `api_key` in the query string and
+    refuses the same value as a bearer token, so a credential must be able to
+    travel in the URL. Two traps are worth pinning by name: `manager.validate()`
+    drops any spec field it does not explicitly list, and the key must be added
+    per request rather than written into the spec's url, where it would be
+    printed on the market card and in every log line about that server.
+    """
+    from backend.mcp_client import credentials
+    from backend.mcp_client.http import McpHttpClient
+    from backend.mcp_client.manager import mcp_manager
+
+    with temp_settings():
+        credentials.save(None, None, {"api_key": "sk-param"})
+        check("a URL parameter is stored and reported by name",
+              credentials.known()["params"] == ["api_key"],
+              str(credentials.known()))
+        check("and reaches a spec that wants it",
+              credentials.subset_params(["api_key"]) == {"api_key": "sk-param"},
+              str(credentials.subset_params(["api_key"])))
+        check("while a name we hold nothing for stays missing",
+              credentials.missing_params(["api_key", "other"]) == ["other"],
+              str(credentials.missing_params(["api_key", "other"])))
+        credentials.save(None, None, {"api_key": ""})
+        check("an empty value clears it",
+              credentials.known()["params"] == [], str(credentials.known()))
+
+    clean, error = mcp_manager.validate({
+        "name": "Param Server", "transport": "http",
+        "url": "https://server.smithery.ai/acme/thing/mcp",
+        "params": {"api_key": "sk-param"}})
+    check("the spec keeps its query parameters through validation",
+          error is None and (clean or {}).get("params") == {"api_key": "sk-param"},
+          str(error or clean))
+
+    client = McpHttpClient("sid", {
+        "url": "https://server.smithery.ai/acme/thing/mcp",
+        "params": {"api_key": "sk-param"}, "headers": {"X-A": "1"}})
+    check("the address a spec shows stays free of the key",
+          client.url == "https://server.smithery.ai/acme/thing/mcp", client.url)
+    check("and the request URL carries the parameter",
+          client._target()
+          == "https://server.smithery.ai/acme/thing/mcp?api_key=sk-param",
+          client._target())
+    check("while headers still travel as headers",
+          client._headers().get("X-A") == "1"
+          and "api_key" not in client._headers(),
+          str(sorted(client._headers())))
+    existing = McpHttpClient("sid", {"url": "https://x.test/mcp?keep=1",
+                                     "params": {"api_key": "k"}})
+    check("a parameter is appended to an address that already has one",
+          existing._target() == "https://x.test/mcp?keep=1&api_key=k",
+          existing._target())
+
+    # The upgrade path. A key the old market collected as a bearer header has to
+    # end up where the gateway actually reads it, or every server added before
+    # the fix keeps answering "401 invalid token" while holding a good key.
+    import copy
+
+    from backend.config import DEFAULT_SETTINGS, _Config
+
+    with temp_settings():
+        probe = _Config()
+        probe._data = copy.deepcopy(DEFAULT_SETTINGS)
+        probe._data["mcp"]["credentials"] = {
+            "env": {}, "headers": {"Authorization": "Bearer sk-old"}, "params": {}}
+        probe._migrate()
+        stored = probe._data["mcp"]["credentials"]
+        check("an upgrade moves the old bearer into the api_key parameter",
+              stored["params"].get("api_key") == "sk-old", str(stored))
+        check("and leaves the header alone for whatever else may use it",
+              stored["headers"].get("Authorization") == "Bearer sk-old",
+              str(stored["headers"]))
+        probe._migrate()
+        check("running it again changes nothing",
+              probe._data["mcp"]["credentials"]["params"]["api_key"] == "sk-old",
+              str(probe._data["mcp"]["credentials"]["params"]))
+
 
 async def detail_cache_checks(market) -> None:
     """Their detail endpoint is asked once per server, not once per search.
@@ -930,6 +1046,7 @@ def main() -> int:
         asyncio.run(keyed_install_checks(market))
         asyncio.run(smithery_endpoint_checks(market))
         asyncio.run(hosted_reach_checks(market))
+        param_checks(market)
     # Deliberately outside the stubs above: this check has to run the real
     # function to observe its cache, so it fakes the network itself instead.
     asyncio.run(detail_cache_checks(market))

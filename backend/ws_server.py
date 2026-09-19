@@ -1077,24 +1077,26 @@ def _register_default_handlers():
                 extra_args=params.get("args"),
                 env=params.get("env"),
                 headers=params.get("headers"),
+                params=params.get("params"),
             )
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     async def mcp_credentials(params: dict, ws) -> dict:
-        """Which env vars and headers we hold a value for — names only.
+        """Which env vars, headers and query parameters we hold a value for.
 
-        Passing `env`/`headers` stores values; an empty string for a name
-        removes it, which is how the dashboard clears one. Values are never
+        Passing `env`/`headers`/`params` stores values; an empty string for a
+        name removes it, which is how the dashboard clears one. Values are never
         returned: the UI has no business reading back a credential it stored.
         """
         from backend.mcp_client import credentials
         env = params.get("env")
         headers = params.get("headers")
-        if env is None and headers is None:
+        queries = params.get("params")
+        if env is None and headers is None and queries is None:
             return {"success": True, **credentials.known()}
         try:
-            return {"success": True, **credentials.save(env, headers)}
+            return {"success": True, **credentials.save(env, headers, queries)}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

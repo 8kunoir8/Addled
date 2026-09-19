@@ -42,13 +42,16 @@ UA = {"User-Agent": "Addled/1.0 (mcp market)", "Accept": "application/json"}
 TIMEOUT = 15.0
 
 # Hosted servers are reached through that gateway, which authenticates the
-# caller with the user's own Smithery key - a server whose config schema
-# declares nothing still answers "Missing Authorization header" without one.
-SMITHERY_AUTH_HEADER = "Authorization"
-SMITHERY_AUTH_TEMPLATE = "Bearer {smithery_api_key}"
+# caller with the user's own Smithery key sent as a QUERY PARAMETER. Not as a
+# header: the official registry publishes `Authorization: Bearer
+# {smithery_api_key}` for these endpoints, and sending that is a guaranteed
+# "401 invalid_token" - measured against five hosted servers and both URL forms
+# (with and without the leading `@`). A server whose config schema declares
+# nothing still needs the key.
+SMITHERY_KEY_PARAM = "api_key"
 SMITHERY_KEY_HELP = ("Your Smithery API key. Hosted servers are reached through "
-                     "Smithery's gateway, which needs it. "
-                     "smithery.ai -> Account -> API keys")
+                     "Smithery's gateway, which takes it as the api_key "
+                     "parameter. smithery.ai -> Account -> API keys")
 
 # One detail record per hosted listing is wanted per search, so twelve results
 # must not cost twelve round trips in series - and a re-search, which `install`
@@ -91,6 +94,20 @@ def _gateway_url(name: str) -> str:
     """Smithery's own address for a hosted server, from its qualified name."""
     path = "/".join(part for part in str(name or "").split("/") if part)
     return f"{SMITHERY_GATEWAY}/{path}/mcp" if path else ""
+
+
+def _is_gateway(url: str) -> bool:
+    """Whether Smithery's own gateway serves this endpoint.
+
+    It does not authenticate the way their registry says it does: `api_key` in
+    the query string is accepted, `Authorization: Bearer <that same key>` is
+    not. Who serves the endpoint therefore decides how the key is sent.
+    """
+    try:
+        host = urllib.parse.urlsplit(str(url or "")).hostname or ""
+    except ValueError:
+        return False
+    return host.lower() == "server.smithery.ai"
 
 
 def _fetch_smithery_detail(name: str) -> dict | None:
@@ -237,6 +254,11 @@ def _finish(candidate: dict, hint: str = "") -> dict:
                 + (" (install Node.js)" if launcher == "npx"
                    else " (install uv)" if launcher == "uvx" else ""))
             kinds.append("runtime")
+    missing_params = credentials.missing_params(
+        candidate.get("requires_params"))
+    if missing_params:
+        reasons.append("needs " + ", ".join(missing_params))
+        kinds.append("params")
     missing_env = credentials.missing_env(candidate.get("requires_env"))
     if missing_env:
         reasons.append("needs " + ", ".join(missing_env))
@@ -248,6 +270,10 @@ def _finish(candidate: dict, hint: str = "") -> dict:
         kinds.append("headers")
     candidate["blocked_reason"] = "; ".join(reasons)
     candidate["blocked_kinds"] = kinds
+    # Which names are still missing, so a card can offer a field for those and
+    # only those. A value already held does not need asking for again, and
+    # showing the box anyway reads as "this is still not set up".
+    candidate["missing_values"] = missing_params + missing_headers + missing_env
     candidate["runnable"] = not reasons
     return candidate
 
@@ -278,6 +304,7 @@ def normalise(raw: dict) -> dict | None:
         "url": "",
         "requires_env": [],
         "requires_headers": [],
+        "requires_params": [],
         "header_hints": {},
         "runnable": False,
         "blocked_reason": "",
@@ -349,6 +376,8 @@ def to_spec(candidate: dict, *, trusted: bool = False,
         "env": credentials.subset_env(candidate.get("requires_env")),
         "headers": credentials.subset_headers(
             candidate.get("requires_headers")),
+        "params": credentials.subset_params(
+            candidate.get("requires_params")),
         "enabled": True,
         "trusted": bool(trusted),
         # Marks a server nobody chose by hand, so the idle sweep knows which
@@ -493,6 +522,7 @@ def _smithery_normalise(item: dict) -> dict | None:
         "url": "",
         "requires_env": sorted(required_env),
         "requires_headers": [],
+        "requires_params": [],
         "header_hints": {},
         "runtime": command,
         # Whether Smithery actually deploys it, which is what lets the entry be
@@ -520,19 +550,15 @@ def _hosted_updates(candidate: dict, twin: dict | None,
     Returns None when there is nowhere to send it, which is the only case where
     "hosted" is the honest answer.
     """
-    if twin and twin.get("transport") == "http" and twin.get("url"):
-        # The official registry publishes the endpoint outright, so it wins over
-        # anything derived here.
-        return {
-            "url": twin["url"],
-            "requires_headers": list(twin.get("requires_headers") or []),
-            "header_hints": dict(twin.get("header_hints") or {}),
-            "key_help": dict(twin.get("key_help") or {}),
-            "endpoint_from": twin["name"],
-        }
-
     record = record or {}
-    url = _gateway_url(candidate.get("name") or "") if candidate.get("deployed") else ""
+    if not (twin and twin.get("transport") == "http" and twin.get("url")):
+        twin = None
+
+    # The official registry publishes the endpoint outright, so it wins over
+    # anything derived here.
+    url = _clean_url(twin.get("url")) if twin else ""
+    if not url and candidate.get("deployed"):
+        url = _gateway_url(str(candidate.get("name") or ""))
     if not url:
         # Not deployed on their gateway: their detail record may still name a
         # host, which is the only other place it can be.
@@ -540,22 +566,34 @@ def _hosted_updates(candidate: dict, twin: dict | None,
     if not url:
         return None
 
-    headers = [SMITHERY_AUTH_HEADER]
+    headers: list[str] = []
+    params: list[str] = []
+    hints: dict[str, str] = {}
+    help_text: dict[str, str] = {}
+    origin = twin["name"] if twin else ""
+    if _is_gateway(url):
+        # Their gateway, their key, as the parameter it reads. Whatever header
+        # the registry declared for this endpoint is dropped, because a bearer
+        # token is exactly what it rejects.
+        params = [SMITHERY_KEY_PARAM]
+        help_text[SMITHERY_KEY_PARAM] = SMITHERY_KEY_HELP
+        origin = origin or "smithery"
+    elif twin:
+        # Somebody else's host, so trust what the registry declared for it.
+        headers = list(twin.get("requires_headers") or [])
+        hints = dict(twin.get("header_hints") or {})
+        help_text = dict(twin.get("key_help") or {})
+
+    # A hosted server may still want its own provider key beside that, which its
+    # config schema names in the provider's own words.
     declared, declared_help = _declared_keys(_http_schema(record))
     for name in declared:
         if name not in headers:
             headers.append(name)
-    return {
-        "url": url,
-        "requires_headers": headers,
-        # Only the gateway's own key has a published shape to imitate. A
-        # server's own key is whatever the provider issues, so it gets words
-        # instead of a template - pasting "Bearer " in front of a HasData key
-        # would be wrong and would fail as a 401 that explains nothing.
-        "header_hints": {SMITHERY_AUTH_HEADER: SMITHERY_AUTH_TEMPLATE},
-        "key_help": {SMITHERY_AUTH_HEADER: SMITHERY_KEY_HELP, **declared_help},
-        "endpoint_from": "smithery",
-    }
+    help_text.update(declared_help)
+    return {"url": url, "requires_headers": headers, "requires_params": params,
+            "header_hints": hints, "key_help": help_text,
+            "endpoint_from": origin}
 
 
 def _adopt_hosted(candidates: list[dict], official: dict[str, dict]) -> None:
@@ -657,7 +695,7 @@ async def suggest(task: str, limit: int = 8) -> list[dict]:
 
 async def install(name: str, *, trusted: bool = False, auto: bool = False,
                   extra_args: object = None, env: object = None,
-                  headers: object = None) -> dict:
+                  headers: object = None, params: object = None) -> dict:
     """Add a market server by registry name and connect it.
 
     ``extra_args`` exists because registry entries often leave required
@@ -665,10 +703,11 @@ async def install(name: str, *, trusted: bool = False, auto: bool = False,
     to serve and say so only on stderr once they start. Without this the entry
     is added and then fails with no way to fix it from the UI.
 
-    ``env`` and ``headers`` are the values for the variables the listing
-    declares. They are stored first, so an entry that was blocked only for want
-    of a key becomes addable — and stays addable for the agent's own pass later,
-    and for any other listing that wants the same variable.
+    ``env``, ``headers`` and ``params`` are the values for the variables the
+    listing declares, named the way the listing names them. They are stored
+    first, so an entry that was blocked only for want of a key becomes addable —
+    and stays addable for the agent's own pass later, and for any other listing
+    that wants the same variable.
     """
     from backend.mcp_client import credentials
     from backend.mcp_client.manager import mcp_manager
@@ -683,8 +722,8 @@ async def install(name: str, *, trusted: bool = False, auto: bool = False,
         return {"success": False,
                 "error": f"'{name}' is not in the MCP registry"}
 
-    if env or headers:
-        credentials.save(env, headers)
+    if env or headers or params:
+        credentials.save(env, headers, params)
         _finish(exact)
 
     if not exact["runnable"]:

@@ -271,7 +271,15 @@ function McpSection({settings,update,saving,status}: any){
   // HASDATA_API_KEY" and there was nowhere to put one.
   const [creds,setCreds]=useState<Record<string,string>>({});
 
-  const missingVars=(c:any):string[]=>[...(c?.requires_env||[]),...(c?.requires_headers||[])];
+  // Every value a listing declares, wherever it has to be sent: a variable for a
+  // local process, a header, or a query parameter — Smithery's gateway reads
+  // its key as `api_key` and refuses the same value as a header.
+  const declaredValues=(c:any):string[]=>[...(c?.requires_env||[]),...(c?.requires_headers||[]),...(c?.requires_params||[])];
+  // What is still missing, not what is merely declared: the backend subtracts
+  // the values it already holds. Falls back to the declared list for an older
+  // result that has no such field.
+  const missingVars=(c:any):string[]=>Array.isArray(c?.missing_values)?c.missing_values:declaredValues(c);
+  const heldVars=(c:any):string[]=>declaredValues(c).filter((v:string)=>!missingVars(c).includes(v));
   const filled=(c:any):boolean=>missingVars(c).every((v:string)=>Boolean((creds[v]||'').trim()));
   // Blocked *only* by values the user can type here. A missing runtime or a
   // hosted server is not something this card can fix, so the button stays off
@@ -279,7 +287,7 @@ function McpSection({settings,update,saving,status}: any){
   const onlyNeedsValues=(c:any):boolean=>{
     const kinds:string[]=c?.blocked_kinds||[];
     return missingVars(c).length>0 && kinds.length>0
-      && kinds.every((k:string)=>k==='env'||k==='headers');
+      && kinds.every((k:string)=>k==='env'||k==='headers'||k==='params');
   };
   const canAdd=(c:any):boolean=>Boolean(c?.runnable)||(onlyNeedsValues(c)&&filled(c));
 
@@ -330,6 +338,23 @@ function McpSection({settings,update,saving,status}: any){
     setMarketBusy(false);
   };
 
+  // Forget a stored value, which is the only way to replace one: values are
+  // never read back, so a key typed wrongly would otherwise be unfixable from
+  // here. The listing has to be judged again afterwards — it is blocked once
+  // more until a value is given.
+  const forgetValue=async(name:string,c:any)=>{
+    if(wsState!=='connected')return;
+    setBusy('forget'); setErr(null);
+    try{
+      const bucket=(c?.requires_params||[]).includes(name)?'params'
+        :(c?.requires_headers||[]).includes(name)?'headers':'env';
+      const out=await send('mcp.credentials',{[bucket]:{[name]:''}});
+      if(out?.success===false)setErr(out.error||'Could not forget that value');
+      if(marketQuery.trim())await searchMarket();
+    }catch(e:any){ setErr(String(e?.message||e)); }
+    setBusy(null);
+  };
+
   const installServer=async(name:string,args?:string,c?:any)=>{
     if(wsState!=='connected')return;
     setBusy('install'); setErr(null);
@@ -338,8 +363,14 @@ function McpSection({settings,update,saving,status}: any){
       // never sent to another.
       const env:Record<string,string>={};
       const headers:Record<string,string>={};
+      const query:Record<string,string>={};
       for(const key of (c?.requires_env||[])){
         const v=(creds[key]||'').trim(); if(v)env[key]=v;
+      }
+      // A query parameter takes the value as typed. It is not a token, so the
+      // "Bearer " that a header shape may declare must never go in front of it.
+      for(const key of (c?.requires_params||[])){
+        const v=(creds[key]||'').trim(); if(v)query[key]=v;
       }
       for(const key of (c?.requires_headers||[])){
         const raw=(creds[key]||'').trim();
@@ -354,7 +385,10 @@ function McpSection({settings,update,saving,status}: any){
         headers[key]=(scheme && /^[A-Za-z]+$/.test(scheme) && !raw.includes(' '))
           ? `${scheme} ${raw}` : raw;
       }
-      const out=await send('mcp.install',{name,args:args||'',env,headers});
+      const out=await send('mcp.install',{name,args:args||'',env,headers,params:query});
+      // `mcp.install` answers with the manager's status, so the card picks up
+      // its new "installed" state from this alone — no need to re-query the
+      // registries, which would also re-roll the result list.
       if(out?.status)setLive(out.status); else await load();
       if(out&&out.success===false)setErr(out.error||'Could not add that server');
       else setCreds({});
@@ -365,6 +399,9 @@ function McpSection({settings,update,saving,status}: any){
   const btn='px-3 py-1.5 rounded text-xs font-medium border border-[#30363d] hover:border-[#484f58] text-[#e8eaed] disabled:opacity-40';
   const inp='bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]';
   const servers:any[]=live?.servers||[];
+  // A card is about a market listing; whether that listing is already running
+  // here is a fact about the configured servers, joined on market_name.
+  const installedOf=(name:string)=>servers.find((s:any)=>s.market_name===name);
 
   return <div className="space-y-1 max-w-3xl">
     <p className="text-xs text-[#d29922] px-1 pb-2">
@@ -503,7 +540,7 @@ function McpSection({settings,update,saving,status}: any){
                 <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[#d29922]" title={v}>{v}</span>
                 <input type="password" autoComplete="off" value={creds[v]||''}
                   onChange={e=>setCreds({...creds,[v]:e.target.value})}
-                  placeholder={String((c.header_hints||{})[v]||((c.requires_headers||[]).includes(v)?'value for this header':'value for this variable'))}
+                  placeholder={String((c.header_hints||{})[v]||((c.requires_params||[]).includes(v)?'your API key':((c.requires_headers||[]).includes(v)?'value for this header':'value for this variable')))}
                   className={`${inp} flex-1`}/>
               </div>
               {(c.key_help||{})[v]&&
@@ -516,6 +553,22 @@ function McpSection({settings,update,saving,status}: any){
               {Object.keys(c.header_hints||{}).length>0&&' The placeholder is the shape the server expects; a bare key is given the scheme it needs.'}
             </p>
           </div>}
+          {heldVars(c).length>0&&<div className="mt-1 space-y-1">
+            {heldVars(c).map((v:string)=><div key={v} className="flex items-center gap-2">
+              <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[#3fb950]" title={v}>{v}</span>
+              <span className="flex-1 truncate text-[10px] text-[#8b949e]">using the value you saved</span>
+              <button onClick={()=>forgetValue(v,c)} disabled={busy==='forget'||wsState!=='connected'}
+                title="Forget this value so a different one can be given"
+                className={btn}>Forget</button>
+            </div>)}
+          </div>}
+          {installedOf(c.name)&&<p className="mt-1 text-[10px]">
+            {installedOf(c.name).state==='ready'
+              ? <span className="text-[#3fb950]">Installed and connected · {installedOf(c.name).tool_count} tool(s)</span>
+              : installedOf(c.name).state==='error'
+                ? <span className="text-[#f85149]">Installed, but it will not connect: {installedOf(c.name).last_error}</span>
+                : <span className="text-[#8b949e]">Installed · {installedOf(c.name).state}</span>}
+          </p>}
           {(c.blocked_kinds||[]).includes('runtime')&&String(c.command||'')==='uvx'&&
             <div className="mt-1"><UvInstall compact send={send} connected={wsState==='connected'}/></div>}
           <div className="mt-1 flex items-center justify-between gap-2">
@@ -530,7 +583,7 @@ function McpSection({settings,update,saving,status}: any){
             <button onClick={()=>installServer(c.name,extraArgs[c.name],c)}
               disabled={!canAdd(c)||busy==='install'||wsState!=='connected'}
               title={c.runnable?'':onlyNeedsValues(c)?(filled(c)?'Ready to add':'Fill in the values above'):'Needs setup before it can run'}
-              className={btn}>Add &amp; connect</button>
+              className={btn}>{installedOf(c.name)?'Reconnect':'Add & connect'}</button>
           </div>
         </div>)}
       </div>}

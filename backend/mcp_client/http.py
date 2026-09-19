@@ -9,6 +9,7 @@ or as a ``text/event-stream`` frame. Servers may hand out a session id in the
 from __future__ import annotations
 
 import logging
+import urllib.parse
 
 from backend.mcp_client.protocol import (
     McpError,
@@ -82,6 +83,24 @@ class McpHttpClient:
             headers["MCP-Protocol-Version"] = self.protocol_version
         return headers
 
+    def _target(self) -> str:
+        """The URL to POST to, with any configured query parameters.
+
+        A credential whose destination is the query string cannot be a header:
+        Smithery's gateway reads its key as `api_key` and refuses the same value
+        as a bearer token. The parameter is appended per request rather than
+        stored in `url`, so the key is not written into the spec's address and
+        never appears in a card or a log line that prints one.
+        """
+        extra = self.spec.get("params") or {}
+        if not isinstance(extra, dict) or not extra:
+            return self.url
+        query = urllib.parse.urlencode(
+            {str(k): str(v) for k, v in extra.items() if str(v)})
+        if not query:
+            return self.url
+        return f"{self.url}{'&' if '?' in self.url else '?'}{query}"
+
     async def _post(self, message: dict,
                     timeout: float | None = None) -> list[dict]:
         if self._client is None:
@@ -89,7 +108,7 @@ class McpHttpClient:
         limit = self.timeout if timeout is None else timeout
         try:
             resp = await self._client.post(
-                self.url, json=message, headers=self._headers(), timeout=limit)
+                self._target(), json=message, headers=self._headers(), timeout=limit)
         except Exception as e:
             raise McpError(-32000, f"request failed: {type(e).__name__}: {e}")
 
