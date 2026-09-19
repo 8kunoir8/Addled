@@ -25,9 +25,53 @@ asarUnpack:
   - node_modules/**
 
 extraResources:
+  # `backend/` is half code and half the running instance's own state, and
+  # `filter: ['**/*']` shipped both — which is how the 1.0.17 installer came to
+  # contain a live API key, the remote password hash, the developer's chat
+  # history and their memory databases. `.gitignore` had been excluding all of
+  # it from git, so nothing in a review of the repository showed it; the
+  # packaging step does not read `.gitignore`, and nothing compared the two.
+  #
+  # The patterns below mirror `.gitignore` deliberately. `scripts/check_packaging.py`
+  # fails if the two ever drift, so a new kind of data file cannot start
+  # shipping just because it was added to one list and not the other.
   - from: backend
     to: backend
-    filter: ['**/*']
+    filter:
+      - '**/*'
+      - '!**/__pycache__/**'
+      - '!**/*.pyc'
+      # The instance's own memory, profile, config, logs and audit trail.
+      - '!memory/*.json'
+      - '!memory/*.db'
+      - '!memory/*.db-shm'
+      - '!memory/*.db-wal'
+      - '!memory/*.log'
+      - '!memory/*.jsonl'
+      - '!memory/.vault*'
+      # Fetched or downloaded per machine, and re-downloaded on demand.
+      - '!memory/guidelines/**'
+      - '!memory/models/**'
+      - '!memory/skins/**'
+      # Learned on this machine, so they differ per user.
+      - '!memory/wiki/**'
+      - '!memory/journal/**'
+      - '!memory/sop/**'
+      - '!memory/goals/**'
+      - '!memory/market_skills/**'
+      - '!memory/forged_skills/**'
+      - '!memory/snapshots/**'
+      - '!memory/projects/**'
+      - '!memory/conversations/**'
+      - '!memory/logs/**'
+      # Listed one by one: `calendar_events.json` beside them is tracked in git
+      # on purpose, as the calendar's starting state, and ships.
+      - '!memory/integrations/scheduled_tasks.json'
+      - '!memory/integrations/scheduler_state.json'
+      - '!memory/integrations/skill_telemetry.json'
+      # NOT excluded: `backend/voice/models/**`. Those 339 MB are fetched once
+      # by scripts/fetch_voice_models.py and bundled on purpose, because the
+      # offline voice needs them present.
   - from: tools/rtk
     to: tools/rtk
     filter: ['**/*']

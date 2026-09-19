@@ -18,6 +18,15 @@
 #   .\scripts\deploy_to_install.ps1              # deploy backend + dashboard
 #   .\scripts\deploy_to_install.ps1 -BackendOnly
 #   .\scripts\deploy_to_install.ps1 -DryRun      # list what would move
+#   .\scripts\deploy_to_install.ps1 -ListExclusions   # print the exclude set
+#
+# What is excluded is DERIVED from .gitignore, not maintained here. A hand
+# written list drifts: this one shipped without `*.db`, `*.log`, `*.jsonl` and
+# `facts.json`, so a deploy quietly copied the developer's memory databases,
+# their log and their egress trail over the installed app's own. Anything git
+# ignores is history, state or a downloaded cache, and none of it belongs in
+# someone else's install. `scripts/check_packaging.py` asserts the installer
+# and this script exclude the same set.
 #
 # The script refuses to finish quietly if settings.json changed, so a future
 # exclude that is wrong shows up immediately instead of days later.
@@ -26,6 +35,7 @@
 param(
     [switch]$BackendOnly,
     [switch]$DryRun,
+    [switch]$ListExclusions,
     [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\Addled"
 )
 
@@ -33,23 +43,51 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $resources = Join-Path $InstallRoot 'resources'
 
+# git is what keeps this list honest, so its absence is a failure, not a
+# fallback to copying everything.
+$git = Get-Command git -ErrorAction SilentlyContinue
+if (-not $git) {
+    throw "git is required: the deploy's exclude list is derived from .gitignore."
+}
+
+function Get-IgnoredPaths {
+    # Everything .gitignore excludes under a folder, as repo-relative paths.
+    # --directory collapses a fully ignored folder to one entry, so a file
+    # added inside it later is covered without touching this script.
+    param([string]$Under)
+    $out = & git -C $repo ls-files --others --ignored --exclude-standard `
+                   --directory -- $Under 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "git could not list ignored paths under $Under"
+    }
+    return @($out | Where-Object { $_ })
+}
+
+$ignored = Get-IgnoredPaths -Under 'backend'
+$ignoredDirs = @($ignored | Where-Object { $_ -match '[\\/]$' } |
+                 ForEach-Object { Join-Path $repo ($_.TrimEnd('\', '/') -replace '/', '\') })
+$ignoredFiles = @($ignored | Where-Object { $_ -notmatch '[\\/]$' } |
+                  ForEach-Object { Join-Path $repo ($_ -replace '/', '\') })
+
+# Belt and braces, and things git does not track yet: a .pyc that exists only
+# because the backend has run, and the settings guard's subject.
+$alwaysFiles = @('*.pyc')
+$alwaysDirs = @((Join-Path $repo 'backend\__pycache__'))
+
+$excludeDirs = @($ignoredDirs + $alwaysDirs | Sort-Object -Unique)
+$excludeFiles = @($ignoredFiles + $alwaysFiles | Sort-Object -Unique)
+
+if ($ListExclusions) {
+    # Consumed by check_packaging.py, which compares this against the patterns
+    # in electron-builder.yml.
+    $excludeDirs | ForEach-Object { "DIR  $_" }
+    $excludeFiles | ForEach-Object { "FILE $_" }
+    return
+}
+
 if (-not (Test-Path $resources)) {
     throw "No installed app at $InstallRoot (looked for $resources)."
 }
-
-# User data. Every one of these lives beside code inside backend/memory/, which
-# is exactly why a directory-level exclude cannot be used.
-$dataDirs = @(
-    'goals', 'journal', 'market_skills', 'models', 'skins', 'integrations',
-    'guidelines', 'forged_skills', 'wiki', 'sop', 'snapshots', 'projects',
-    'conversations', 'logs'
-) | ForEach-Object { Join-Path $repo "backend\memory\$_" }
-
-$dataFiles = @(
-    'settings.json', 'chat_history.json', 'user_profile.json',
-    'models_catalog.json', 'maintenance_state.json', 'links.db',
-    'links.db-wal', 'links.db-shm', 'session_context.json'
-)
 
 $settings = Join-Path $resources 'backend\memory\settings.json'
 $beforeHash = if (Test-Path $settings) { (Get-FileHash $settings).Hash } else { '' }
@@ -68,9 +106,8 @@ function Invoke-Sync {
     if ($code -ge 8) { throw "robocopy $From -> $To failed with exit code $code" }
 }
 
-Write-Host "Deploying backend (user data excluded)..." -ForegroundColor Cyan
-$excludes = @('/XD') + ($dataDirs + @((Join-Path $repo 'backend\__pycache__'))) +
-            @('/XF') + ($dataFiles + @('*.pyc'))
+Write-Host ("Deploying backend ({0} ignored path(s), {1} ignored dir(s), excluded by .gitignore)..." -f $excludeFiles.Count, $excludeDirs.Count) -ForegroundColor Cyan
+$excludes = @('/XD') + $excludeDirs + @('/XF') + $excludeFiles
 Invoke-Sync -From (Join-Path $repo 'backend') -To (Join-Path $resources 'backend') `
             -ExtraArgs $excludes
 
@@ -109,3 +146,8 @@ if (Test-Path $settings) {
 
 Write-Host "Deployed. A running Addled needs a restart to load new backend code." -ForegroundColor Yellow
 Write-Host "  Kill the backend process; the Electron shell respawns it in ~3s." -ForegroundColor Yellow
+
+# Without this the script's exit status is whatever robocopy set last (1-7 mean
+# success to robocopy and failure to everything else), so a caller that checks
+# the exit code reads a good deploy as a broken one.
+exit 0

@@ -38,6 +38,20 @@ backend/memory/integrations/scheduler_state.json
 # Skill usage telemetry (runtime counters)
 backend/memory/integrations/skill_telemetry.json
 
+# Everything else in integrations/ is this machine's state too (initiative,
+# reflection, ...), while calendar_events.json is the calendar's starting state
+# rather than a record of use. Naming the three files above was not enough: a
+# fourth appeared and the deploy, which derives its exclude list from this
+# file, would have copied it over the installed app's. Kept tracked on purpose.
+backend/memory/integrations/*.json
+!backend/memory/integrations/calendar_events.json
+
+# Records of use, not repository content
+backend/memory/snapshots/
+backend/memory/projects/
+backend/memory/conversations/
+backend/memory/logs/
+
 # Guideline packs (fetched from upstream by backend/guidelines/store.py)
 backend/memory/guidelines/
 

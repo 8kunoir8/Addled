@@ -51,7 +51,12 @@ async function downscaleImage(file: File, maxSide = 1024): Promise<string> {
 const GREETING: Message = {
   role: 'assistant',
   content: 'Hello! I\'m your AI desktop companion. How can I help you today?',
-  timestamp: Date.now(),
+  // Stamped on mount, not here. This module is evaluated when the page is
+  // prerendered at build time, so a Date.now() here is the *build* time: the
+  // client then renders a different clock and React reports a hydration
+  // mismatch (error #418), and the greeting shows a stale build timestamp.
+  // 0 means "no time yet" and is not rendered.
+  timestamp: 0,
 };
 
 // Fill an in-flight "thinking" placeholder with the reply (or append if none).
@@ -91,6 +96,14 @@ export default function ChatPage() {
   useEffect(() => {
     setChatMessages(messages);
   }, [messages]);
+
+  // Give the greeting its clock once we are on the client. Doing it here rather
+  // than at module scope keeps the prerendered HTML and the first client render
+  // identical — see GREETING.
+  useEffect(() => {
+    setMessages((prev) => prev.map((m) =>
+      m.timestamp > 0 ? m : { ...m, timestamp: Date.now() }));
+  }, []);
 
   // Apply replies that landed in the store after this component (re)mounted —
   // e.g. the user switched to another tab mid-request and came back.
@@ -314,7 +327,8 @@ export default function ChatPage() {
                 {msg.streaming && <span className="typing-cursor" />}
               </div>
               <div className={`text-xs mt-1 ${msg.role === 'user' ? 'text-blue-200' : 'text-[#8b949e]'}`}>
-                {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                {msg.timestamp > 0 &&
+                  new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </div>
             </div>
           </div>
