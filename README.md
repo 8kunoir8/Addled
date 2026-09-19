@@ -64,7 +64,7 @@ launch.bat
 │          ▼                   ▼           │
 │  ┌────────────────────────────────────┐  │
 │  │      Python Backend Service        │  │
-│  │  Engine • 160 WS Handlers          │  │
+│  │  Engine • 161 WS Handlers          │  │
 │  │  60 Skills • Skill Forge           │  │
 │  │  10 AI Providers • Goals • Code    │  │
 │  │  Swarm • Calendar • Email • Browser│  │
@@ -87,7 +87,7 @@ launch.bat
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
 | Desktop Shell | Electron 28, system tray, auto-updater, backend auto-respawn | ✅ Built |
 | Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
-| Communication | WebSocket JSON-RPC 2.0 (160 handlers) | ✅ Built |
+| Communication | WebSocket JSON-RPC 2.0 (161 handlers) | ✅ Built |
 
 ---
 
@@ -259,7 +259,7 @@ A persistent **mood & emotion engine** (valence + energy, decays over time) driv
 ### � Remote access (Tailscale)
 Reach Addled from your phone or another machine, in a browser, over Tailscale — status, sign-in and `tailscale serve` sharing are all managed from the **Remote** page, which can also run the official Tailscale installer when you ask it to (nothing installs on its own).
 
-The WebSocket API has **no authentication of its own**, and several of its 160 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
+The WebSocket API has **no authentication of its own**, and several of its 161 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
 
 - It serves the login page and the dashboard, and only bridges a WebSocket to `127.0.0.1:9876` **after** validating a session. It binds loopback only; Tailscale terminates TLS and proxies to it, so the browser gets a real `https://<machine>.<tailnet>.ts.net` URL and `wss://` works without Addled handling a certificate.
 - The **password is scrypt-hashed** (`settings.json`), sessions are **in-memory only** (a restart logs everyone out), login attempts are **rate-limited per address**, and the session cookie is `HttpOnly` + `SameSite=Lax` (+ `Secure` over HTTPS).
@@ -297,7 +297,7 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 
 ---
 
-## WebSocket API (160 handlers)
+## WebSocket API (161 handlers)
 
 ### Core
 `chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `guide.status` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
@@ -365,7 +365,7 @@ Addled/
 │   ├── main.py              # Entry point + onboarding + single-instance lock + kill switch + voice
 │   ├── config.py            # Portable JSON settings
 │   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
-│   ├── ws_server.py         # 160 JSON-RPC 2.0 handlers + server pushes
+│   ├── ws_server.py         # 161 JSON-RPC 2.0 handlers + server pushes
 │   ├── providers/           # 10 AI providers (base + registry + selector + router)
 │   │                        #   + live model catalog + local Florence-2 vision
 │   ├── mcp_client/          # MCP client (stdio + streamable HTTP) → tools as skills
