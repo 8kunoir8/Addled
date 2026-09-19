@@ -93,15 +93,6 @@ async def run():
     from backend import ws_server
     from backend.skills.registry import skill_registry
 
-    guide_source = read(GUIDE_TS, "the guide content")
-    if not guide_source:
-        # A deployed copy has no dashboard sources, so only the backend half is
-        # meaningful there. Anything else is a real failure to read the file.
-        if os.path.isfile(GUIDE_TS):
-            return
-        print("  (no dashboard sources here — checked the backend half only)")
-        return
-
     # ---- 1. the backend contract ----------------------------------------
     ws_server._register_default_handlers()
     handler = ws_server._server._handlers.get("guide.status")
@@ -125,6 +116,55 @@ async def run():
 
     empty = [name for name, _ in leaves(status) if name.split(".")[-1] == ""]
     check("guide.status has no empty keys", not empty, str(empty[:6]))
+
+    # ---- 1b. the model flags must match the runtime, not a guess -------
+    # These two were reported from `list_available()`, which only annotates the
+    # local entry when that provider is flagged `local` in settings. On this
+    # machine it is not, so the Guide page said "Local model: not installed" for
+    # a model that was downloaded and answering on its port. Comparing against
+    # the runtime's own status is what stops that class of drift.
+    try:
+        from backend.local_llm.manager import local_llm
+        view = local_llm.status() or {}
+        check("local_model_installed agrees with the local runtime",
+              status.get("local_model_installed") == bool(view.get("installed")),
+              f"guide.status={status.get('local_model_installed')!r} but "
+              f"localLlm.status={view.get('installed')!r}")
+        check("local_model_running agrees with the local runtime",
+              status.get("local_model_running") == bool(view.get("running")),
+              f"guide.status={status.get('local_model_running')!r} but "
+              f"localLlm.status={view.get('running')!r}")
+        check("any_model_ready accounts for a running local model",
+              status.get("any_model_ready")
+              == bool(status.get("providers_configured")
+                      or status.get("local_model_running")), "")
+    except Exception as exc:  # noqa: BLE001
+        check("the local runtime's own status is readable", False, str(exc))
+
+    try:
+        from backend.providers.registry import list_available
+        entries = list_available()
+        real_keys = sum(1 for e in entries if e.get("has_key") and not e.get("local"))
+        check("providers_configured counts credentials, not a local placeholder",
+              status.get("providers_configured") == real_keys,
+              f"reported {status.get('providers_configured')!r} against "
+              f"{real_keys} providers with a key")
+        check("providers_total counts every configured provider",
+              status.get("providers_total") == len(entries),
+              f"reported {status.get('providers_total')!r} for {len(entries)}")
+    except Exception as exc:  # noqa: BLE001
+        check("the provider list is readable", False, str(exc))
+
+    # Everything above is the backend half, and it has run by now. The checks
+    # below read the guide's own source, which a deployed copy does not ship —
+    # so this is where that half ends rather than at the top of the function,
+    # which used to skip the backend checks without saying so.
+    if not os.path.isfile(GUIDE_TS):
+        print("  (no dashboard sources here — checked the backend half only)")
+        return
+    guide_source = read(GUIDE_TS, "the guide content")
+    if not guide_source:
+        return
 
     # ---- 2. the guide references flags that exist ------------------------
     declared = declared_status_keys(guide_source)

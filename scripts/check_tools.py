@@ -284,12 +284,123 @@ def run_bot_tests():
               str(info["blockers"]))
 
 
+# ---- names models write, and the forge --------------------------------------
+
+def run_forge_tests():
+    """Defects measured against a real model on this machine.
+
+    With the local 4B model, two of three end-to-end tool runs answered
+    "Unknown skill 'get_screen_size()'" — the name arrived with parentheses and
+    the parser kept them. An unmatched name does not merely fail, it reads as a
+    *missing* skill, so the market-and-forge path ran, its module template did
+    not compile, and the file it wrote stayed on disk and failed to load on
+    every later start. The forge's own pip command was wrong as well, so a
+    dependency it had just decided it needed was never installed.
+    """
+    from backend.skills import forge
+    from backend.skills.tool_loop import (_normalise_tool_name,
+                                          _parse_tool_response)
+
+    # ---- 1. the name a model actually writes ----
+    for written, expected in (
+        ("get_screen_size()", "get_screen_size"),
+        ("get_screen_size( )", "get_screen_size"),
+        ("get_screen_size()  ", "get_screen_size"),
+        ('"get_screen_size"', "get_screen_size"),
+        ("`get_screen_size`", "get_screen_size"),
+        ("get_screen_size.", "get_screen_size"),
+        ("get_screen_size (no arguments)", "get_screen_size"),
+        ("list_dir", "list_dir"),
+        ("mcp__filesystem__read_file", "mcp__filesystem__read_file"),
+    ):
+        got = _normalise_tool_name(written)
+        check(f"a tool written as {written!r} resolves to the skill",
+              got == expected, f"got {got!r}")
+
+    # The helper is only useful if it holds through the real parse.
+    parsed = _parse_tool_response(
+        '```tool\n{"tool": "get_screen_size()", "params": {}}\n```')
+    check("a parenthesised call parses to the real name",
+          [c["name"] for c in parsed["calls"]] == ["get_screen_size"],
+          str(parsed["calls"]))
+    # Positive control: the parameters must still come through, or the fix has
+    # traded one wrong answer for another.
+    parsed = _parse_tool_response(
+        '```tool\n{"tool": "list_dir()", "params": {"path": "D:\\\\x"}}\n```')
+    check("and a parenthesised call keeps its parameters",
+          parsed["calls"] and parsed["calls"][0]["params"] == {"path": "D:\\x"},
+          str(parsed["calls"]))
+
+    # ---- 2. a generated module has to compile ----
+    generated = ('async def probe_skill(params: dict) -> dict:\n'
+                 '    """A generated skill."""\n'
+                 '    try:\n'
+                 '        return {"success": True, "echo": params.get("x")}\n'
+                 '    except Exception as e:\n'
+                 '        return {"success": False, "error": str(e)}\n')
+    module = forge.build_skill_module(
+        "probe_skill", "somepkg",
+        'A description with a "quote" and\nnewline',
+        generated, {"x": "string"})
+
+    compiled = None
+    try:
+        compiled = compile(module, "probe_skill.py", "exec")
+        check("a forged module compiles", True)
+    except SyntaxError as exc:
+        check("a forged module compiles", False,
+              f"{exc.msg} at line {exc.lineno}")
+
+    if compiled is not None:
+        namespace: dict = {}
+        try:
+            exec(compiled, namespace)
+            defined = namespace.get("SKILL_DEF")
+            check("it defines SKILL_DEF", defined is not None, "no SKILL_DEF")
+            if defined is not None:
+                check("named after the skill",
+                      getattr(defined, "name", None) == "probe_skill",
+                      str(getattr(defined, "name", None)))
+                check("and points a handler at the function",
+                      getattr(defined, "handler", None) is not None, "")
+                check("an awkward description survives",
+                      '"quote"' in str(getattr(defined, "description", "")),
+                      repr(getattr(defined, "description", ""))[:80])
+                check("and it is a single line",
+                      "\n" not in str(getattr(defined, "description", "")),
+                      repr(getattr(defined, "description", ""))[:80])
+                check("with the newline collapsed, not dropped",
+                      "newline" in str(getattr(defined, "description", "")),
+                      repr(getattr(defined, "description", ""))[:80])
+        except Exception as exc:  # noqa: BLE001
+            check("it loads", False, f"{type(exc).__name__}: {exc}")
+
+    # ---- 3. the pip command ----
+    argv = forge.pip_argv("pip install numpy")
+    check("pip install becomes python -m pip install, not python -m install",
+          argv is not None and argv[1:3] == ["-m", "pip"]
+          and argv[-1] == "numpy", str(argv))
+    check("using the interpreter that is running",
+          argv is not None and argv[0] == sys.executable, str(argv))
+    check("pip3 is handled the same way",
+          forge.pip_argv("pip3 install x")[1:3] == ["-m", "pip"],
+          str(forge.pip_argv("pip3 install x")))
+    check("an explicit python -m pip is passed through",
+          forge.pip_argv("python -m pip install y")
+          == ["python", "-m", "pip", "install", "y"],
+          str(forge.pip_argv("python -m pip install y")))
+    check("anything that is not a pip install is refused",
+          forge.pip_argv("rm -rf /") is None, str(forge.pip_argv("rm -rf /")))
+    check("an empty command is refused", forge.pip_argv("") is None, "")
+
+
 def main():
     run_catalogue_tests()
     run_parser_tests()
     run_budget_tests()
     run_error_tests()
     run_bot_tests()
+    run_forge_tests()
     print()
     print(f"{'FAIL' if fails else 'PASS'}: {len(fails)} failure(s)")
     for f in fails:

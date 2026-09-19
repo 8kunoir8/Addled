@@ -462,6 +462,25 @@ def _json_objects(text: str):
                 start = None
 
 
+def _normalise_tool_name(name) -> str:
+    """The skill a model meant, from the name it actually wrote.
+
+    Most of the time the name is exactly right. But the catalogue shows a tool
+    as `name?arg`, a model will sometimes answer with `get_screen_size()` —
+    parentheses, and occasionally an argument list, quotes or a trailing stop.
+    None of that is part of a skill name, and an unmatched name is expensive
+    rather than merely wrong: it reads as a *missing* skill, so the whole
+    market-and-forge path runs (writing a generated file under a nonsense
+    name) before the user is told the tool does not exist.
+
+    Skill names never contain whitespace, so the first word is the name.
+    """
+    cleaned = str(name or "").strip().strip('"\'`')
+    cleaned = cleaned.split("(", 1)[0]
+    cleaned = cleaned.split()[0] if cleaned.split() else ""
+    return cleaned.rstrip(".,;:`")
+
+
 def _as_tool_call(candidate: dict) -> dict | None:
     """Normalise the several shapes models use for a tool call."""
     if not isinstance(candidate, dict):
@@ -475,7 +494,10 @@ def _as_tool_call(candidate: dict) -> dict | None:
                 args = json.loads(args)
             except json.JSONDecodeError:
                 args = {}
-        return {"name": str(name), "params": args or {}}
+        cleaned = _normalise_tool_name(name)
+        if not cleaned:
+            return None
+        return {"name": cleaned, "params": args or {}}
     if not name:
         return None
     params = candidate.get("params") or candidate.get("parameters") \
@@ -485,7 +507,10 @@ def _as_tool_call(candidate: dict) -> dict | None:
             params = json.loads(params)
         except json.JSONDecodeError:
             params = {}
-    return {"name": str(name), "params": params if isinstance(params, dict)
+    cleaned = _normalise_tool_name(name)
+    if not cleaned:
+        return None
+    return {"name": cleaned, "params": params if isinstance(params, dict)
             else {}}
 
 

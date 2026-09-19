@@ -2094,24 +2094,37 @@ def _register_default_handlers():
 
         # ---- models and providers -------------------------------------
         providers_total = 0
-        providers_configured = 0
-        local_installed = local_running = False
+        providers_with_key = 0
         try:
             from backend.providers.registry import list_available
             for entry in list_available():
                 providers_total += 1
-                if entry.get("has_key"):
-                    providers_configured += 1
-                if entry.get("local"):
-                    local_installed = bool(entry.get("installed"))
-                    local_running = bool(entry.get("running"))
+                # The local runtime carries a placeholder key rather than a
+                # credential, so counting it here overstates how many providers
+                # are actually usable. It is reported on its own line below.
+                if entry.get("has_key") and not entry.get("local"):
+                    providers_with_key += 1
         except Exception:
             pass
+
+        # Ask the local runtime's own manager. `list_available()` only annotates
+        # the local entry when that provider is flagged `local` in settings, and
+        # this install's is not — so reading the annotated entry reported "not
+        # installed" for a model that was downloaded and serving on port 8090.
+        local_installed = local_running = False
+        try:
+            from backend.local_llm.manager import local_llm
+            view = local_llm.status() or {}
+            local_installed = bool(view.get("installed"))
+            local_running = bool(view.get("running"))
+        except Exception:
+            pass
+
         out["providers_total"] = providers_total
-        out["providers_configured"] = providers_configured
+        out["providers_configured"] = providers_with_key
         out["local_model_installed"] = local_installed
         out["local_model_running"] = local_running
-        out["any_model_ready"] = bool(providers_configured or local_running)
+        out["any_model_ready"] = bool(providers_with_key or local_running)
         out["smart_routing_on"] = bool(setting("providers", "auto_route", False))
 
         # ---- skills --------------------------------------------------

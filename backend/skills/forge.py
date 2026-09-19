@@ -42,6 +42,62 @@ class ForgeResult:
     skill_code: str = ""
 
 
+def pip_argv(install_cmd: str) -> list[str] | None:
+    """The command line that installs a package, or None if it is not one.
+
+    `pip install X` has to become `python -m pip install X` for the interpreter
+    that is running, so the package lands where the generated skill will import
+    it from. This used to drop the wrong word and run `python -m install X`,
+    which fails with "No module named install" — so every forge dependency
+    install failed and generation carried on without the package it had just
+    decided it needed.
+    """
+    cmd = (install_cmd or "").strip()
+    if not cmd.startswith(("pip ", "pip3 ", "python -m pip ")):
+        return None
+    args = cmd.split()
+    if args[0] in ("pip", "pip3"):
+        return [sys.executable, "-m", "pip"] + args[1:]
+    return args
+
+
+def build_skill_module(skill_name: str, package: str, task_description: str,
+                       code: str, params_schema: dict) -> str:
+    """The complete generated module, ready to write and import.
+
+    Assembled from parts rather than one indented template. `textwrap.dedent`
+    removes only the indentation every line shares, and generated code starts at
+    column 0, so a template's own imports kept their 16 spaces and the module
+    would not parse — every forged skill failed with "IndentationError:
+    unexpected indent" on the template's `from dataclasses import dataclass`.
+
+    The purpose is collapsed to a single line first. It is model-written text, so
+    it can contain a newline, and a newline in the header comment ends the
+    comment and turns the rest of the sentence into code — the module then loads
+    as `NameError: name 'newline' is not defined`. A one-line description is what
+    the prompt catalogue needs as well.
+    """
+    purpose = " ".join(str(task_description or "").split())[:200]
+    return "\n".join([
+        f"# Auto-generated skill: {skill_name}",
+        f"# Package: {package}",
+        f"# Purpose: {purpose}",
+        "",
+        "from backend.skills.registry import SkillDefinition",
+        "",
+        code.strip(),
+        "",
+        "SKILL_DEF = SkillDefinition(",
+        f"    name={skill_name!r},",
+        f"    description={purpose!r},",
+        f"    parameters={params_schema!r},",
+        f"    handler={skill_name},",
+        '    category="forged",',
+        ")",
+        "",
+    ])
+
+
 class SkillForge:
     """
     Self-extending capability layer.
@@ -160,20 +216,17 @@ class SkillForge:
             return {"success": False, "error": "No install command provided"}
 
         try:
-            # Sanitize: ensure it starts with pip/pip3
-            cmd = install_cmd.strip()
-            if not cmd.startswith(("pip ", "pip3 ", "python -m pip ")):
-                return {"success": False, "error": f"Unsafe install command: {cmd}"}
-
-            args = cmd.split()
+            argv = pip_argv(install_cmd)
+            if argv is None:
+                return {"success": False,
+                        "error": f"Unsafe install command: {install_cmd.strip()}"}
             result = subprocess.run(
-                [sys.executable, "-m"] + args[1:] if args[0] in ("pip", "pip3")
-                else args,
+                argv,
                 capture_output=True, text=True, timeout=120,
                 encoding="utf-8", errors="replace",
             )
             if result.returncode == 0:
-                log.info("Package installed: %s", cmd)
+                log.info("Package installed: %s", " ".join(argv[1:]))
                 return {"success": True, "output": result.stdout[-500:]}
             return {"success": False, "error": result.stderr[-500:]}
         except subprocess.TimeoutExpired:
@@ -222,6 +275,7 @@ class SkillForge:
             Start with: async def {skill_name}(params: dict) -> dict:
         """)
 
+        skill_path = None
         try:
             from backend.providers import router
             result = await provider.chat(
@@ -251,24 +305,9 @@ class SkillForge:
             params_schema = self._infer_params(code, task_description)
 
             # Create the full skill module
-            module_code = textwrap.dedent(f"""
-                # Auto-generated skill: {skill_name}
-                # Package: {package}
-                # Purpose: {task_description}
-
-                from dataclasses import dataclass
-                from backend.skills.registry import SkillDefinition
-
-                {code}
-
-                SKILL_DEF = SkillDefinition(
-                    name="{skill_name}",
-                    description="{task_description[:200]}",
-                    parameters={json.dumps(params_schema)},
-                    handler={skill_name},
-                    category="forged",
-                )
-            """)
+            module_code = build_skill_module(skill_name, package,
+                                             task_description, code,
+                                             params_schema)
 
             # Save to disk
             skill_path = FORGE_DIR / f"{skill_name}.py"
@@ -288,11 +327,24 @@ class SkillForge:
                 return ForgeResult(True, skill_name, "generated",
                                   skill_code=code,
                                   detail=f"Generated and registered skill '{skill_name}' using {package}")
+            # Nothing can use it, so it must not stay where every start will try
+            # to load it.
+            skill_path.unlink(missing_ok=True)
             return ForgeResult(False, skill_name, "failed",
                               "Generated code has no SKILL_DEF")
 
         except Exception as e:
             log.exception("Skill generation failed: %s", e)
+            # A file that does not compile has to go. It is loaded on every
+            # start, so leaving it behind logs a failure forever and hands the
+            # user a skill they never asked for — which is exactly what a tool
+            # name like `get_screen_size()` used to produce.
+            if skill_path is not None:
+                try:
+                    skill_path.unlink(missing_ok=True)
+                    log.info("Removed %s: it did not load", skill_path.name)
+                except OSError:
+                    pass
             return ForgeResult(False, skill_name, "failed", str(e))
 
     # ── Validation ───────────────────────────────────────────────────────
