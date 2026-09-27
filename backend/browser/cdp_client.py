@@ -25,6 +25,8 @@ class CDPClient:
         self._ws = None
         self._req_id = 0
         self._pending: dict[int, asyncio.Future] = {}
+        # Strong reference to the reader task — see `_connect`.
+        self._reader_task = None
 
     @property
     def connected(self) -> bool:
@@ -58,7 +60,13 @@ class CDPClient:
                 max_size=64 * 1024 * 1024)
             self._ws = ws
             self._pending = {}
-            asyncio.get_running_loop().create_task(self._reader())
+            # The reader is stored, not fire-and-forget. `asyncio` keeps only a
+            # WEAK reference to a running task, so `create_task(...)` with the
+            # result discarded can be garbage-collected mid-flight — and a dead
+            # reader means every `call()` hangs until its timeout, with nothing
+            # in the log to say why.
+            self._reader_task = asyncio.get_running_loop().create_task(
+                self._reader())
             log.info("CDP attached to %s", targets[0].get("url", "?"))
             return True
         except Exception as e:
@@ -67,8 +75,16 @@ class CDPClient:
             return False
 
     async def _reader(self):
+        # Snapshot the socket: `async for self._ws` re-reads the attribute on
+        # every iteration, so a concurrent `close()` (which sets it to None)
+        # made the loop raise "NoneType is not async iterable" — swallowed by
+        # the bare except below, so the reader died silently and looked exactly
+        # like "the browser stopped responding".
+        ws = self._ws
+        if ws is None:
+            return
         try:
-            async for raw in self._ws:
+            async for raw in ws:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -81,8 +97,12 @@ class CDPClient:
                             msg["error"].get("message", "cdp error")))
                     else:
                         fut.set_result(msg.get("result", {}))
-        except Exception:
-            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Logged, not swallowed: a protocol error and a closed socket look
+            # identical from the outside otherwise.
+            log.debug("CDP reader stopped: %s", e)
 
     async def call(self, method: str, params: dict | None = None,
                    timeout: float = 30) -> dict:
@@ -94,7 +114,16 @@ class CDPClient:
         self._pending[rid] = fut
         await self._ws.send(json.dumps(
             {"id": rid, "method": method, "params": params or {}}))
-        return await asyncio.wait_for(fut, timeout)
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # Only `_reader` ever removed a pending entry, and it only does so
+            # when the reply ARRIVES. On a timeout or a cancel nothing popped
+            # `rid`, so every hung call leaked a future for the life of the
+            # attachment and the late reply then logged "exception was never
+            # retrieved". Two consequences, both fixed by dropping it here.
+            self._pending.pop(rid, None)
+            raise
 
     async def evaluate(self, expression: str):
         res = await self.call("Runtime.evaluate",
@@ -167,6 +196,18 @@ class CDPClient:
         await self.call("Input.insertText", {"text": str(text)})
 
     async def close(self) -> None:
+        # Cancel the reader before dropping the socket, or it wakes up on a
+        # closed connection and exits through the exception path.
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            self._reader_task = None
+        if self._pending:
+            # Any call still waiting will never get a reply now; failing them
+            # here gives the caller a real error instead of a 30s timeout.
+            for fut in self._pending.values():
+                if not fut.done():
+                    fut.set_exception(RuntimeError("CDP connection closed"))
+            self._pending.clear()
         if self._ws is not None:
             try:
                 await self._ws.close()

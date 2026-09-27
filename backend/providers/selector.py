@@ -53,6 +53,23 @@ def hf_ready() -> bool:
         return False
 
 
+def _custom_is_usable(pid: str) -> bool:
+    """Is a custom provider (from providers.custom list) ready to use?
+
+    A custom provider is considered usable when it either has an API key, or its
+    base_url points at localhost/127.0.0.1 (local gateway like 9router — no key
+    needed).
+    """
+    custom = config.get("providers", "custom", default=[]) or []
+    for c in custom:
+        if c.get("id") == pid:
+            if c.get("api_key", "").strip():
+                return True
+            url = c.get("base_url", "")
+            return url.startswith("http://localhost") or url.startswith("http://127.0.0.1")
+    return False
+
+
 def is_usable(pid: str) -> bool:
     """Can this provider actually answer a request right now?
 
@@ -70,6 +87,10 @@ def is_usable(pid: str) -> bool:
         return bool(_has_key("copilot") or os.environ.get("COPILOT_TOKEN"))
     if pid in _EXTERNAL_LOCAL:
         return True
+    # Custom provider (not in builtin)?
+    builtin = config.get("providers", "builtin", default={}) or {}
+    if pid not in builtin:
+        return _custom_is_usable(pid)
     return _has_key(pid)
 
 

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "agent-reasoning-mcp": {
+      "command": "agent-reasoning-mcp",
+      "args": [
+        "run"
+      ],
+      "env": {
+        "AGENT_REASONING_MCP_PROJECT": "addled"
+      }
+    }
+  }
+}

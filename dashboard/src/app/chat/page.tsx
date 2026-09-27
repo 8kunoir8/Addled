@@ -89,6 +89,7 @@ export default function ChatPage() {
   const [processingFiles, setProcessingFiles] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [anchors, setAnchors] = useState<{type: string; text: string}[]>([]);
+  const [workScope, setWorkScope] = useState('');
   // What the turn can use and what it used, sent by the backend before and
   // after answering. Not cleared on a timer like the anchors: this describes
   // capability, so it stays until the next turn replaces it.
@@ -193,6 +194,13 @@ export default function ChatPage() {
       }]);
     }
   }), [onNotification]);
+
+  useEffect(() => {
+    if (wsState !== 'connected') return;
+    send('workspace.status', {})
+      .then((r: any) => setWorkScope(r?.active_workspace || r?.root || ''))
+      .catch(() => {});
+  }, [wsState, send]);
 
   // Memory anchors: which memories the backend injected into this turn
   useEffect(() => onNotification('memory.anchors', (params: any) => {
@@ -336,9 +344,16 @@ export default function ChatPage() {
         </div>
       )}
       {/* Header */}
-      <header className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
-        <h1 className="text-sm font-semibold">Chat</h1>
-        <span className="text-xs text-[#8b949e]">
+      <header className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[#30363d]">
+        <div className="min-w-0">
+          <h1 className="text-sm font-semibold">Chat</h1>
+          {workScope && (
+            <p className="text-[11px] text-[#8b949e] truncate" title={workScope}>
+              Work scope: {workScope}
+            </p>
+          )}
+        </div>
+        <span className="text-xs text-[#8b949e] shrink-0">
           {wsState === 'connected' ? 'Connected' : wsState === 'connecting' ? 'Connecting...' : 'Disconnected'}
         </span>
       </header>

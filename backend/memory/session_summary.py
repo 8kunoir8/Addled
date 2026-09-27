@@ -95,24 +95,45 @@ def save_session_summary(summary: str) -> None:
     if not summary:
         return
     entries = _load()
-    entries.append({"ts": time.time(), "summary": summary})
+    # A stable, monotonic id — NOT the list position.
+    #
+    # `_save` keeps only the newest MAX_SUMMARIES, so a positional index stopped
+    # identifying the row it was computed for the moment the list started
+    # rotating: `delete_summary(index)` then popped a different summary than the
+    # one the dashboard showed, and every `memory_related("summary", n)` link
+    # pointed at the wrong note. `facts.py` had the same defect and now uses the
+    # same fix.
+    nid = max((int(e.get("id", 0)) for e in entries), default=0) + 1
+    entries.append({"id": nid, "ts": time.time(), "summary": summary})
     _save(entries)
     # Provenance: this summary came out of today's session, and it may name files.
     try:
         import datetime as _dt
         from backend.memory.autolink import link_provenance, link_text
-        index = len(entries) - 1
-        link_provenance("summary", index, "journal",
+        link_provenance("summary", nid, "journal",
                         _dt.date.today().isoformat(), note=summary[:80])
-        link_text("summary", index, summary, source="auto",
+        link_text("summary", nid, summary, source="auto",
                   extra_note=summary[:80])
     except Exception as e:
         log.debug("summary auto-link failed: %s", e)
     try:
         from backend.memory.recall import embed_text
         from backend.memory.vector_store import vector_store
-        vector_store.add(embed_text(summary), category="session_summary",
-                         metadata={"text": summary})
+        # Keep the vector row's id on the entry, so deleting the summary can
+        # remove exactly that row. `delete_category` was used before, which
+        # dropped the vector rows of every OTHER summary too — so deleting one
+        # silently removed the rest from semantic recall while their text
+        # stayed in the JSON.
+        row_id = vector_store.add(embed_text(summary),
+                                  category="session_summary",
+                                  metadata={"text": summary, "summary_id": nid})
+        if isinstance(row_id, int):
+            entries = _load()
+            for entry in entries:
+                if int(entry.get("id", -1)) == nid:
+                    entry["vector_id"] = row_id
+                    break
+            _save(entries)
     except Exception as e:
         log.debug("Vector summary store failed: %s", e)
 
@@ -121,12 +142,34 @@ def get_recent_summaries(limit: int = 3) -> list[dict]:
     return _load()[-limit:]
 
 
-def delete_summary(index: int) -> bool:
-    """Delete one summary by index (0 = oldest in the list)."""
+def delete_summary(ref: int) -> bool:
+    """Delete one summary.
+
+    `ref` is the summary's **id** (what `get_recent_summaries` returns). A bare
+    list position is still accepted for older callers, but ids are what survive
+    the 50-entry rotation — a position did not, which is how this deleted the
+    wrong summary once the list started turning over.
+    """
     entries = _load()
-    if not (0 <= index < len(entries)):
+    doomed = [e for e in entries if int(e.get("id", -1)) == int(ref)]
+    if doomed:
+        entries = [e for e in entries if int(e.get("id", -1)) != int(ref)]
+        _save(entries)
+        # Remove only this summary's vector row. `delete_category` was used
+        # before, which also erased the semantic-recall row of every summary
+        # that is still here.
+        vid = doomed[0].get("vector_id")
+        if isinstance(vid, int):
+            try:
+                from backend.memory.vector_store import vector_store
+                vector_store.delete(vid)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not delete summary vector row: %s", e)
+        return True
+    # No id matched: treat it as a position, the old contract.
+    if not (0 <= int(ref) < len(entries)):
         return False
-    entries.pop(index)
+    entries.pop(int(ref))
     _save(entries)
     return True
 

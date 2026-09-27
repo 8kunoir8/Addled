@@ -101,22 +101,35 @@ def fit_messages(messages: list[dict], limit: int, reserve: int,
     if message_tokens(messages) <= room:
         return messages, 0
 
-    head = [m for m in messages if m.get("role") == "system"][:1]
-    rest = [m for m in messages if m is not head[0]] if head else list(messages)
+    # Keep the system prompt and the newest turns. The system message is
+    # selected BY ROLE, not by identity: `[m for m in messages if m is not
+    # head[0]]` relied on the object being the same one, so a caller that
+    # passed two system dicts — or a copy — would have both silently dropped
+    # with the head. Only the first system message is pinned; the rest are
+    # ordinary middle content.
+    pinned_system: list[dict] = []
+    rest: list[dict] = []
+    system_taken = False
+    for m in messages:
+        if not system_taken and m.get("role") == "system":
+            pinned_system.append(m)
+            system_taken = True
+            continue
+        rest.append(m)
     if len(rest) <= keep_recent:
         return messages, 0
 
     tail = rest[-keep_recent:]
     middle = rest[:-keep_recent]
     dropped = 0
-    while middle and message_tokens(head + middle + tail) > room:
+    while middle and message_tokens(pinned_system + middle + tail) > room:
         middle.pop(0)                 # oldest first
         dropped += 1
 
     # Hand back the smaller list even when it still does not fit: the caller can
     # then report that the request is too large, which is better than sending
     # the whole thing and getting an opaque rejection from the provider.
-    return head + tail, dropped
+    return pinned_system + middle + tail, dropped
 
 
 def reply_budget(prompt_tokens: int, limit: int,
@@ -127,3 +140,28 @@ def reply_budget(prompt_tokens: int, limit: int,
         return 0
     return max(MIN_REPLY_TOKENS, min(want, room)) if room >= MIN_REPLY_TOKENS \
         else room
+
+def fit_single_prompt(prompt: str, provider_id: str,
+                      want_reply: int = 1024) -> tuple[str, int]:
+    """Clip one self-contained prompt to a window, and say how much reply room is left.
+
+    Background jobs — the skill forge's discovery and code generation calls, in
+    particular — build their own one-message prompt and hand it straight to
+    ``provider.chat``. That bypasses the tool loop and therefore all of the
+    trimming above, so on the 8k local model the forge's prompt plus a 2000-token
+    generation request overran the window and came back as an opaque provider
+    error. The prompt is what gets clipped here: unlike a conversation, it is
+    reproducible and the tail carries the instruction.
+
+    Returns ``(prompt, max_tokens)``; ``max_tokens`` is 0 when even the clipped
+    prompt cannot fit, which the caller should treat as "do not send this".
+    """
+    limit = context_limit(provider_id)
+    tokens = estimate_tokens(prompt)
+    room = limit - want_reply - 64
+    if tokens > room and room > 0:
+        keep_chars = max(0, room * CHARS_PER_TOKEN)
+        prompt = prompt[:keep_chars]
+        log.info("Clipped a background prompt to fit %s's %d-token context",
+                 provider_id or "provider", limit)
+    return prompt, reply_budget(estimate_tokens(prompt), limit, want=want_reply)

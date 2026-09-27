@@ -129,13 +129,21 @@ class KnowledgeGraph:
                since: float | None = None, until: float | None = None,
                limit: int = 20) -> list[dict]:
         """Time-bounded graph lookup.
-        Returns [{id, subject, relation, object, ts}] newest first."""
+        Returns [{id, subject, relation, object, ts}] newest first.
+
+        A `subject` is matched case-insensitively in PYTHON, not in SQL. SQL
+        was tried first and is wrong for this: `LIKE` folds ASCII only, and
+        SQLite's `lower()` is ASCII-only too — `lower('CAFÉ')` returns
+        `'cafÉ'`, leaving the É. Matching on one side in SQL and the other in
+        Python (which is what lowercasing just the needle did) therefore
+        missed every subject with a non-ASCII cased character: "İstanbul
+        planı" was unfindable. `casefold()` is the Unicode-aware comparison
+        the rest of the codebase uses (`search_in_files`), so the scan is done
+        here and the SQL keeps only the cheap, case-sensitive filters.
+        """
         if not self.available:
             return []
         conds, args = [], []
-        if subject:
-            conds.append("subject LIKE ?")
-            args.append(f"%{subject.lower()}%")
         if relation:
             conds.append("relation = ?")
             args.append(relation)
@@ -146,15 +154,23 @@ class KnowledgeGraph:
             conds.append("ts <= ?")
             args.append(float(until))
         where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        # A subject filter needs the rows in Python, so widen the SQL cap when
+        # one is present; without it the LIMIT alone is correct.
+        sql_limit = limit if not subject else max(limit, 500)
         try:
             rows = self._conn.execute(
                 "SELECT id, subject, relation, object, ts FROM triples " +
-                where + " ORDER BY ts DESC LIMIT ?", (*args, limit)).fetchall()
-            return [{"id": r[0], "subject": r[1], "relation": r[2],
-                     "object": r[3], "ts": r[4]} for r in rows]
+                where + " ORDER BY ts DESC LIMIT ?",
+                (*args, sql_limit)).fetchall()
         except Exception as e:
             log.debug("lookup failed: %s", e)
             return []
+        out = [{"id": r[0], "subject": r[1], "relation": r[2],
+                "object": r[3], "ts": r[4]} for r in rows]
+        if subject:
+            needle = subject.casefold()
+            out = [r for r in out if needle in str(r["subject"]).casefold()]
+        return out[:limit]
 
     def semantic_search(self, query: str, top_k: int = 8,
                         since: float | None = None,

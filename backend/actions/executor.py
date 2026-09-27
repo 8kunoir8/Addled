@@ -14,6 +14,11 @@ from dataclasses import dataclass, field
 
 log = logging.getLogger("addled.executor")
 
+# How long an in-band approval stays queued while a chat turn waits on it.
+# Short on purpose: past this the turn is told it is still pending rather than
+# leaving the conversation looking hung.
+APPROVAL_WAIT_S = 60.0
+
 
 @dataclass
 class ActionRequest:
@@ -49,6 +54,8 @@ class ActionExecutor:
         self._handlers: dict[str, callable] = {}
         self._pending_approvals: dict[str, ActionRequest] = {}
         self._approval_counter = 0
+        # approval_id -> Future, for a chat turn waiting on the answer.
+        self._approval_waiters: dict[str, asyncio.Future] = {}
 
     def _lazy_init(self):
         if self._input is None:
@@ -88,6 +95,13 @@ class ActionExecutor:
         request = self._pending_approvals.pop(approval_id, None)
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
+        # A chat turn may be blocked on this decision. Wake it so the command
+        # runs on that turn rather than being executed a second time here.
+        waiter = self._resolve_waiter(approval_id, "approved")
+        if waiter:
+            return ActionResult(True, request.action_type,
+                                summary="Approved — running now",
+                                data={"approval_id": approval_id})
         gate = self._gate
         self._gate = None  # already approved — bypass the gate for this run
         self._approved_run = True  # let run_command execute the approved command
@@ -102,8 +116,170 @@ class ActionExecutor:
         request = self._pending_approvals.pop(approval_id, None)
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
+        self._resolve_waiter(approval_id, None)
         return ActionResult(True, request.action_type, summary="Action denied by user",
                             data={"approval_id": approval_id})
+
+    def _resolve_waiter(self, approval_id: str, verdict) -> bool:
+        """Wake a waiting chat turn. Returns True when one was waiting.
+
+        Must never raise: it is called from approve/deny, and a scheduling
+        detail there must not turn a working approval into an error.
+        """
+        waiter = self._approval_waiters.pop(approval_id, None)
+        if waiter is None:
+            return False
+        try:
+            loop = getattr(waiter, "get_loop", lambda: None)()
+            if loop is not None and loop.is_closed():
+                return False
+            if waiter.done():
+                return False
+            waiter.set_result(verdict)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not wake approval waiter %s: %s", approval_id, e)
+            return False
+
+    async def execute_for_chat(self, action_type: str,
+                               params: dict) -> ActionResult:
+        """Run an action from a chat turn, asking in-band when it is gated.
+
+        `execute()` queues a gated action and returns immediately, which left a
+        tool call with an approval id and no way to consume it — the console
+        command then read as a permissions wall. Here the turn waits for the
+        user's decision and runs the command on the same turn when they agree.
+        """
+        self._lazy_init()
+        request = ActionRequest(action_type=action_type, params=params or {})
+        if not self._gated(action_type, request.params):
+            return await self.execute(request)
+
+        self._approval_counter += 1
+        approval_id = f"appr_{self._approval_counter}"
+        self._pending_approvals[approval_id] = request
+        try:
+            self._broadcast_approval_request(approval_id, request)
+        except Exception as e:  # noqa: BLE001
+            log.debug("approval broadcast failed: %s", e)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return ActionResult(False, action_type,
+                error="This action needs approval, which is only available "
+                      "while the app is running.",
+                data={"approval_id": approval_id, "requires_approval": True})
+
+        waiter: asyncio.Future = loop.create_future()
+        self._approval_waiters[approval_id] = waiter
+        try:
+            verdict = await asyncio.wait_for(waiter, APPROVAL_WAIT_S)
+        except asyncio.TimeoutError:
+            self._approval_waiters.pop(approval_id, None)
+            # Leave the approval pending in _pending_approvals so the user
+            # can still approve it asynchronously from the dashboard after
+            # the chat turn gave up waiting.  `approve()` runs the action
+            # directly when no waiter is active — but only if the request
+            # is still queued.  Previously this `finally` deleted it on
+            # every exit, including timeout, which made the dashboard's
+            # Approve button return "No pending approval" for anything the
+            # agent asked about more than 60 seconds ago.
+            return ActionResult(False, action_type,
+                error=f"'{params.get('command', action_type)}' needs your "
+                      f"approval before it can run. Approve it in the "
+                      f"dashboard (Settings or the pending-action prompt) and "
+                      f"ask again.",
+                data={"approval_id": approval_id, "requires_approval": True})
+
+        # The chat turn got a verdict.  NOW it is safe to dequeue — the
+        # action either ran below (approved) or was denied, and the user
+        # will not be approving this same id later.
+        self._pending_approvals.pop(approval_id, None)
+
+        if verdict != "approved":
+            return ActionResult(False, action_type,
+                error="The user denied this command, so it was not run.",
+                data={"approval_id": approval_id, "denied": True})
+
+        gate = self._gate
+        self._gate = None            # already decided — do not queue it again
+        self._approved_run = True
+        try:
+            return await self.execute(request)
+        finally:
+            self._gate = gate
+            self._approved_run = False
+
+    def _gated(self, action_type: str, params: dict) -> bool:
+        self._lazy_init()
+        if not self._gate:
+            return False
+        try:
+            return bool(self._gate.requires_approval(action_type, params))
+        except Exception as e:  # noqa: BLE001
+            log.debug("gate classification failed: %s", e)
+            return False
+
+    async def request_approval(self, action_type: str, params: dict):
+        """Ask the user before a skill runs. The skill-side entry point.
+
+        Returns:
+          True   — approved, run it now
+          False  — denied, do not run it
+          {"approval_id": ..., "message": ...} — still waiting after the
+                   in-band window; the request stays queued so the dashboard
+                   can answer it later.
+
+        Kept separate from `execute_for_chat` because the two answer different
+        questions. That one RUNS the action for a chat turn; this one only
+        decides permission, so a caller that routes skills (`SkillRegistry`)
+        does not have to hand the registry a second dispatch path for the
+        action itself. The `_gate` is bypassed deliberately — the caller has
+        already decided this needs approval, and re-asking the gate could
+        disagree with the `requires_approval` flag that got us here.
+        """
+        self._lazy_init()
+        request = ActionRequest(action_type=action_type, params=params or {})
+        self._approval_counter += 1
+        approval_id = f"appr_{self._approval_counter}"
+        self._pending_approvals[approval_id] = request
+        try:
+            self._broadcast_approval_request(approval_id, request)
+        except Exception as e:  # noqa: BLE001
+            log.debug("approval broadcast failed: %s", e)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop means no way to wait. Keep the request queued so the
+            # dashboard can still answer it, and tell the caller it is pending.
+            return {"approval_id": approval_id, "requires_approval": True,
+                    "message": (f"'{action_type}' needs approval, which is only "
+                                "available while the app is running.")}
+
+        waiter: asyncio.Future = loop.create_future()
+        self._approval_waiters[approval_id] = waiter
+        try:
+            verdict = await asyncio.wait_for(waiter, APPROVAL_WAIT_S)
+        except asyncio.TimeoutError:
+            self._approval_waiters.pop(approval_id, None)
+            # Left pending on purpose: the user can still approve it from the
+            # dashboard, and `approve()` runs it directly when no waiter is
+            # active. Deleting it here is what once made Approve return "No
+            # pending approval" for anything older than the wait window.
+            return {"approval_id": approval_id, "requires_approval": True,
+                    "message": (f"'{action_type}' needs your approval before it "
+                                "can run. Approve it in the dashboard and ask "
+                                "again.")}
+        self._pending_approvals.pop(approval_id, None)
+        return verdict == "approved"
+
+    @staticmethod
+    def _broadcast_approval_request(approval_id: str, request: ActionRequest) -> None:
+        """Tell the dashboard a decision is waiting, so it can be answered."""
+        from backend.actions import approval_notice
+        approval_notice.publish(approval_id, request.action_type, request.params)
 
     async def execute(self, request: ActionRequest) -> ActionResult:
         """Main entry point. All actions go through this pipeline."""
@@ -118,15 +294,15 @@ class ActionExecutor:
                 return ActionResult(False, request.action_type, error="Rate limit exceeded")
 
         # 2. Destruction gate classification
-        if self._gate:
-            if self._gate.requires_approval(request.action_type, request.params):
-                self._approval_counter += 1
-                approval_id = f"appr_{self._approval_counter}"
-                self._pending_approvals[approval_id] = request
-                return ActionResult(False, request.action_type,
-                    error="Destructive action awaiting approval",
-                    data={"approval_id": approval_id, "action": request.action_type,
-                          "params": request.params})
+        if self._gate is not None and self._gated(request.action_type,
+                                                  request.params):
+            self._approval_counter += 1
+            approval_id = f"appr_{self._approval_counter}"
+            self._pending_approvals[approval_id] = request
+            return ActionResult(False, request.action_type,
+                error="Destructive action awaiting approval",
+                data={"approval_id": approval_id, "action": request.action_type,
+                      "params": request.params, "requires_approval": True})
 
         # 3. Dispatch
         handler = self._handlers.get(request.action_type)
@@ -191,8 +367,14 @@ class ActionExecutor:
         self._handlers["write_file"] = lambda p: f.write(str(p.get("path", "")), str(p.get("content", "")))
         self._handlers["append_file"] = lambda p: f.append(str(p.get("path", "")), str(p.get("content", "")))
         self._handlers["delete_file"] = lambda p: f.delete(str(p.get("path", "")))
-        self._handlers["copy_file"] = lambda p: f.copy(str(p.get("source", "")), str(p.get("dest", "")))
-        self._handlers["move_file"] = lambda p: f.move(str(p.get("source", "")), str(p.get("dest", "")))
+        # `overwrite` is opt-in: without it these refuse an occupied
+        # destination rather than silently replacing it.
+        self._handlers["copy_file"] = lambda p: f.copy(
+            str(p.get("source", "")), str(p.get("dest", "")),
+            overwrite=bool(p.get("overwrite")))
+        self._handlers["move_file"] = lambda p: f.move(
+            str(p.get("source", "")), str(p.get("dest", "")),
+            overwrite=bool(p.get("overwrite")))
         self._handlers["list_dir"] = lambda p: f.list_dir(str(p.get("path", ".")), p.get("pattern", "*"))
         self._handlers["create_dir"] = lambda p: f.create_dir(str(p.get("path", "")))
         self._handlers["search_files"] = lambda p: f.search(str(p.get("directory", ".")), str(p.get("pattern", "*")), p.get("recursive", True))

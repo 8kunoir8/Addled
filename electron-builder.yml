@@ -70,6 +70,13 @@ extraResources:
       - '!memory/projects/**'
       - '!memory/conversations/**'
       - '!memory/logs/**'
+      # The swarm roster is the user's own desks: their names, briefs, learned
+      # corrections and pinned models. It is written on first run and edited by
+      # hand, so shipping the developer's copy would replace a user's team with
+      # someone else's on every upgrade — the same fault the calendar entry
+      # below records, and the reason check_packaging.py fails by name when a
+      # new memory folder is not listed here.
+      - '!memory/swarm/**'
       # Integrations are per machine, including `calendar_events.json`. It looks
       # like a seed because it is an empty list, but it is the user's calendar:
       # shipping it meant an upgrade replaced it with an empty one. The calendar

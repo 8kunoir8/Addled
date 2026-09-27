@@ -107,6 +107,10 @@ check("deepseek vision keeps local model",
       router.resolve_model("deepseek", "vision"), "microsoft/Florence-2-base")
 # A provider with no role map must not change behaviour at all.
 check("openai chat", router.resolve_model("openai", "chat"), "gpt-4o")
+check("local chat model", router.resolve_model("local", "chat"), "qwen3-8b")
+check("local model list", builtin.get("local", {}).get("models"), ["qwen3-8b"])
+check("local GGUF", config.get("local_llm", "model_file"), "Qwen3-8B-Q4_K_M.gguf")
+check("local download size", config.get("local_llm", "size_mb"), 5030)
 
 # ---- 3. stale-override validation -------------------------------------------
 router._catalog_models = lambda pid: ["deepseek-v4-pro", "deepseek-chat"]

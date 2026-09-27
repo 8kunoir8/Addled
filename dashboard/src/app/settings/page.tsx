@@ -39,7 +39,15 @@ export default function SettingsPage() {
     if (wsState !== 'connected') return;
     setSaving(`${section}.${key}`);
     try {
-      await send('settings.set', { section, key, value });
+      // Autostart is a file in the Windows Startup folder as well as a setting,
+      // so it cannot be a plain settings.set — that would show the checkbox as
+      // on while no shortcut existed, which is exactly the drift the backend
+      // entry point exists to prevent.
+      if (section === 'system' && key === 'autostart') {
+        await send('system.setAutostart', { enabled: !!value });
+      } else {
+        await send('settings.set', { section, key, value });
+      }
       setSettings((prev: any) => {
         if (!key) return { ...prev, [section]: value };  // top-level setting
         return { ...prev, [section]: { ...prev?.[section], [key]: value } };
@@ -784,6 +792,9 @@ function GuidelinesSection({settings,update,saving,status}: any){
 
 function ProvidersSection({ settings, update, saving, status }: any) {
   const p=settings?.providers||{}, builtin=p.builtin||{}, active=p.active||'local';
+  const customList: any[] = p.custom || [];
+  const isCustomActive = !(active in builtin) && customList.some((c:any) => c.id===active);
+  const activeCfg: any = builtin[active] ?? customList.find((c:any) => c.id===active) ?? {};
   const llm=settings?.local_llm||{};
   const { send, state: wsState }=useWS();
   const [llmStatus,setLlmStatus]=useState<any>(null);
@@ -818,10 +829,25 @@ function ProvidersSection({ settings, update, saving, status }: any) {
     setBusy(null);
   };
 
+  const saveDefaultModel = (val: string) => {
+    if (isCustomActive)
+      update('providers','custom', customList.map((c:any) => c.id===active ? {...c, default_model:val} : c));
+    else
+      update('providers','builtin', {...builtin,[active]:{...builtin[active], default_model:val}});
+  };
+  const saveRole = (role: string, val: string) => {
+    if (isCustomActive)
+      update('providers','custom', customList.map((c:any) => c.id===active
+        ? {...c, roles:{...(c.roles||{}),[role]:val}} : c));
+    else
+      update('providers','builtin', {...builtin,[active]:{...builtin[active],
+        roles:{...(builtin[active]?.roles||{}),[role]:val}}});
+  };
+
   const cat:any=catalog?.providers?.[active]||null;
   const models:string[]=((cat?.models&&cat.models.length)
     ?cat.models
-    :builtin[active]?.models)||[];
+    :activeCfg?.models)||[];
   const hf=llmStatus?.hf||null;
   const llmPct=typeof llmStatus?.progress==='number'?llmStatus.progress:0;
   const sizeGb=((llm.size_mb||2400)/1024).toFixed(1);
@@ -832,17 +858,19 @@ function ProvidersSection({ settings, update, saving, status }: any) {
     <SettingRow label="Active Provider">
       <select value={active} onChange={e=>update('providers','active',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]">
         {Object.keys(builtin).map(id=><option key={id} value={id}>{builtin[id]?.name||id}</option>)}
+        {(p.custom||[]).map((c:any)=><option key={c.id} value={c.id}>{c.name||c.id}</option>)}
       </select>
     </SettingRow>
     <SettingRow label="Default Model">
       {models.length>1?(
-        <select value={builtin[active]?.default_model||''} onChange={e=>{const u={...builtin,[active]:{...builtin[active],default_model:e.target.value}};update('providers','builtin',u)}} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-64">
-          {!!builtin[active]?.default_model&&!models.includes(builtin[active].default_model)&&
-            <option value={builtin[active].default_model}>{builtin[active].default_model}</option>}
+        <select value={activeCfg?.default_model||''} onChange={e=>{saveDefaultModel(e.target.value)}} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-64">
+          {!!activeCfg?.default_model&&!models.includes(activeCfg.default_model)&&
+            <option value={activeCfg.default_model}>{activeCfg.default_model}</option>}
           {models.map(m=><option key={m} value={m}>{m}</option>)}
         </select>
       ):(
-        <input type="text" value={builtin[active]?.default_model||''} readOnly className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#8b949e] w-64"/>
+        <input type="text" value={activeCfg?.default_model||''} onChange={e=>saveDefaultModel(e.target.value)}
+          placeholder="e.g. gpt-4o" className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-64 font-mono"/>
       )}
     </SettingRow>
     <div className="flex items-center gap-2 px-1 text-[11px]">
@@ -872,24 +900,24 @@ function ProvidersSection({ settings, update, saving, status }: any) {
       <p className="mt-1 text-[11px] text-[#8b949e]">
         Addled picks a model based on what the task needs. Any role left on
         <span className="font-mono"> default </span>
-        uses <span className="font-mono">{builtin[active]?.default_model||'the provider default'}</span>.
+        uses <span className="font-mono">{activeCfg?.default_model||'the provider default'}</span>.
       </p>
       {p.auto_route!==false&&
         <div className="mt-2 space-y-1">
           {ROUTE_ROLES.map(([role,label,hint])=>{
-            const rcfg=builtin[active]?.roles||{};
+            const rcfg=activeCfg?.roles||{};
             const cur=rcfg[role]||'';
             const fb=role==='vision'
-              ?(builtin[active]?.vision_model||builtin[active]?.default_model||'')
-              :(builtin[active]?.default_model||'');
+              ?(activeCfg?.vision_model||activeCfg?.default_model||'')
+              :(activeCfg?.default_model||'');
             const opts=Array.from(new Set(
               [...(models||[]), fb, cur,
-               ...(role==='vision'&&builtin[active]?.vision_model?[builtin[active].vision_model]:[])]
+               ...(role==='vision'&&activeCfg?.vision_model?[activeCfg.vision_model]:[])]
             )).filter(Boolean) as string[];
             return <div key={role} className="flex items-center gap-2">
               <span className="w-24 shrink-0 text-[11px] text-[#8b949e]" title={hint}>{label}</span>
               <select value={cur}
-                onChange={e=>{const u={...builtin,[active]:{...builtin[active],roles:{...(builtin[active]?.roles||{}),[role]:e.target.value}}};update('providers','builtin',u)}}
+                onChange={e=>{saveRole(role, e.target.value)}}
                 className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] flex-1 min-w-0">
                 <option value="">Use default — {fb||'provider default'}</option>
                 {opts.map(m=><option key={m} value={m}>{m}</option>)}
@@ -974,6 +1002,8 @@ function ProvidersSection({ settings, update, saving, status }: any) {
       </div>
     </div>
 
+    <CustomProvidersPanel custom={p.custom||[]} update={update} btn={btn} btnPrimary={btnPrimary}/>
+
     {Object.entries(builtin).filter(([,cfg]:[string,any])=>!cfg.local).map(([id,cfg]:[string,any])=>
       <SettingRow key={id} label={`${cfg.name} API Key`}>
         <div className="flex items-center gap-2">
@@ -985,18 +1015,94 @@ function ProvidersSection({ settings, update, saving, status }: any) {
   </div>;
 }
 
+function CustomProvidersPanel({ custom, update, btn, btnPrimary }: any) {
+  const slugify = (s: string) =>
+    s.toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'') || `custom-${Date.now()}`;
+
+  const save = (list: any[]) => update('providers','custom', list);
+
+  const addBlank = () => save([...custom, {
+    id: `custom-${Date.now()}`, name:'', base_url:'', api_key:'', default_model:'', models:[], vision:true,
+  }]);
+
+  const addNinerouter = () => {
+    if(custom.some((c:any)=>c.id==='9router')) return;
+    save([...custom, {
+      id:'9router', name:'9router', base_url:'http://localhost:20128/v1',
+      api_key:'', default_model:'', models:[], vision:true,
+    }]);
+  };
+
+  const del = (id: string) => save(custom.filter((c:any)=>c.id!==id));
+
+  const set = (idx: number, field: string, val: any) => {
+    const next = custom.map((c:any, i:number) => i===idx ? {...c, [field]:val} : c);
+    // re-derive id from name when name changes (only if id looks auto-generated)
+    if(field==='name'){
+      const c = next[idx];
+      if(!c.id || c.id.startsWith('custom-')){
+        next[idx] = {...c, id: slugify(val)};
+      }
+    }
+    save(next);
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm font-medium text-[#e8eaed]">🔗 Custom Providers</p>
+        <div className="flex gap-2">
+          <button onClick={addNinerouter} disabled={custom.some((c:any)=>c.id==='9router')}
+            className={btnPrimary} title="Add 9router (localhost:20128)">
+            + 9router
+          </button>
+          <button onClick={addBlank} className={btn}>＋ Add</button>
+        </div>
+      </div>
+      <p className="mb-3 text-[11px] text-[#8b949e]">
+        Any OpenAI-compatible endpoint — 9router, LiteLLM, vLLM, etc.
+        Localhost URLs need no API key.
+      </p>
+      {custom.length===0 && (
+        <p className="text-[11px] text-[#484f58]">No custom providers yet.</p>
+      )}
+      {custom.map((c:any, idx:number)=>(
+        <div key={c.id||idx} className="mb-3 rounded border border-[#21262d] p-2 space-y-1.5">
+          <div className="flex gap-2">
+            <input type="text" placeholder="Name" value={c.name||''} onChange={e=>set(idx,'name',e.target.value)}
+              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] w-28"/>
+            <input type="text" placeholder="Base URL  e.g. http://localhost:20128/v1" value={c.base_url||''} onChange={e=>set(idx,'base_url',e.target.value)}
+              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] flex-1 font-mono"/>
+          </div>
+          <div className="flex gap-2 items-center">
+            <input type="password" placeholder="API Key (optional for localhost)" value={c.api_key||''} onChange={e=>set(idx,'api_key',e.target.value)}
+              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] w-44 font-mono"/>
+            <input type="text" placeholder="Default model" value={c.default_model||''} onChange={e=>set(idx,'default_model',e.target.value)}
+              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] w-40 font-mono"/>
+            <label className="flex items-center gap-1 text-[11px] text-[#8b949e] cursor-pointer ml-auto shrink-0">
+              <input type="checkbox" checked={!!c.vision} onChange={e=>set(idx,'vision',e.target.checked)}/> Vision
+            </label>
+            <button onClick={()=>del(c.id)} className="text-[11px] text-[#f85149] hover:text-red-400 px-1">🗑</button>
+          </div>
+          <p className="text-[10px] text-[#484f58]">id: {c.id||'(unsaved)'}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CharacterSection({ settings, update, saving, status }: any) {
   // Shape, Colour, Glow and Eyes were removed from here on request. They are not
   // unused: the avatar reads every one of them (shape at avatar.py:431, colour at
   // :84/:128, glow at :80/:131/:406, eyes at :85/:129), so the character keeps its
-  // current appearance — but shape is now only asked during first-run setup, and
-  // the other three can no longer be changed from the UI. Their values stay in
-  // settings.json and can be edited there.
+  // current appearance — but the UI no longer offers them, and first-run setup no
+  // longer asks either. Their values stay in settings.json and can be edited there.
   const c=settings?.character||{};
   return <div className="space-y-1">
     <SettingRow label="Agent Name"><input type="text" value={settings?.agent_name||'Addled'} onChange={e=>update('agent_name','',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-40"/></SettingRow>
     <SettingRow label="Size" description={`${c.size||64}px`}><input type="range" min={32} max={128} value={c.size||64} onChange={e=>update('character','size',parseInt(e.target.value))} className="w-32"/></SettingRow>
     <SettingRow label="Speed"><select value={c.movement_speed||'medium'} onChange={e=>update('character','movement_speed',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="slow">Slow</option><option value="medium">Medium</option><option value="fast">Fast</option></select></SettingRow>
+    <SettingRow label="Start with Windows" description="Launches Addled when you sign in"><input type="checkbox" checked={!!settings?.system?.autostart} onChange={e=>update('system','autostart',e.target.checked)} className="w-4 h-4"/></SettingRow>
   </div>;
 }
 
@@ -1423,7 +1529,7 @@ function UvInstall({ compact, send, connected }:{compact?:boolean;send:any;conne
   return <>
     <SettingRow label="uv runtime" description="Optional — needed by MCP servers packaged for PyPI, which the market lists as &quot;needs uvx on PATH&quot;">
       <div className="flex items-center gap-2">
-        <span className={`text-xs ${uv?.available?'text-[#3fb950]':'text-[#d29922]'}`}>{status}</span>
+        <span className={`text-xs ${uv?.available ? 'text-[#3fb950]':'text-[#d29922]'}`}>{status}</span>
         {button}
       </div>
     </SettingRow>
@@ -1510,7 +1616,7 @@ function ToolsSection({ settings, update, saving, status, send, connected }: any
     <Toggle label="Token saver (RTK)" desc="Auto-compress git / pip / pytest / npm / gh / docker command output before it reaches the model — saves provider credits" skey="rtk_enabled"/>
     <SettingRow label="RTK binary" description="Optional — downloaded on request, not shipped with Addled">
       <div className="flex items-center gap-2">
-        <span className={`text-xs ${rtk?.available ? 'text-[#3fb950]' : 'text-[#d29922]'}`}>
+        <span className={`text-xs ${rtk?.available ? 'text-[#3fb950]':'text-[#d29922]'}`}>
           {!rtk ? 'Checking…'
             : rtk.source === 'path' ? `✓ ${rtk.version || 'installed'} on PATH — compression active`
             : rtk.available ? `✓ ${rtk.version || 'installed'} — compression active`
@@ -1558,9 +1664,67 @@ function ToolsSection({ settings, update, saving, status, send, connected }: any
 function BrowserSection({ settings, update, saving, status, send, connected }: any) {
   const b=settings?.browser||{};
   const [bst, setBst] = useState<any>(null);
+  // The install state comes from its own RPC: it carries what is installed,
+  // what is downloading, the version, and what a press will actually do.
+  const [inst, setInst] = useState<any>(null);
+  const [busy, setBusy] = useState<string|null>(null);
+  const [note, setNote] = useState<any>(null);
+
+  const refreshInstalls = () => {
+    if (connected) send('browser.installStatus', {}).then((r: any) => setInst(r||null)).catch(()=>{});
+  };
   useEffect(() => {
     if (connected) send('browser.status', {}).then((r: any) => setBst(r || null)).catch(() => {});
-  }, [connected, send]);
+    refreshInstalls();
+  }, [connected, send]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // While something is installing, poll: the install runs in the backend and
+  // there is no completion event the page can subscribe to for this flow.
+  useEffect(() => {
+    const anyBusy = busy || (inst?.backends||[]).some((x:any)=>x?.installing);
+    if (!anyBusy) return;
+    const t = setInterval(refreshInstalls, 2500);
+    return () => clearInterval(t);
+  }, [busy, inst]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const install = async (backend:string) => {
+    setBusy(backend); setNote(null);
+    try {
+      const r:any = await send('browser.installNow', { backend });
+      setNote({ backend, ok: !!r?.success, msg: r?.message || r?.error || r?.status || '' });
+      refreshInstalls();
+    } catch(e:any) {
+      setNote({ backend, ok:false, msg: e?.message || 'The install could not be started.' });
+    }
+    setBusy(null);
+  };
+
+  // A plain function returning JSX, NOT a component: declaring `<Row .../>`
+  // inside the render would make React treat it as a new component type on
+  // every render and remount it, resetting its state.
+  const renderBackend = (backend:string) => {
+    const info = (inst?.backends||[]).find((x:any)=>x?.backend===backend) || {};
+    const installed = !!info.installed;
+    const running = !!info.installing || busy===backend;
+    const label = backend==='playwright' ? 'Playwright' : 'browser-use';
+    const does = (info.installs||[]).length ? info.installs.join(', ') : '';
+    return (
+      <div key={backend} className="mb-1">
+        <div className="flex items-center gap-2">
+          <span className="text-xs w-24">{label}</span>
+          {installed
+            ? <span className="text-xs text-[#3fb950]">✓ installed{info.version?` (${info.version})`:''}</span>
+            : running
+              ? <span className="text-xs text-[#d29922]">⟳ installing…</span>
+              : <button onClick={()=>install(backend)} disabled={busy!==null}
+                  className="text-xs px-2 py-1 rounded bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white">Install</button>}
+        </div>
+        {!installed && !running && does &&
+          <p className="text-xs text-[#8b949e] mt-0.5 ml-24">Installs {does}</p>}
+      </div>
+    );
+  };
+
   const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('browser',skey,!b[skey])} className={`w-10 h-5 rounded-full transition-colors ${b[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${b[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   const Status=({label, ok}:{label:string;ok?:boolean})=><p className="text-xs mb-0.5">{ok?'✓':'·'} {label}</p>;
   return <div className="space-y-1">
@@ -1570,6 +1734,15 @@ function BrowserSection({ settings, update, saving, status, send, connected }: a
     <SettingRow label="Engine"><select value={b.engine||'auto'} onChange={e=>update('browser','engine',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="auto">Auto</option><option value="cdp">My browser (CDP)</option><option value="playwright">Playwright</option><option value="http">HTTP only</option></select></SettingRow>
     <SettingRow label="Framework mode" description="browser-use handles open-ended multi-step tasks — used only when installed AND an LLM is available"><select value={b.task_mode||'auto'} onChange={e=>update('browser','task_mode',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="auto">Auto (conditional)</option><option value="off">Off</option><option value="always">Always</option></select></SettingRow>
     <SettingRow label="Auto-install backends" description="When a task needs Playwright or browser-use and it's missing: ask first (recommended), install silently, or never"><select value={b.auto_install||'ask'} onChange={e=>update('browser','auto_install',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="ask">Ask first</option><option value="off">Never</option><option value="auto">Auto</option></select></SettingRow>
+    <SettingRow label="Backends" description="Playwright drives Addled's own browser. browser-use handles open-ended multi-step tasks. Installing is a one-time download into Addled's own Python.">
+      <div>
+        {renderBackend('playwright')}
+        {renderBackend('framework')}
+        {note && <p className={`text-xs mt-1 ${note.ok?'text-[#3fb950]':'text-[#f85149]'}`}>
+          {note.ok?'✓':'✗'} {note.msg || (note.ok?'Installed.':'Install failed.')}
+        </p>}
+      </div>
+    </SettingRow>
     <SettingRow label="Backend status">
       <div>
         <Status label="Playwright installed" ok={bst?.playwright_available}/>
@@ -1580,7 +1753,6 @@ function BrowserSection({ settings, update, saving, status, send, connected }: a
         <Status label="LLM available" ok={bst?.llm_available}/>
       </div>
     </SettingRow>
-    <SettingRow label="Optional installs" description="Playwright and browser-use are optional — install via scripts/fetch_playwright.py and scripts/fetch_browser_use.py (see README)."><span className="text-xs text-[#8b949e]">See README</span></SettingRow>
   </div>;
 }
 

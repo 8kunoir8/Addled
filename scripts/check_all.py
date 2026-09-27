@@ -37,15 +37,41 @@ SUITES = [
     "check_skill_market.py",
     "check_mcp_market.py",
     "check_code_editor.py",
+    "check_anchored.py",
+    "check_gitops.py",
+    "check_session.py",
+    "check_verify.py",
+    "check_selfmod.py",
+    "check_swarm_roster.py",
+    "check_wizard.py",
+    "check_browser_install.py",
+    "check_bugfixes.py",
     "check_guide.py",
     "check_parity.py",
     "check_chat_scope.py",
+    "check_memory_rag.py",
+    "check_local_llm_flags.py",
     "check_reply_language.py",
     "check_packaging.py",
     "check_rtk.py",
     "check_uv.py",
     "check_secrets.py",
 ]
+
+
+def _safe(text: str) -> str:
+    """Text that the console can always print.
+
+    A verdict line comes from a child process and is arbitrary; on a Windows
+    console that is cp1252, an em-dash is unencodable and `print` raises. That
+    turned a passing suite into a runner crash. Encode to the console's code
+    page and replace what it cannot hold.
+    """
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return text.encode(enc, errors="replace").decode(enc, errors="replace")
+    except (LookupError, UnicodeError):
+        return text.encode("ascii", errors="replace").decode("ascii")
 
 
 def main() -> int:
@@ -68,12 +94,20 @@ def main() -> int:
             verdict = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:] or [""]
             verdict = verdict[0] if isinstance(verdict, list) else verdict
         status = "ok  " if proc.returncode == 0 else "FAIL"
-        print(f"{status}  {name:<22} {verdict}")
+        # A suite's verdict is its own sentence and may contain a character the
+        # console's code page cannot encode (an em-dash, a check mark). Printing
+        # it raw crashed the whole runner on cp1252, which read as "the suite
+        # failed" when it had passed. Down-convert, never raise.
+        print(f"{status}  {name:<22} {_safe(verdict)}")
         if proc.returncode != 0:
             failed.append(name)
             tail = (proc.stdout or "") + (proc.stderr or "")
             for line in tail.splitlines()[-8:]:
-                print(f"        {line}")
+                # Same down-conversion as the verdict line. A traceback or log
+                # line can carry any character at all, and printing one raw
+                # killed the runner mid-report — so the user saw a Python
+                # encoding crash instead of the list of failing suites.
+                print(f"        {_safe(line)}")
 
     print()
     if failed:

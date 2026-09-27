@@ -13,11 +13,27 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger("addled.journal")
+
+# Serialises the read-modify-write in `record`.
+#
+# `record` loads the whole day, appends one entry, and writes the day back. Two
+# callers doing that at once both read the same file, so the second write wins
+# and the first turn is silently lost. That is reachable, not theoretical: the
+# journal is written from the shared chat pipeline, which the SWARM runs for
+# several agents at the same time (`asyncio.gather` in `_run_parallel_step`),
+# and a scheduled task can fire while a chat turn is being journaled. The
+# docstring used to claim the caller was a single loop — it stopped being true
+# when swarm workers began recording.
+#
+# A plain `threading.Lock`, not an asyncio one: the write path is also reached
+# from worker threads, and the lock is only ever held for a local file write.
+_JOURNAL_LOCK = threading.Lock()
 
 JOURNAL_DIR = Path(__file__).resolve().parent / "journal"
 MAX_ENTRIES_PER_DAY = 200
@@ -52,19 +68,25 @@ def _today() -> str:
 
 
 def record(role: str, text: str) -> None:
-    """Append a chat turn to today's journal (thread-safe enough for
-    the single WS loop + voice dispatches)."""
+    """Append a chat turn to today's journal.
+
+    The read-modify-write is done under a lock. Several callers reach this at
+    the same time — swarm agents finish together and a scheduled task can land
+    mid-turn — and without the lock the slower writer overwrote the faster one,
+    losing an entry with no error anywhere.
+    """
     if not text or not text.strip():
         return
-    day = _load_day(_today())
-    day["entries"].append({
-        "ts": time.time(),
-        "role": role,
-        "text": text.strip()[:500],
-    })
-    if len(day["entries"]) > MAX_ENTRIES_PER_DAY:
-        day["entries"] = day["entries"][-MAX_ENTRIES_PER_DAY:]
-    _save_day(day)
+    with _JOURNAL_LOCK:
+        day = _load_day(_today())
+        day["entries"].append({
+            "ts": time.time(),
+            "role": role,
+            "text": text.strip()[:500],
+        })
+        if len(day["entries"]) > MAX_ENTRIES_PER_DAY:
+            day["entries"] = day["entries"][-MAX_ENTRIES_PER_DAY:]
+        _save_day(day)
 
 
 def get_day(date_str: str | None = None) -> dict:

@@ -1,4 +1,15 @@
-# Code — code mode engine (workspace, indexer, diff, lang detect)
+# Code mode — workspace containment, indexer, diff, language detect.
+#
+# This package was called `code` until it was found to shadow the standard
+# library's `code` module. `backend/` is on sys.path (it is the script
+# directory when Electron runs `python main.py`, and main.py inserts it too),
+# so a directory named `code/` inside it wins the import for `import code`
+# over the stdlib. sympy does `from code import InteractiveConsole` while
+# importing, and sympy arrives with torch/transformers on the local-model
+# path — so the failure surfaced as a `run_command` error reading
+# "module 'code' has no attribute 'InteractiveConsole'" the first time a
+# local llamafile model ran a shell tool. Renaming the package removes the
+# whole class of collision rather than only the one importer that was seen.
 
 """
 Workspace containment for the code handlers.
@@ -21,10 +32,8 @@ from pathlib import Path
 # Refuse anything larger than this coming from the editor.
 MAX_EDIT_BYTES = 2_000_000
 
-
 class OutsideWorkspace(ValueError):
     """The requested path resolves outside the bound workspace."""
-
 
 def resolve_in_workspace(folder: str | os.PathLike[str],
                          file_path: str) -> Path:
@@ -43,7 +52,6 @@ def resolve_in_workspace(folder: str | os.PathLike[str],
             f"'{file_path}' is outside the bound workspace")
     return resolved
 
-
 def relative_to_workspace(folder: str, target: Path) -> str:
     """The path to show the UI: forward slashes, relative to the workspace."""
     try:
@@ -51,4 +59,3 @@ def relative_to_workspace(folder: str, target: Path) -> str:
         return str(target.relative_to(root)).replace(os.sep, "/")
     except ValueError:
         return str(target)
-

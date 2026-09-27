@@ -56,7 +56,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     setBrowserPrompt(p?.backend || 'playwright');
   }), [onNotification]);
 
-  // Local model download request (ask before downloading ~2.4 GB)
+  // Local model download request (ask before downloading the configured GGUF)
   useEffect(() => onNotification('local.llmInstallRequest', (p: any) => {
     setLocalPrompt(p || {});
   }), [onNotification]);
@@ -197,7 +197,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               Addled can run{' '}
               <span className="font-mono text-[#58a6ff]">{localPrompt.model_file || 'a local model'}</span>{' '}
               on this PC with llamafile — no API key and it works offline. About{' '}
-              {localPrompt.size_mb ? `${(localPrompt.size_mb / 1024).toFixed(1)} GB` : '~2.4 GB'} to download.
+              {localPrompt.size_mb ? `${(localPrompt.size_mb / 1024).toFixed(1)} GB` : '5.0 GB'} to download.
             </p>
             <div className="flex gap-2 mt-3">
               <button

@@ -36,6 +36,12 @@ DEFAULT_SETTINGS: dict = {
     "first_run_complete": False,
     "system": {
         "onboarded": False,
+        # Whether Addled was asked to start with Windows. The wizard has always
+        # applied this to the Startup folder but never recorded the choice, so
+        # there was no way to show the current state or to turn it back off.
+        # `local_llm.autostart` is a different thing — that one is about the
+        # model server, not the app.
+        "autostart": False,
     },
     "character": {
         "shape": "triangle",
@@ -145,8 +151,8 @@ DEFAULT_SETTINGS: dict = {
                 "name": "Addled Local (llamafile)",
                 "base_url": "http://127.0.0.1:8090/v1",
                 "api_key": "sk-local",
-                "default_model": "qwen3-4b-instruct-2507",
-                "models": ["qwen3-4b-instruct-2507"],
+                "default_model": "qwen3-8b",
+                "models": ["qwen3-8b"],
                 "vision": False,
                 "local": True,
             },
@@ -206,17 +212,28 @@ DEFAULT_SETTINGS: dict = {
         "runtime_url": "https://github.com/mozilla-ai/llamafile/releases/download/0.10.6/llamafile-0.10.6",
         "runtime_name": "llamafile.exe",
         "runtime_sha256": "d579f61dcd3a306f518e6d90e599d77793ed5f09543023d09c96ad35fcfa63f0",
-        "model_repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
-        "model_file": "Qwen3-4B-Instruct-2507-Q3_K_M.gguf",
-        "model_url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q3_K_M.gguf",
+        "model_repo": "unsloth/Qwen3-8B-GGUF",
+        "model_file": "Qwen3-8B-Q4_K_M.gguf",
+        "model_url": "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
         "model_sha256": "",
-        "model_name": "qwen3-4b-instruct-2507",
-        "size_mb": 2400,
+        "model_name": "qwen3-8b",
+        "size_mb": 5030,
         "host": "127.0.0.1",
         "port": 8090,
         "ctx": 8192,
         "gpu": "auto",
         "threads": 0,
+        # Server slots, passed as -np. llamafile's own default is "auto", which
+        # picked 4 here, and `-c` is applied PER SLOT -- so the effective context
+        # (and KV cache) was 4x what `ctx` says. Nothing in the app issues
+        # concurrent requests to the local model (swarm.Orchestrator.-
+        # _single_generation_provider forces sequential), so one slot is enough
+        # and it keeps the KV cache at 1x.
+        "slots": 1,
+        # KV cache precision, passed as -ctk/-ctv. f16 is the llama.cpp default;
+        # q8_0 halves the cache with no measurable cost at this context size.
+        # Empty means "let llamafile decide".
+        "kv_type": "",
         "extra_args": [],
         "idle_unload_min": 15,
         "autostart": True,
@@ -230,7 +247,8 @@ DEFAULT_SETTINGS: dict = {
         "temperature": 0.7,
         "system_prompt": (
             "You are Addled, a helpful AI desktop companion. "
-            "You can see the user's screen, execute actions, and help proactively. "
+            "You can manage calendars, schedule background tasks, inspect screens, execute actions, "
+            "control desktop/browser, and help proactively. "
             "Be concise, friendly, and practical."
         ),
         "context_messages": 20,
@@ -243,8 +261,26 @@ DEFAULT_SETTINGS: dict = {
         # "related". At the 0.05 this shipped with, a greeting recalled whatever
         # memory happened to be nearest, and the model answered that instead of
         # the question.
+        #
+        # This is the *relevance gate* — the bar a memory must clear to be
+        # injected into the prompt at all. It is deliberately strict.
         "min_similarity": 0.35,
-        "compaction_threshold": 40,
+        # The *retrieval floor*: the bar a candidate must clear to enter the
+        # ranking in the first place. It is lower than the gate on purpose.
+        #
+        # Measured on this machine's own store, English-centric MiniLM scores
+        # Indonesian and code-mixed conversation turns at 0.23–0.33, so a 0.35
+        # floor admitted ~0 semantic candidates and hybrid search silently
+        # became keyword-only. Admitting them here lets reciprocal rank fusion
+        # weigh them against BM25; the gate above still decides what is used.
+        "retrieval_min_similarity": 0.25,
+        # Which embedding model to use: "minilm" (bundled, English-centric) or
+        # "multilingual" (better on this user's Indonesian and code-mixed turns,
+        # but ~470 MB and not bundled). Changing this requires re-embedding the
+        # store — `reembed_all()` reports what is left, and mixing two models'
+        # vectors is undetectable from a similarity score.
+        "embedder": "minilm",
+        "compaction_threshold": 12,
         "auto_facts": False,
         "graph_extract": False,
         "facts_max": 200,
@@ -530,6 +566,22 @@ class _Config:
         if self._data.get("memory", {}).get("min_similarity") == 0.05:
             self.set("memory", "min_similarity",
                      value=DEFAULT_SETTINGS["memory"]["min_similarity"])
+
+        llm = self._data.get("local_llm")
+        providers = self._data.get("providers")
+        builtin = providers.get("builtin") if isinstance(providers, dict) else None
+        local = builtin.get("local") if isinstance(builtin, dict) else None
+        if (isinstance(llm, dict)
+                and llm.get("model_file") == "Qwen3-4B-Instruct-2507-Q3_K_M.gguf"):
+            new_llm = DEFAULT_SETTINGS["local_llm"]
+            for key in ("model_repo", "model_file", "model_url", "model_sha256",
+                        "model_name", "size_mb"):
+                llm[key] = new_llm[key]
+            if isinstance(local, dict):
+                new_local = DEFAULT_SETTINGS["providers"]["builtin"]["local"]
+                local["default_model"] = new_local["default_model"]
+                local["models"] = list(new_local["models"])
+            self.save()
 
         # A Smithery key stored as a bearer header: the market used to ask for it
         # that way, and their gateway refuses `Authorization: Bearer <api key>`

@@ -187,8 +187,16 @@ class Animator:
         self.pulse_scale = 1.0 + math.sin(self._frame * 0.1) * 0.03
         self.glow_intensity = 0.7
         self.opacity = 1.0
-        # Determinate progress ring (set externally via progress_pct)
-        self.progress_angle = self.progress_pct * 360
+        # A determinate ring only when a caller has actually supplied progress.
+        # `progress_pct` was never set by anything (`set_progress` had no
+        # callers), so this line always wrote 0.0 and the WORKING ring sat
+        # frozen at zero degrees — invisible, while THINKING's ring spun and
+        # worked. An indeterminate working state now spins too, so the ring
+        # moves whether or not anything reports progress.
+        if self.progress_pct > 0.0:
+            self.progress_angle = self.progress_pct * 360
+        else:
+            self.progress_angle = (self._frame * 3) % 360
 
     def _animate_dreaming(self, dt: float):
         self.pulse_scale = 1.0

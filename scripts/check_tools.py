@@ -16,7 +16,9 @@ Run from the project root:
 
 import json
 import os
+import re
 import sys
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -255,6 +257,57 @@ def run_budget_tests():
           budget.reply_budget(9000, 8192, want=4096) == 0,
           str(budget.reply_budget(9000, 8192, want=4096)))
 
+    # An intermediate sequence of turns must preserve surviving middle turns, not discard them.
+    seq = [{"role": "system", "content": "s"},
+           {"role": "user", "content": "turn 1"},
+           {"role": "assistant", "content": "turn 2"},
+           {"role": "user", "content": "turn 3"},
+           {"role": "assistant", "content": "turn 4"},
+           {"role": "user", "content": "turn 5"}]
+    fitted_seq, dropped_seq = budget.fit_messages(seq, 25, 5)
+    check("middle turns are preserved when they fit",
+          len(fitted_seq) > 2 and fitted_seq[0]["content"] == "s" and fitted_seq[-1]["content"] == "turn 5",
+          f"len={len(fitted_seq)}: {[m['content'] for m in fitted_seq]}")
+
+    from backend.skills.registry import skill_registry
+    filtered_tools = skill_registry.filter_for_query("can you check the weather in tokyo", max_tools=6)
+    check("filter_for_query limits tools", len(filtered_tools) <= 6, f"len={len(filtered_tools)}")
+    check("filter_for_query includes weather or web_search",
+          bool({"weather", "web_search"} & filtered_tools),
+          str(filtered_tools))
+
+    # A question about tools must surface the tools that find other tools,
+    # or a local model is told "you have no way to reach that" while an MCP
+    # server sits connected.
+    tool_ask = skill_registry.filter_for_query(
+        "can you use your mcp tools and check server trust", max_tools=6)
+    check("a tool question surfaces the discovery tools",
+          {"find_mcp_server", "forge_skill", "list_forged"} & tool_ask,
+          str(sorted(tool_ask)))
+    plain = skill_registry.filter_for_query("what is 2 plus 2", max_tools=6)
+    check("a plain question does not spend slots on discovery",
+          not ({"find_mcp_server", "forge_skill", "list_forged"} & plain),
+          str(sorted(plain)))
+
+    # A question about documentation must surface the wiki tools, or a local
+    # model answers "I don't know" while the user's own wiki has the answer.
+    doc_ask = skill_registry.filter_for_query(
+        "check the documentation for database migration")
+    check("a documentation question surfaces wiki_search",
+          "wiki_search" in doc_ask, str(sorted(doc_ask)))
+
+    # A question about procedures must surface the SOP tools.
+    proc_ask = skill_registry.filter_for_query(
+        "what is the standard procedure for deploying a service")
+    check("a procedure question surfaces sop_lookup",
+          "sop_lookup" in proc_ask, str(sorted(proc_ask)))
+
+    # The default max_tools is 10 (4 core + 6 relevant), not 6: enough for
+    # wiki, SOP, and a domain MCP tool to coexist.
+    default_q = skill_registry.filter_for_query("read a file and search the web")
+    check("default max_tools allows up to 10",
+          len(default_q) <= 10, f"len={len(default_q)}")
+
 
 # ---- provider errors must explain themselves ---------------------------------
 
@@ -344,6 +397,7 @@ def run_forge_tests():
     from backend.skills import forge
     from backend.skills.tool_loop import (_normalise_tool_name,
                                           _parse_tool_response)
+    from backend.providers import budget
 
     # ---- 1. the name a model actually writes ----
     for written, expected in (
@@ -419,7 +473,55 @@ def run_forge_tests():
         except Exception as exc:  # noqa: BLE001
             check("it loads", False, f"{type(exc).__name__}: {exc}")
 
-    # ---- 3. the pip command ----
+    # ---- 4. the handler must bind to a function that exists ----
+    # The skill name is a slug of the task text, so the model is asked for
+    # "get_this_machine_hostname" and naturally writes "probe_machine_name"
+    # instead. Binding SKILL_DEF.handler to the requested name then produced a
+    # module that raised NameError at import, so every forged skill was written
+    # and deleted again. Proven end to end by scripts/_forge_probe.py.
+    generated_other_name = (
+        'async def probe_machine_name(params: dict) -> dict:\n'
+        '    return {"success": True}\n')
+    module2 = forge.build_skill_module(
+        "get_this_machine_s_hostname", "socket", "get the hostname",
+        generated_other_name, {"type": "object", "properties": {}})
+
+    check("the defined function is found by name",
+          forge.defined_async_functions(generated_other_name)
+          == ["probe_machine_name"],
+          str(forge.defined_async_functions(generated_other_name)))
+
+    ns: dict = {}
+    try:
+        exec(compile(module2, "m.py", "exec"), ns)
+        bound = ns.get("SKILL_DEF")
+        check("a module whose function is named differently still loads",
+              bound is not None, "no SKILL_DEF")
+        check("and its handler is the function that exists",
+              getattr(bound, "handler", None)
+              is ns.get("probe_machine_name"),
+              str(getattr(bound, "handler", None)))
+        check("while the skill keeps the requested name",
+              getattr(bound, "name", None) == "get_this_machine_s_hostname",
+              str(getattr(bound, "name", None)))
+    except Exception as exc:  # noqa: BLE001
+        check("a module whose function is named differently still loads",
+              False, f"{type(exc).__name__}: {exc}")
+
+    # The long-slug case: the prompt must stop demanding an unusable name.
+    # The requested name is interpolated into the prompt, so a long slug would
+    # appear literally in the source as `async def {skill_name}(`, guarded by
+    # the length check at the call site.
+    forge_source = Path(ROOT, "backend", "skills", "forge.py").read_text(
+        encoding="utf-8")
+    check("the name given to the model is guarded by a length check",
+          "requested = skill_name if len(skill_name) <= 40 else" in forge_source,
+          "no length guard around the requested function name")
+    check("and an unnamed variant exists for the long case",
+          "a_short_snake_case_name" in forge_source,
+          "nothing tells the model what to do when the slug is unusable")
+
+    # ---- 5. the pip command ----
     argv = forge.pip_argv("pip install numpy")
     check("pip install becomes python -m pip install, not python -m install",
           argv is not None and argv[1:3] == ["-m", "pip"]
@@ -437,6 +539,177 @@ def run_forge_tests():
           forge.pip_argv("rm -rf /") is None, str(forge.pip_argv("rm -rf /")))
     check("an empty command is refused", forge.pip_argv("") is None, "")
 
+    # ---- 4. the forge's own prompts must fit the window ----
+    # The forge builds a one-message prompt and hands it straight to
+    # provider.chat, which bypasses the tool loop and its trimming. On the 8k
+    # local model the generation prompt plus a 2000-token request overran the
+    # window and surfaced as an opaque provider error.
+    big = "x" * 200000
+    clipped, room = budget.fit_single_prompt(big, "local", want_reply=2000)
+    check("an oversized background prompt is clipped",
+          len(clipped) < len(big), f"{len(big)} -> {len(clipped)}")
+    check("and the clipped prompt fits the local window",
+          budget.estimate_tokens(clipped) + room + 64
+          <= budget.context_limit("local"),
+          f"tokens={budget.estimate_tokens(clipped)} room={room}")
+    check("with real reply room left", room >= 256, str(room))
+    small, room_small = budget.fit_single_prompt("hi", "local", want_reply=2000)
+    check("a prompt that fits is untouched", small == "hi", small[:20])
+    check("and keeps the reply it asked for", room_small == 2000, str(room_small))
+
+    # ---- 5. forging must not be done by the weakest model available ----
+    from backend.skills import tool_loop
+
+    class _P:
+        def __init__(self, pid):
+            self.provider_id = pid
+
+    def _fake_get_provider(pid=None):
+        return _P(str(pid))
+
+    import backend.providers.registry as reg
+    import backend.providers.selector as sel
+    saved_get, saved_resolve = reg.get_provider, sel.resolve_default_provider
+    reg.get_provider = _fake_get_provider
+    try:
+        sel.resolve_default_provider = lambda: "deepseek"
+        borrowed = tool_loop.forge_target_provider(_P("local"))
+        check("a local chat provider hands the forge a cloud model",
+              getattr(borrowed, "provider_id", "") == "deepseek",
+              str(getattr(borrowed, "provider_id", "")))
+
+        sel.resolve_default_provider = lambda: "local"
+        kept = tool_loop.forge_target_provider(_P("local"))
+        check("and nothing better on offer keeps the local model",
+              getattr(kept, "provider_id", "") == "local",
+              str(getattr(kept, "provider_id", "")))
+
+        cloud = tool_loop.forge_target_provider(_P("deepseek"))
+        check("a capable chat provider forges for itself",
+              getattr(cloud, "provider_id", "") == "deepseek",
+              str(getattr(cloud, "provider_id", "")))
+    finally:
+        reg.get_provider, sel.resolve_default_provider = saved_get, saved_resolve
+
+    # ---- 6. the auto-forge uses the user's request, not the tool name ----
+    # `Implement a function called scrape_website` was handed to a web search as
+    # "python library implement a function called scrape_website pip install",
+    # which discovers nothing. The real request does.
+    source = Path(ROOT, "backend", "skills", "tool_loop.py").read_text(
+        encoding="utf-8")
+    check("the auto-forge no longer forges from the bare tool name",
+          "Implement a function called {name}" not in source,
+          "the old placeholder description is still there")
+    body = re.search(
+        r"async def _execute_skill_inner\(.*?\n(?=\ndef |\nasync def )",
+        source, re.S)
+    check("it reads the published request instead",
+          bool(body) and "_forge" in body.group(0), "no _forge lookup found")
+
+    ws = Path(ROOT, "backend", "ws_server.py").read_text(encoding="utf-8")
+    check("and the chat pipeline publishes that request",
+          'config.set("_forge", "request"' in ws,
+          "nothing writes _forge.request")
+
+
+# ---- shell access: the agent must not deny having it ------------------------
+
+def run_shell_access_tests():
+    """The agent told the user it had no access to their system.
+
+    Three things were behind that. The injected capability list never mentioned
+    the shell, so asked about its abilities the model read a list that excluded
+    it and answered honestly. `run_command` declared requires_approval and
+    nothing consumed it. And the approval it *did* produce had no id and no
+    answerer, because the skill called TerminalExecutor directly and skipped the
+    action executor that owns the approval handle.
+    """
+    import asyncio
+    from backend.actions.executor import ActionExecutor
+    from backend.safety.destruction_gate import DestructionGate
+    from backend.skills.registry import skill_registry
+
+    ws = Path(ROOT, "backend", "ws_server.py").read_text(encoding="utf-8")
+    capabilities = (ws.split("capabilities_ctx")[1][:1500]
+                    if "capabilities_ctx" in ws else "")
+    check("the capability list names the shell",
+          "- Shell:" in capabilities and "run_command" in capabilities,
+          "the prompt never mentions that commands can be run")
+    check("and says the agent does have system access",
+          "DO have access to the user's system" in ws,
+          "nothing contradicts the 'I cannot access your system' answer")
+
+    skill = skill_registry.get("run_command")
+    check("run_command is registered", skill is not None)
+    check("and declares that it needs approval",
+          bool(getattr(skill, "requires_approval", False)),
+          str(getattr(skill, "requires_approval", None)))
+    check("its description tells the model it has real access",
+          "real access to the user's machine" in (skill.description or ""),
+          (skill.description or "")[:120])
+
+    src = Path(ROOT, "backend", "skills", "registry.py").read_text(
+        encoding="utf-8")
+    check("the skill goes through the executor, not the terminal directly",
+          "execute_for_chat" in src,
+          "run_command bypasses the approval owner again")
+
+    ex = ActionExecutor(gate=DestructionGate())
+
+    async def drive():
+        # A safe command must run immediately and need no approval.
+        safe = await ex.execute_for_chat("run_command",
+                                         {"command": "Write-Output shell-ok"})
+        safe_out = str((safe.data or {}).get("stdout") or "")
+        check("a safe command runs without approval", safe.success,
+              f"{safe.error} {safe_out[:60]}")
+        check("and really reached the shell", "shell-ok" in safe_out,
+              repr(safe_out[:80]))
+        check("nothing was queued for it", not ex.pending_approvals(),
+              str(ex.pending_approvals()))
+
+        # A destructive one must queue with a usable handle, not a dead end.
+        task = asyncio.create_task(ex.execute_for_chat(
+            "run_command", {"command": "rm -rf /tmp/addled-probe"}))
+        await asyncio.sleep(0.5)
+        pending = ex.pending_approvals()
+        check("a destructive command waits for approval", bool(pending),
+              "it was not queued")
+        check("and the queue carries a real approval id",
+              bool(pending)
+              and str(pending[0].get("approval_id")).startswith("appr_"),
+              str(pending[:1]))
+
+        approved = await ex.approve(pending[0]["approval_id"])
+        check("approving wakes the waiting turn",
+              approved.success and "Approved" in (approved.summary or ""),
+              f"{approved.success} {approved.summary}")
+        ran = await task
+        check("and the turn then reports the command result",
+              ran.error is None
+              or "needs your approval" not in str(ran.error),
+              str(ran.error)[:80])
+
+        # Denial must be reported as denial, not as missing access.
+        task2 = asyncio.create_task(ex.execute_for_chat(
+            "run_command", {"command": "rm -rf /tmp/addled-probe-2"}))
+        await asyncio.sleep(0.5)
+        ex.deny(ex.pending_approvals()[0]["approval_id"])
+        out2 = await task2
+        check("a denied command reports that the user denied it",
+              bool((out2.data or {}).get("denied")),
+              str(out2.data)[:120])
+
+    asyncio.run(drive())
+
+    # The retry nudge is an MCP mechanism; sending a shell command round again
+    # repeats a call that cannot succeed, because run_command has no `confirm`.
+    loop_src = Path(ROOT, "backend", "skills", "tool_loop.py").read_text(
+        encoding="utf-8")
+    check("the confirm retry is scoped to MCP tools only",
+          'startswith("mcp__")' in loop_src,
+          "the nudge also fires for shell commands")
+
 
 def main():
     run_catalogue_tests()
@@ -445,6 +718,7 @@ def main():
     run_error_tests()
     run_bot_tests()
     run_forge_tests()
+    run_shell_access_tests()
     print()
     print(f"{'FAIL' if fails else 'PASS'}: {len(fails)} failure(s)")
     for f in fails:

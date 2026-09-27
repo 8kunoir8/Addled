@@ -106,6 +106,21 @@ REMOTE_FORBIDDEN_REASONS = {
                    "calls work normally over remote access."),
 }
 
+# Deliberately NOT forbidden: `code.plan` and `code.applyPlan`.
+#
+# The boundary these sit behind is the WORKSPACE CHOICE, not the write — see the
+# comment on `code.bind` above. Once the folder is picked on the machine itself,
+# `code.read/edit/apply/write` are all available remotely, so a bulk apply is no
+# more dangerous than the single-file `code.apply` it repeats.
+#
+# What keeps `code.applyPlan` honest is not a remote check but the review
+# requirement: every entry must name an `editId` that `code.edit` produced and
+# that is still pending. It refuses a raw `content` payload, so the batch cannot
+# become a way to write files without the diff a user approved.
+#
+# If a future method writes files WITHOUT that review tie, it belongs in
+# REMOTE_FORBIDDEN_METHODS above — not this comment.
+
 
 def remote_refusal(method: str, params: dict | None = None) -> str | None:
     """Why a remote session may not use this, or None if it may.

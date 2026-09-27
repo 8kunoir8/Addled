@@ -118,21 +118,27 @@ async def _summarize_chunk(messages: list[dict]) -> str:
             log.debug("LLM compaction failed, heuristic: %s", e)
             _last_provider_error = time.time()
 
-    # Heuristic fallback: recent unique user topics in the chunk
-    topics: list[str] = []
+    # Heuristic fallback: recent exchanges in the chunk (both user intent and agent key action)
+    bullets: list[str] = []
     seen: set[str] = set()
-    for m in reversed(messages):
-        if m.get("role") != "user":
+    for m in messages:
+        role = m.get("role", "")
+        content = str(m.get("content", "")).strip()
+        if not content:
             continue
-        t = str(m["content"])[:120].strip()
-        if t and t not in seen:
-            seen.add(t)
-            topics.append(t)
-        if len(topics) >= 4:
+        first_line = content.split("\n", 1)[0].strip()[:120]
+        if not first_line or first_line in seen:
+            continue
+        seen.add(first_line)
+        if role == "user":
+            bullets.append(f"User: {first_line}")
+        elif role == "assistant" and bullets and not bullets[-1].startswith("Agent:"):
+            bullets.append(f"Agent: {first_line}")
+        if len(bullets) >= 6:
             break
-    if not topics:
+    if not bullets:
         return ""
-    return "Earlier topics: " + " | ".join(reversed(topics))
+    return "Earlier exchanges: " + " | ".join(bullets)
 
 
 async def maybe_compact() -> bool:
@@ -147,7 +153,7 @@ async def maybe_compact() -> bool:
     _locked = True
     try:
         threshold = int(config.get("memory", "compaction_threshold",
-                                   default=40))
+                                   default=12))
         state = _load()
         conv_id = chat_history.current_conversation_id
         if conv_id and state.get("conversation_id") != conv_id:

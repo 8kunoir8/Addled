@@ -32,6 +32,19 @@ class Scheduler:
         self._housekeeping: dict[str, dict] = {}
         self._h_state: dict[str, float] = self._load_state()
         self._last_poll = 0.0
+        # Strong references to every task this scheduler starts. `asyncio`
+        # keeps only a WEAK reference to a running task, so a bare
+        # `create_task(...)` whose result is discarded can be garbage-collected
+        # mid-await — the job disappears with no error and nothing in the log.
+        # Holding the task here is the documented fix.
+        self._tasks: set[asyncio.Task] = set()
+
+    def _spawn(self, coro) -> asyncio.Task:
+        """Start a background job and keep it alive until it finishes."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     # ---- state ---------------------------------------------------------------
 
@@ -83,7 +96,7 @@ class Scheduler:
                 self._save_state()
                 try:
                     if asyncio.iscoroutinefunction(job["fn"]):
-                        asyncio.create_task(job["fn"]())
+                        self._spawn(job["fn"]())
                     else:
                         job["fn"]()
                 except Exception as e:
@@ -119,7 +132,7 @@ class Scheduler:
             log.info("task %s overdue by %.0fs — catch-up run",
                      task.id, overdue)
         self._running.add(task.id)
-        asyncio.create_task(self._fire(task))
+        self._spawn(self._fire(task))
 
     async def _fire(self, task) -> None:
         try:

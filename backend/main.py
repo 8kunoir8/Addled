@@ -9,6 +9,21 @@ import sys
 import time
 from pathlib import Path
 
+# ---- stdlib shadow guard ----------------------------------------------------
+# `backend/` is on sys.path (it is the script directory, and main.py inserts it
+# below), so any sub-directory whose name matches a standard-library module wins
+# the import for that name. A package called `backend/code/` used to shadow the
+# stdlib `code` module here, and sympy — which arrives with torch/transformers
+# on the local-model path — does `from code import InteractiveConsole` while
+# importing, so the first local-model tool call failed with "module 'code' has
+# no attribute 'InteractiveConsole'". The package is now `backend/codemode/`,
+# which removes that collision. Importing the stdlib modules a name collision
+# would most likely hit, before any sub-directory can claim them, keeps a
+# future package from reintroducing the same failure silently.
+import code as _stdlib_code          # noqa: F401  (backend/codemode no longer collides)
+import types as _stdlib_types        # noqa: F401
+import platform as _stdlib_platform  # noqa: F401
+
 # ---- single-instance lock ---------------------------------------------------
 
 try:

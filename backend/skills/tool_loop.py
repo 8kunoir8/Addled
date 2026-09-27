@@ -32,6 +32,54 @@ async def execute_skill(name: str, params: dict, provider=None) -> dict:
     return result
 
 
+def forge_target_provider(provider=None):
+    """The provider a forge should write code with.
+
+    Forging is code generation, and the model that failed to answer the
+    question is rarely the one that should write the tool which answers it. A
+    local 4B model asked to emit a working async function is the weakest link
+    in the chain, so when the chat provider is a local one and something better
+    is configured, the forge borrows it. The chat provider is still used when
+    no alternative exists — a weak forge beats no forge.
+    """
+    try:
+        from backend.providers.registry import get_provider
+        from backend.providers import selector
+    except Exception:
+        return provider
+
+    weak = {"local", "ollama", "lmstudio", "huggingface"}
+    current_id = str(getattr(provider, "provider_id", "") or "")
+
+    def _is_local(pid: str) -> bool:
+        if pid in weak:
+            return True
+        try:
+            from backend.config import config
+            return bool(config.get("providers", "builtin", pid,
+                                   "local", default=False))
+        except Exception:
+            return False
+
+    if provider is not None and not _is_local(current_id):
+        return provider
+
+    try:
+        chosen = selector.resolve_default_provider()
+    except Exception:
+        return provider
+    if not chosen or _is_local(str(chosen)):
+        return provider  # nothing better on offer — do not downgrade
+    try:
+        better = get_provider(chosen)
+    except Exception:
+        return provider
+    if better is None or better is provider:
+        return provider
+    log.info("Forging with '%s' instead of the local chat provider", chosen)
+    return better
+
+
 async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
     """
     Execute a skill by name. If not found, try the forge.
@@ -70,13 +118,29 @@ async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
     except Exception as e:
         log.debug("market search failed: %s", e)
 
+    # The forge reads this and searches the web with it, so it has to describe
+    # the *capability* rather than parrot the function name back. Called
+    # `scrape_website`, the old text produced the web query "python library
+    # implement a function called scrape_website pip install", which discovers
+    # nothing; the task the user actually asked for discovers a real library.
+    try:
+        from backend.config import config as _cfg
+        request = str(_cfg.get("_forge", "request", default="") or "").strip()
+    except Exception:
+        request = ""
+    task_text = (f"{request}\n\n(The assistant needs a tool named '{name}' "
+                 f"that takes these parameters: {json.dumps(params)}.)"
+                 if request else
+                 f"A tool named '{name}' that accepts these parameters: "
+                 f"{json.dumps(params)}")
+
     try:
         from backend.skills.forge import skill_forge
 
         # Try to discover and create this skill
         forge_result = await skill_forge.forge(
-            task_description=f"Implement a function called {name} with params {json.dumps(params)}",
-            provider=provider,
+            task_description=task_text,
+            provider=forge_target_provider(provider),
             auto_validate=True,
         )
 
@@ -164,7 +228,11 @@ async def chat_with_tools(
     backend/language.py.
     """
     provider_id = getattr(provider, "provider_id", "unknown")
-    uses_native = provider_id in NATIVE_TOOL_PROVIDERS
+    uses_native = (
+        provider_id in NATIVE_TOOL_PROVIDERS
+        or type(provider).__name__ == "OpenAIProvider"
+        or getattr(provider, "has_native_tools", False)
+    )
     # None means "no filter"; an empty list means "no tools", which is a
     # distinction a caller passing a restricted set depends on.
     only = set(tools) if tools is not None else None
@@ -273,6 +341,8 @@ async def chat_with_tools(
                 "result": exec_result.get("data", {}),
                 "error": exec_result.get("error"),
                 "forged": exec_result.get("forged", False),
+                "requires_approval": bool(
+                    (exec_result.get("data") or {}).get("requires_approval")),
             })
             executed.append((tc, exec_result))
 
@@ -306,6 +376,26 @@ async def chat_with_tools(
             full_messages.append(
                 _tool_result_message(tc["name"], exec_result, tc.get("id")))
         all_tool_results.extend(tool_results)
+
+        # An MCP approval gate is built for one retry: the model asks, the user
+        # agrees, and the same tool is called again with confirm=true. This
+        # nudges exactly that, and only for MCP tools — `confirm` is an MCP
+        # argument, so sending a shell command round again would just repeat a
+        # call that cannot succeed. A gated command instead waits in-band for
+        # the user's decision (see ActionExecutor.execute_for_chat).
+        if (rounds < max_tool_rounds
+                and any(str(tr.get("tool") or "").startswith("mcp__")
+                        and (tr.get("result") or {}).get("requires_approval")
+                        for tr in tool_results)):
+            full_messages.append({
+                "role": "user",
+                "content": ("If the user has already agreed to run the refused "
+                            "MCP tool, call that same tool again with the same "
+                            "arguments plus confirm=true. Do not call a separate "
+                            "trust-check or verification tool unless the user "
+                            "asked for one."),
+            })
+            continue
 
         # If all tools failed, try a forced plain-text answer before giving up
         if all(not tr["success"] for tr in tool_results):
@@ -382,9 +472,12 @@ async def _call_native_tools(provider, messages: list[dict],
                                             reply_directive)
 
         if not result.ok:
-            # Log it. Returning the message only puts it in the chat: a user
-            # reporting "it errors" leaves nothing behind to diagnose, which is
-            # exactly what happened with an OpenRouter 404.
+            err_lower = (result.error or "").lower()
+            if any(k in err_lower for k in ("tool", "function", "unrecognized field", "extra fields", "not supported")):
+                log.info("Native tools unsupported by provider '%s' (%s), falling back to prompt tools",
+                         getattr(provider, "provider_id", "?"), result.error)
+                return await _call_prompt_tools(provider, messages, model, only,
+                                                reply_directive)
             log.warning("Provider '%s' failed: %s",
                         getattr(provider, "provider_id", "?"), result.error)
             return {"response": f"[Provider error: {result.error}]", "tokens": 0}
@@ -446,6 +539,10 @@ async def _call_prompt_tools(provider, messages: list[dict],
     nothing. The question is also what the model reads last again, which is where
     a small model looks to find out what it was asked.
     """
+    if only is None:
+        query = _last_user_text(messages)
+        only = skill_registry.filter_for_query(query)
+
     tools_text = skill_registry.to_prompt_tools(only)
 
     modified_messages = list(messages)
@@ -454,6 +551,15 @@ async def _call_prompt_tools(provider, messages: list[dict],
         if tools_text:
             modified_messages.append({"role": "user", "content": tools_text})
         modified_messages.append(question)
+
+    # A tool result decides the next step, so it must be answered with the
+    # catalogue still in hand. Without this the only instruction the model saw
+    # was the unrelated user question from before, and the turn could come back
+    # as a plain answer instead of the follow-up call the result asked for.
+    if modified_messages and modified_messages[-1].get("role") == "tool" \
+            and tools_text:
+        modified_messages.append({"role": "user", "content": tools_text})
+
     # After the catalogue, not before it: the catalogue is the bulk of what the
     # model reads before answering, so a language rule placed earlier is what it
     # overrides (see backend/language.py). It rides the last message, which is
@@ -832,6 +938,22 @@ def _tool_result_message(tool_name: str, result: dict, tool_call_id: str | None 
         content = f"Tool '{tool_name}' succeeded{forged_note}.\nResult:\n{summary}"
     else:
         content = f"Tool '{tool_name}' failed.\nError: {result.get('error', 'unknown')}"
+        # A refusal is an instruction, not a dead end. `execute_skill` puts the
+        # approval hint in `data` and drops the rest of the payload on the way
+        # out, so a message carried anywhere else never reaches the model — and
+        # the model then reports the gate and stops instead of retrying with
+        # confirm=true.
+        candidates = [result, result.get("data"), result.get("result"),
+                      (result.get("data") or {}).get("data")]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if not candidate.get("message"):
+                continue
+            if candidate.get("message") in content:
+                continue
+            content += f"\n{candidate['message']}"
+            break
     msg: dict = {"role": "tool", "content": content}
     if tool_call_id:
         msg["tool_call_id"] = tool_call_id

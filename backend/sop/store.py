@@ -279,8 +279,13 @@ def _trim(sops: list[dict], category: str) -> None:
         return
     in_category.sort(key=lambda s: (int(s.get("uses") or 0),
                                     s.get("updated") or ""))
-    drop = {id(s) for s in in_category[:len(in_category) - limit]}
-    sops[:] = [s for s in sops if id(s) not in drop]
+    # Drop by the SOP's own id, not by `id(s)`. Every other function in this
+    # module addresses an entry by its "id" field; using the object identity
+    # here worked only because the dicts happen to be alive and distinct for
+    # the duration of the call, and would silently drop the wrong entries if
+    # the same dict object were ever referenced twice.
+    drop = {s.get("id") for s in in_category[:len(in_category) - limit]}
+    sops[:] = [s for s in sops if s.get("id") not in drop]
 
 
 def delete(sop_id: str) -> bool:

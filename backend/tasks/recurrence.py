@@ -91,10 +91,15 @@ def next_run(task, after: float | None = None) -> float:
         return _next_weekly(weekdays, hhmm, after)
     if rtype == "monthly":
         return _next_monthly(task.date or "", hhmm, after)
-    # one-shot: the anchor is date+time
+    # one-shot: the anchor is date+time. There is no "next" occurrence — the
+    # task either has a future anchor or it has already passed, so the anchor
+    # is returned as-is and the SCHEDULER decides what a past one means
+    # (`_advance` disables a one-shot after it fires). `after` is deliberately
+    # not used to roll the anchor forward: `expand_month` calls this with a
+    # cursor to project the task onto its calendar day, and rolling it forward
+    # there would move every one-shot to the day it was asked about.
     anchor = task.date or datetime.fromtimestamp(after).strftime("%Y-%m-%d")
-    ts = time_to_epoch(anchor, hhmm)
-    return ts if ts > after else ts  # caller decides missed-task policy
+    return time_to_epoch(anchor, hhmm)
 
 
 def expand_month(task, year: int, month: int) -> list[str]:

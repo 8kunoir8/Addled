@@ -9,9 +9,27 @@ Owns three things:
 The heavy lifting for downloads lives in ``backend.local_models``.
 
 NOTE on GPU flags: llamafile 0.10.x accepts llama.cpp flags, so layer offload is
-``-ngl``. ``gpu="auto"`` offloads everything when an NVIDIA driver is present and
-otherwise runs on CPU. Run ``llamafile.exe --help`` after the first download to
-confirm the flags for your build, and use ``local_llm.extra_args`` to override.
+``-ngl``. ``gpu="auto"`` offloads only when there is actually free VRAM to hold
+the layers (see ``_has_gpu``) and otherwise runs on CPU. Run
+``llamafile.exe --help`` after the first download to confirm the flags for your
+build, and use ``local_llm.extra_args`` to override.
+
+NOTE on memory: three flags decide the resident footprint, and all three are
+set here rather than left to llamafile's defaults.
+
+* ``-c`` (``ctx``) is the prompt context **per slot**, not for the whole server.
+* ``-np`` (``slots``) is how many slots that context is multiplied by. The
+  default was "auto", which picked **4** — so a configured ``ctx=8192`` became
+  32768 tokens of KV cache (4608 MiB instead of 1152 MiB). One slot is correct
+  for this app: ``swarm.Orchestrator._single_generation_provider`` already
+  forces local-model flows to run one at a time, so extra slots only split
+  memory and the prompt cache, and they caused cache evictions in practice.
+* ``-ctk``/``-ctv`` (``kv_type``) halve the cache again if set to ``q8_0``.
+
+Measured on an RTX 4060 with Qwen3-8B-Q4_K_M: the 4-slot default held 6162 MiB
+of committed RAM and 5815 MiB of VRAM. With ``-np 1`` the KV cache is 1152 MiB
+(f16) or 576 MiB (q8_0), which keeps system RAM well inside an 8 GiB budget even
+when the weights are mapped by a CPU-only run.
 """
 
 from __future__ import annotations
@@ -35,6 +53,24 @@ LOOPBACK = "127.0.0.1"
 RUNTIME_PCT = 15.0          # runtime occupies the first 15% of the progress bar
 READY_TIMEOUT_S = 300.0
 IDLE_TICK_S = 60.0
+# Minimum free VRAM before "gpu: auto" will ask for any layer offload. Below
+# this, llama.cpp ends up paging weights through system RAM instead, which
+# costs the memory the local model is meant to bound.
+GPU_MIN_FREE_MB = 1024
+# Slots to run with when the user has not chosen. One is right because the app
+# serves the local model one request at a time (see _slot_args).
+DEFAULT_SLOTS = 1
+# What llama.cpp uses when neither -ctk nor -ctv is given.
+KV_DEFAULT = "f16"
+
+
+def default_slots() -> int:
+    """The slot count `local_llm.slots` falls back to.
+
+    Exposed so a test can assert the shipped default without restating a
+    literal, and so the value has one definition.
+    """
+    return DEFAULT_SLOTS
 
 
 class LocalLlmManager:
@@ -54,6 +90,7 @@ class LocalLlmManager:
         self._start_lock: asyncio.Lock | None = None
         self._gpu_checked = False
         self._has_nvidia = False
+        self._vram_free_mb: int | None = None
         self._hf_deps_installing = False
         self._hf_deps_cache: tuple[bool, str] | None = None
 
@@ -77,10 +114,60 @@ class LocalLlmManager:
     def _log_path(self) -> str:
         return str(paths.LLAMAFILE_DIR / "llamafile.log")
 
+    def _free_vram_mb(self) -> int | None:
+        """Free VRAM in MiB, or None when it cannot be determined.
+
+        Only meaningful on Windows with an NVIDIA driver. Any failure returns
+        None rather than 0 so the caller can tell "no GPU" from "could not ask".
+        """
+        if shutil.which("nvidia-smi") is None:
+            return None
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.free",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10, creationflags=CREATE_NO_WINDOW,
+            )
+            if out.returncode != 0:
+                return None
+            first = (out.stdout or "").strip().splitlines()
+            if not first:
+                return None
+            return int(float(first[0].strip()))
+        except Exception as e:
+            log.debug("nvidia-smi query failed: %s", e)
+            return None
+
     def _has_gpu(self) -> bool:
+        """Whether offloading layers is worth attempting.
+
+        This used to be `shutil.which("nvidia-smi") is not None` — the binary
+        existing on PATH was treated as a usable GPU. It cannot see how much
+        VRAM is actually free, so a machine with an NVIDIA driver and a nearly
+        full card still asked llama.cpp to offload every layer. Worse than
+        useless: when the offload cannot fit, the driver falls back to paging
+        the weights through system RAM, which is exactly the memory this path
+        is supposed to bound.
+
+        Now the free VRAM is the deciding factor. When it cannot be read, fall
+        back to the old presence check, because a CPU-only fallback that is
+        wrong costs speed while an offload that is wrong costs RAM.
+        """
         if not self._gpu_checked:
             self._gpu_checked = True
-            self._has_nvidia = shutil.which("nvidia-smi") is not None
+            free = self._free_vram_mb()
+            if free is None:
+                self._has_nvidia = shutil.which("nvidia-smi") is not None
+                self._vram_free_mb = None
+            else:
+                self._vram_free_mb = free
+                # Enough for the smallest useful offload of an 8B Q4 model.
+                # A partial offload still helps, so this is a floor for
+                # "worth asking at all", not a fit-for-the-whole-model test.
+                self._has_nvidia = free >= GPU_MIN_FREE_MB
+                log.info("GPU auto-detect: %s MiB VRAM free -> %s", free,
+                         "offload" if self._has_nvidia else "CPU only")
         return self._has_nvidia
 
     def _reap_orphans(self) -> int:
@@ -410,6 +497,31 @@ class LocalLlmManager:
             return ["-ngl", "999"] if self._has_gpu() else ["-ngl", "0"]
         return ["-ngl", mode]
 
+    def _slot_args(self) -> list[str]:
+        """`-np`: how many server slots to split the context across.
+
+        llamafile defaults to "auto", which chose 4 on this machine. Because
+        `-c` is applied PER SLOT, that silently multiplied both the context and
+        the KV cache by 4 (4 x 8192 tokens = 4608 MiB instead of 1152 MiB).
+        The app never issues a second concurrent request to the local model, so
+        the extra slots only split memory and the prompt cache.
+        """
+        slots = int(self._cfg("slots", default=default_slots()) or 0)
+        if slots <= 0:
+            return []                      # let llamafile choose
+        return ["-np", str(slots)]
+
+    def _kv_args(self) -> list[str]:
+        """`-ctk`/`-ctv`: KV cache precision.
+
+        f16 is the llama.cpp default; q8_0 halves the cache. Left unset unless
+        configured, so the build's own default always applies otherwise.
+        """
+        kv = str(self._cfg("kv_type", default="") or "").strip().lower()
+        if not kv:
+            return []
+        return ["-ctk", kv, "-ctv", kv]
+
     def _launch_args(self) -> list[str]:
         args = [
             str(paths.llamafile_exe()),
@@ -424,7 +536,9 @@ class LocalLlmManager:
         threads = int(self._cfg("threads", default=0) or 0)
         if threads > 0:
             args += ["-t", str(threads)]
+        args += self._slot_args()
         args += self._gpu_args()
+        args += self._kv_args()
         args += [str(a) for a in (self._cfg("extra_args", default=[]) or [])]
         return args
 
@@ -587,10 +701,38 @@ class LocalLlmManager:
         return {"ok": True, "freed_mb": int(freed / (1024 * 1024))}
 
     async def watchdog_loop(self) -> None:
-        """Stop the server after ``idle_unload_min`` of no use to free RAM."""
+        """Stop the server after ``idle_unload_min`` of no use to free RAM.
+
+        Also reclaims an orphaned server. The normal path is that this process
+        owns the child and ``stop()`` ends it, but that only works if this
+        process is alive to do it. If the app is closed with a hard terminate —
+        which is what Electron's ``before-quit`` does — the model server
+        survives, holding several gigabytes for as long as the machine is up.
+        ``_reap_orphans()`` handled that at the next startup, so a copy could
+        sit resident for days until Addled was next opened. Running the same
+        sweep on the idle tick closes that window whenever a backend *is*
+        running, and is a no-op when there is nothing to reclaim.
+        """
         while True:
             await asyncio.sleep(IDLE_TICK_S)
             try:
+                # Reclaim a server nobody owns — but ONLY when nothing is
+                # serving on our port.
+                #
+                # `is_running()` is not enough on its own, and trusting it here
+                # killed a healthy model mid-request: the Code page's planner
+                # reaches the model over HTTP through the provider, NOT through
+                # this manager, so `self._proc` stays None while a real server is
+                # answering. The sweep then matched that server by image path and
+                # terminated it — observed as "Reclaimed 1 orphaned llamafile
+                # process(es)" moments after two successful tool calls, which is
+                # exactly the failure this guard was meant to prevent.
+                #
+                # A port that answers is proof of a live server, whoever started
+                # it, so that is the condition to respect.
+                if not self.is_running() and not self._port_serving():
+                    await asyncio.to_thread(self._reap_orphans)
+
                 minutes = float(self._cfg("idle_unload_min", default=15) or 0)
                 # Never unload while a start or download is still in flight, and
                 # never while the local model is the chosen provider or has been
@@ -606,6 +748,22 @@ class LocalLlmManager:
                 raise
             except Exception as exc:
                 log.debug("Local model watchdog error: %s", exc)
+
+    def _port_serving(self, timeout: float = 1.0) -> bool:
+        """Whether something is already answering on the local model's port.
+
+        Used instead of trusting `self._proc`: a server started by an earlier
+        run, or reached over HTTP without going through this manager, is still a
+        server, and killing it mid-request is worse than leaving it.
+        """
+        import socket
+        try:
+            port = self.port()
+        except Exception:
+            return False
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            return sock.connect_ex((LOOPBACK, int(port))) == 0
 
     async def boot(self) -> None:
         """Boot policy: never start eagerly — only when chosen or kept warm."""

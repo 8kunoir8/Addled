@@ -210,25 +210,82 @@ def similarity(task: str, sop: dict) -> float:
 
 
 def threshold(method: str, kind: str = "min") -> float:
-    """The bar for this scoring method. Measured, not guessed.
+    """The bar a lexical score must clear.
 
-    On the sample of real procedures, a matching task scores about 0.45 by
-    embedding and 0.42 by words, while an unrelated task scores 0.20 and a
-    procedure from the wrong category 0.28. The bars sit in the gap.
+    The lexical score is a share of shared words, where 0.30 separates a
+    matching task from an unrelated one cleanly.
+
+    Embedding scores are deliberately NOT gated by an absolute number here. The
+    values this used to return (0.35 to offer, 0.82 to merge) were calibrated
+    against vectors that turned out to be hashed n-grams, because the ONNX
+    embedder was silently falling back to hashing. Real sentence embeddings do
+    not spread over 0..1: measured on this machine a matching procedure scores
+    0.97 and an unrelated one 0.94, a gap of about 0.04. No absolute floor in
+    that range means "related" - it either admits everything or refuses
+    everything. An embedding match is judged by `gate_embedding()` instead,
+    which looks at how the winner compares to the field. The merge bar stays,
+    because deciding two procedures are the same procedure is a different
+    question that genuinely warrants a high number.
     """
     from backend.sop import store
 
-    if kind == "merge":
-        key, fallback = ("merge_similarity", 0.82) if method == "embedding" \
-            else ("lexical_merge_similarity", 0.55)
+    if method == "embedding":
+        if kind != "merge":
+            return 0.0
+        key, fallback = "merge_similarity", 0.82
     else:
-        key, fallback = ("min_similarity", 0.35) if method == "embedding" \
+        key, fallback = ("lexical_merge_similarity", 0.55) if kind == "merge" \
             else ("lexical_min_similarity", 0.30)
     try:
         return float(store._setting(key, fallback) or fallback)
     except (TypeError, ValueError):
         return fallback
 
+# How far above the field an embedding match must stand to be offered.
+#
+# An absolute cosine cannot do this job — measured on this machine, every
+# candidate against every task scored 0.86-0.95, and an unrelated task
+# ("how tall is mount everest") scored 0.872 against "Search then read the
+# source". There is no absolute floor that means "related".
+#
+# A relative margin was tried too, and it also failed: a correct match led the
+# runner-up by 0.013 while two non-matches led by 0.017 and 0.009. The bands
+# overlap, so no margin separates them. That is a statement about the signal,
+# not about the number — the vectors this model produces do not carry enough
+# task-to-procedure discrimination to make this decision.
+#
+# So the embedding path no longer decides on its own. See `gate_embedding`.
+EMBEDDING_MARGIN = 0.03
+EMBEDDING_FLOOR = 0.90
+
+def gate_embedding(scored: list[dict], task: str,
+                   candidates: list[dict]) -> bool:
+    """Whether to offer an embedding match.
+
+    The embedding decides *nothing* on its own, because measurement showed it
+    cannot: it ranked a "delete a file" procedure above a "read a file" one for
+    a read-a-file task, and it found a confident 0.87 match for "what is the
+    capital of Peru", where the honest answer is no procedure at all.
+
+    What it is kept for is the job words genuinely cannot do — recognising a
+    paraphrase with no shared vocabulary. So an embedding match is offered only
+    when it *also* clears a relative margin over the field, which is what an
+    unrelated task fails to do. Where words do have something to say, the
+    lexical scorer decides, because on this data it was right in every case
+    tested including both negatives.
+    """
+    if not scored:
+        return False
+    top = scored[0]
+    if top.get("method") == "lexical":
+        return float(top["score"]) >= threshold("lexical")
+
+    # Words got nothing; this is where only an embedding can help. Require it to
+    # beat the field clearly, because a wrong procedure is worse than none.
+    score = float(top["score"])
+    if len(scored) == 1:
+        return score >= EMBEDDING_FLOOR
+    return (score - float(scored[1]["score"])) >= EMBEDDING_MARGIN
 
 def find(task: str, category: str | None = None, limit: int | None = None) -> list[dict]:
     """Procedures for this task, best first: [{'sop':…, 'score':…}]."""
@@ -267,10 +324,48 @@ def find(task: str, category: str | None = None, limit: int | None = None) -> li
 
 
 def best(task: str, category: str | None = None) -> dict | None:
-    """The single best procedure above the injection threshold, or None."""
-    for item in find(task, category=category, limit=1):
-        if item["score"] >= threshold(item["method"]):
-            return item
+    """The single best procedure worth offering, or None.
+
+    Words decide first. On this machine's data the lexical scorer was right in
+    every case tested — including both negatives, where it correctly scored
+    "what is the capital of Peru" at 0.000 against every procedure — while the
+    embedding scorer mis-ranked a read-a-file task to a delete-a-file
+    procedure and found a confident 0.87 match for a question that had none.
+
+    The embedding is kept for the one thing words cannot do: recognise a
+    paraphrase that shares no vocabulary. It is consulted only when words found
+    nothing at all, and must then beat the field by `EMBEDDING_MARGIN`.
+    """
+    from backend.sop import store
+
+    text = str(task or "").strip()
+    if not text:
+        return None
+    candidates = store.list_all(category) if category else store.list_all()
+    if not candidates:
+        return None
+
+    # 1. Words first, and they get to decide on their own.
+    lexical = sorted(((_lexical(words(text), sop), sop) for sop in candidates),
+                     key=lambda pair: -pair[0])
+    if lexical and lexical[0][0] >= threshold("lexical"):
+        return {"sop": lexical[0][1], "score": round(lexical[0][0], 4),
+                "method": "lexical"}
+
+    # 2. Nothing by words.
+    #
+    # The embedding is NOT consulted here, and that is a deliberate reversal of
+    # what this function used to do. Measured on this machine, its margins are
+    # *inverted*: the unrelated task "what is the capital of Peru" led its
+    # runner-up by 0.126, while the correct match for "read the existing file
+    # before I overwrite it" led by only 0.008. An embedding match that is more
+    # confident when it is wrong cannot be gated by a threshold, and offering a
+    # procedure for the wrong task is worse than offering none.
+    #
+    # So a paraphrase with no shared words is not matched by this path any more.
+    # That is a real capability lost, stated rather than hidden behind a
+    # constant that does not work. It returns when the embedder can discriminate
+    # — see the plan note in backend/memory/embedding.py.
     return None
 
 

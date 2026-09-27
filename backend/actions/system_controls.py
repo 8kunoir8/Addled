@@ -130,7 +130,10 @@ class SystemControls:
                 w, h = root.winfo_screenwidth(), root.winfo_screenheight()
                 root.destroy()
                 return {"success": True, "width": w, "height": h}
-            except:
+            except Exception:
+                # A bare `except:` here also swallowed KeyboardInterrupt and
+                # SystemExit — a Ctrl-C during the Tk call would be ignored and
+                # the fallback resolution returned as if it were real.
                 return {"success": True, "width": 1920, "height": 1080}
         except Exception as e:
             return {"success": False, "error": str(e)}

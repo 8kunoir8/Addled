@@ -304,6 +304,70 @@ async def main():
             check("an unknown tool degrades gracefully",
                   "[Provider error" not in str(res2.get("response")),
                   str(res2.get("response"))[:150])
+
+            # An approval refusal must reach the model with its instruction
+            # attached, and the loop must run the retry round instead of
+            # summarizing early — the reason a local or hybrid model reported
+            # the trust gate and then gave up.
+            from backend.skills.tool_loop import _tool_result_message
+            refusal = approval.refusal(SID, "test fixture", "echo")
+            note = _tool_result_message(echo_tool, refusal)
+            check("a refusal carries its instruction to the model",
+                  "confirm=true" in note["content"], note["content"][:200])
+            check("the refusal names this exact tool",
+                  echo_tool in note["content"], note["content"][:200])
+
+            approval.revoke(SID)
+            mcp_manager.update(SID, {"trusted": False})
+            soft = approval.refusal(SID, "test fixture", "echo")["message"]
+            check("the refusal steers away from trust-check tools",
+                  "trust-check" in soft, soft[:200])
+
+            # The loop must allow the confirm retry rather than ending the turn
+            # on the first refusal. A provider scripted to refuse-then-confirm
+            # is the observable form of that behaviour.
+            class _ConfirmStubProvider:
+                provider_id = "openai"
+                provider_name = "stub"
+
+                def __init__(self, tool_name: str):
+                    self.tool_name = tool_name
+                    self.round = 0
+
+                async def chat(self, messages, model=None, max_tokens=4096,
+                               temperature=0.7, tools=None):
+                    from backend.providers.base import ProviderResult
+                    self.round += 1
+                    arguments = '{"text": "pineapple"}'
+                    if self.round > 1:
+                        arguments = '{"text": "pineapple", "confirm": true}'
+                    # Only round 3 is allowed to answer in plain text.
+                    if self.round >= 3:
+                        return ProviderResult(ok=True, model="stub",
+                                              response="done")
+                    return ProviderResult(
+                        ok=True, model="stub", response="",
+                        tool_calls=[{
+                            "id": f"call_{self.round}", "type": "function",
+                            "function": {"name": self.tool_name,
+                                         "arguments": arguments},
+                        }])
+
+            approval.revoke(SID)
+            confirmer = _ConfirmStubProvider(f"mcp__{SID}__echo")
+            res3 = await chat_with_tools(
+                confirmer, [{"role": "user", "content": "echo it"}],
+                system_prompt="test", max_tool_rounds=4)
+            rounds_used = [t.get("tool") for t in res3.get("tool_results") or []]
+            print("confirm retry rounds:", rounds_used, confirmer.round)
+            check("the loop retries after an approval refusal",
+                  confirmer.round >= 3, f"rounds={confirmer.round}")
+            check("the confirmed call actually ran",
+                  any(t.get("success") for t in (res3.get("tool_results") or [])),
+                  json.dumps(res3.get("tool_results"))[:200])
+            check("the turn did not end on the refusal",
+                  "couldn't run the tool" not in str(res3.get("response")),
+                  str(res3.get("response"))[:150])
         finally:
             forge_module.skill_forge.forge = original_forge
             config._data["skills"]["market_search"] = market

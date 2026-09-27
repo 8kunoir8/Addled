@@ -56,13 +56,35 @@ type Tab = {
 };
 type GrepHit = { filePath: string; line: number; text: string };
 type Pending = { editId: string; filePath: string; diff: any };
+// A right-click anywhere in the tree. `node` is the folder or file it landed on.
+type TreeMenu = { x: number; y: number; node: TreeNode };
+// One step of a plan: which file, and what to do to it.
+type PlanStep = {
+  filePath: string;
+  action: string;
+  instruction: string;
+  reason: string;
+  status?: 'pending' | 'running' | 'done' | 'failed' | 'applied' | 'skipped';
+  message?: string;
+  // Set once a diff exists for this step, so "apply all" applies exactly what
+  // was generated and reviewed rather than asking for it again.
+  editId?: string;
+  diff?: any;
+};
+type Plan = {
+  summary: string;
+  steps: PlanStep[];
+  uncertain?: { question: string }[];
+};
+// A generated-but-not-yet-written diff, held for the bulk apply.
+type Prepared = { filePath: string; editId: string; diff: any };
 
 // ---------------------------------------------------------------------------
 // Syntax highlighting
 // ---------------------------------------------------------------------------
 
 /**
- * `backend/code/lang_detect.py` names languages for itself (`cpp`, `csharp`,
+ * `backend/codemode/lang_detect.py` names languages for itself (`cpp`, `csharp`,
  * `shell`), which is not the vocabulary CodeMirror uses, so the two are mapped
  * rather than passed through. Anything unmapped stays plain text, which is
  * honest — a missing mode must not throw and take the page with it.
@@ -115,6 +137,11 @@ function extensionsFor(language: string) {
 const chrome = EditorView.theme({
   '&': { backgroundColor: '#0d1117', color: '#e8eaed', height: '100%' },
   '.cm-scroller': {
+    // `overflow: auto` on the scroller is what gives the editor its scrollbars.
+    // Without it a long file could not be scrolled at all, and `.cm-content`
+    // defaulted to `min-width: max-content`, so long lines ran past the edge
+    // with nowhere to go.
+    overflow: 'auto',
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
     fontSize: '12.5px',
     lineHeight: '1.6',
@@ -188,6 +215,13 @@ const LANGUAGE_COLOR: Record<string, string> = {
 };
 const langColor = (lang: string) => LANGUAGE_COLOR[lang] || '#484f58';
 
+/**
+ * How many files a plan may name before the UI suggests the request was read
+ * too loosely. A warning, not a limit: a real refactor can be wide, and refusing
+ * it would make the feature useless for exactly the case planning was added for.
+ */
+const MANY_FILES = 8;
+
 // ---------------------------------------------------------------------------
 
 export default function CodePage() {
@@ -201,6 +235,9 @@ export default function CodePage() {
 
   const [files, setFiles] = useState<CodeFile[]>([]);
   const [truncated, setTruncated] = useState(false);
+  // Folders the backend left out because they look generated or are dotted.
+  // Shown in the tree so a partial listing does not read as a broken explorer.
+  const [hiddenDirs, setHiddenDirs] = useState<string[]>([]);
   const [filter, setFilter] = useState('');
 
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -234,6 +271,39 @@ export default function CodePage() {
   // stale handler.
   const saveRef = useRef<() => void>(() => {});
 
+  // Right-click menu in the tree, and the folders the user pinned as extra
+  // context for the planner. Pinned folders are a hint, not a scope change.
+  const [menu, setMenu] = useState<TreeMenu | null>(null);
+  const [aiContextFolders, setAiContextFolders] = useState<string[]>([]);
+
+  // The plan-first flow: instruction -> plan (files it will touch) -> per-file
+  // diffs the user applies one at a time.
+  const [plan, setPlan] = useState<Plan | null>(null);
+  const [planning, setPlanning] = useState(false);
+  // Diffs generated for the bulk flow but not yet written. Empty means "apply
+  // all" is not offered — the button appears only after the diffs exist.
+  const [prepared, setPrepared] = useState<Prepared[]>([]);
+  // How many diffs the backend says may be in flight at once. 1 means the
+  // provider serves one generation at a time (the local model does), so asking
+  // for several would queue and look slow rather than fast.
+  const [planConcurrency, setPlanConcurrency] = useState(1);
+  // Read by the diff loop between steps. A ref, not state: the loop is async and
+  // must see the current value without re-creating itself mid-run.
+  const cancelRef = useRef(false);
+
+  /**
+   * Whether this page was served by the remote gateway.
+   *
+   * Binding a workspace is in `REMOTE_FORBIDDEN_METHODS` on the backend, so the
+   * menu must not offer it to a remote session. The gateway is also the only
+   * thing that injects `__ADDLED_WS_URL__` (see useWS.wsUrl), so its presence is
+   * the check — no extra request, and no way for the UI to disagree with the
+   * socket it is actually using.
+   */
+  const isRemote = typeof window !== 'undefined'
+    && typeof (globalThis as any).__ADDLED_WS_URL__ === 'string'
+    && Boolean((globalThis as any).__ADDLED_WS_URL__);
+
   const activeTab = tabs.find(t => t.path === activePath) || null;
   const dirty = tabs.some(t => t.content !== t.saved);
 
@@ -247,8 +317,11 @@ export default function CodePage() {
         setBindError(r.error);
         setBound(false);
       } else {
+        const resolved = r?.workspaceId || folder;
+        setWorkspacePath(resolved);
         setFiles(r?.files || []);
         setTruncated(Boolean(r?.truncated));
+        setHiddenDirs(Array.isArray(r?.hiddenDirs) ? r.hiddenDirs : []);
         setBound(true);
       }
       return r;
@@ -419,6 +492,337 @@ export default function CodePage() {
     } finally { setBusy(''); }
   }, [query, send, workspacePath, wsState]);
 
+  // ---- tree context menu --------------------------------------------------
+
+  /** Open the menu at the pointer, clamped so it cannot fall off the window. */
+  const openMenu = useCallback((e: React.MouseEvent, node: TreeNode) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const W = 230, H = 96;
+    setMenu({
+      x: Math.min(e.clientX, window.innerWidth - W - 8),
+      y: Math.min(e.clientY, window.innerHeight - H - 8),
+      node,
+    });
+  }, []);
+
+  /**
+   * Rebind the editor to a folder picked in the tree.
+   *
+   * This is deliberately the SAME call the "Bind Workspace" button makes.
+   * `code.bind` already writes the global workspace root and the session's
+   * active workspace (backend/ws_server.py:code_bind), and that root is what
+   * every chat prompt is told about — so there is no narrower "code page only"
+   * binding to offer here. Saying otherwise would be a lie in the UI.
+   */
+  const useAsWorkspace = useCallback(async (folder: string) => {
+    setMenu(null);
+    const r = await bind(folder, showAll);
+    if (r && !r.error) {
+      // Drop tabs for files that are no longer in the (new) workspace.
+      const present = new Set((r.files || []).map((f: CodeFile) => f.path));
+      setTabs(prev => prev.filter(t => t.isNew || present.has(t.path)));
+      setAiContextFolders([]);
+      setPlan(null);
+      setNotice(`Workspace set to ${folder.split(/[\\/]/).filter(Boolean).pop()}`);
+      setTimeout(() => setNotice(''), 3000);
+    }
+  }, [bind, showAll]);
+
+  const addAiContext = useCallback((folder: string) => {
+    setMenu(null);
+    setAiContextFolders(prev =>
+      prev.includes(folder) ? prev : [...prev, folder]);
+  }, []);
+
+  // A menu that survives a click elsewhere is a bug; so is one that survives a
+  // scroll, because it is positioned in viewport coordinates.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(null); };
+    window.addEventListener('click', close);
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [menu]);
+
+  // ---- plan-first editing -------------------------------------------------
+
+  /**
+   * Step one of the edit flow: ask for a PLAN, never an edit.
+   *
+   * The planner is given the workspace and the read-only tools, and its job is
+   * to find which files the change actually touches before anything is
+   * rewritten. Asking for prose here instead of a plan is what produced edits
+   * against the wrong file, so a plan is required rather than optional.
+   */
+  const makePlan = useCallback(async () => {
+    const ask = instruction.trim();
+    if (!ask || wsState !== 'connected' || !bound) return;
+    // A cancel from the previous plan must not stop this one.
+    cancelRef.current = false;
+    setPlanning(true); setBusy('Planning'); setError(''); setPlan(null); setApplied('');
+    // A new plan invalidates diffs generated for the old one; leaving them would
+    // let "apply all" write files the current plan never mentioned.
+    setPrepared([]); setPending(null);
+    try {
+      const r = await send('code.plan', {
+        workspaceId: workspacePath,
+        instruction: ask,
+        contextFolders: aiContextFolders,
+      });
+      if (r?.status === 'refused') {
+        setError(r?.message || 'That is outside the workspace.');
+      } else if (r?.plan?.steps?.length) {
+        setPlan({
+          summary: r.plan.summary || '',
+          steps: r.plan.steps.map((s: any) => ({ ...s, status: 'pending' })),
+          uncertain: r.plan.uncertain || [],
+        });
+        // The backend decides this, not the page: it is the one that knows
+        // whether the provider queues. Default 1 so a missing field is treated
+        // as "slow but safe" rather than "fire them all".
+        setPlanConcurrency(Math.max(1, Number(r?.concurrency) || 1));
+      } else {
+        setError(r?.message || 'The planner found nothing to change.');
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Planning failed.');
+    } finally { setPlanning(false); setBusy(''); }
+  }, [instruction, send, workspacePath, wsState, bound, aiContextFolders]);
+
+  /**
+   * Step two: turn the plan into reviewable diffs, one file at a time.
+   *
+   * Only the first step is generated here — the user reviews it before the next
+   * file is touched, so a plan is never applied blind in one sweep.
+   */
+  const runPlanStep = useCallback(async (index: number) => {
+    const step = plan?.steps[index];
+    if (!step || !plan) return;
+    const mark = (patch: Partial<PlanStep>) =>
+      setPlan(prev => prev ? {
+        ...prev,
+        steps: prev.steps.map((s, i) => i === index ? { ...s, ...patch } : s),
+      } : prev);
+    mark({ status: 'running' });
+    setBusy(`Editing ${step.filePath}`); setError('');
+    try {
+      // The edit diffs against the file ON DISK, so an unsaved tab would make
+      // the diff describe a file the user is not looking at.
+      const openTab = tabs.find(t => t.path === step.filePath);
+      if (openTab && openTab.content !== openTab.saved) await save(openTab.path);
+
+      const r = await send('code.edit', {
+        workspaceId: workspacePath,
+        filePath: step.filePath,
+        instruction: step.instruction,
+      });
+      if (r?.status === 'refused') {
+        mark({ status: 'failed', message: r?.message || 'Outside the workspace.' });
+        setError(r?.message || 'That file is outside the workspace.');
+      } else if (r?.editId && r?.diffs?.length) {
+        // Record the id on the step as well, so the bulk flow can reuse a diff
+        // that was already generated and reviewed instead of asking again.
+        mark({ status: 'done', editId: r.editId, diff: r.diffs[0],
+               message: 'Diff ready to review' });
+        setPrepared(prev => prev.some(p => p.filePath === step.filePath)
+          ? prev
+          : [...prev, { filePath: step.filePath, editId: r.editId, diff: r.diffs[0] }]);
+        setPending({ editId: r.editId, filePath: step.filePath, diff: r.diffs[0] });
+      } else {
+        mark({ status: 'failed',
+               message: r?.message || r?.diffs?.[0]?.message || 'No change proposed.' });
+      }
+    } catch (e: any) {
+      mark({ status: 'failed', message: e?.message || 'The edit failed.' });
+    } finally { setBusy(''); }
+  }, [plan, send, workspacePath, tabs, save]);
+
+  const cancelPlan = useCallback(() => {
+    setPlan(null); setPending(null); setApplied(''); setError('');
+  }, []);
+
+  /**
+   * Generate diffs for the plan, without writing anything.
+   *
+   * Three things shape this, and the second is the one that is easy to get
+   * wrong:
+   *
+   * 1. CANCEL. Each step checks `cancelRef` before starting and after
+   *    finishing, so the button responds between steps. A step already in
+   *    flight is not aborted — `code.edit` writes nothing, it only stages a
+   *    pending edit, so letting it finish costs time and leaves one unused
+   *    entry rather than corrupting anything.
+   *
+   * 2. WIDTH FROM THE PROVIDER, not from here. `code.plan` reports how many
+   *    diffs may be in flight at once. The local model answers 1 because it
+   *    serves ONE generation at a time and queues the rest — asking for three
+   *    there would look concurrent and behave serially, which is worse than
+   *    saying so. A cloud provider answers up to 3.
+   *
+   * 3. ONLY WHAT WAS ASKED. Diffs are the expensive part on a slow model, so
+   *    this never runs unprompted: the caller decides, and for a wide plan the
+   *    UI does not offer the bulk path at all.
+   */
+  const generateAllDiffs = useCallback(async () => {
+    if (!plan || !plan.steps.length) return;
+    const steps = plan.steps;
+    const total = steps.length;
+    const width = Math.max(1, planConcurrency || 1);
+
+    cancelRef.current = false;
+    setBusy(width > 1
+      ? `Generating diffs (${width} at a time)`
+      : 'Generating diffs (one at a time)');
+    setError('');
+    const collected: Prepared[] = [];
+
+    const mark = (index: number, patch: Partial<PlanStep>) =>
+      setPlan(prev => prev ? {
+        ...prev,
+        steps: prev.steps.map((s, j) => j === index ? { ...s, ...patch } : s),
+      } : prev);
+
+    const doOne = async (index: number) => {
+      if (cancelRef.current) return;
+      const step = steps[index];
+      if (step.status === 'done' && step.editId) {
+        collected.push({ filePath: step.filePath, editId: step.editId,
+                         diff: step.diff });
+        return;
+      }
+      mark(index, { status: 'running' });
+      try {
+        // The edit diffs against the file ON DISK, so an unsaved tab would
+        // make the diff describe something the user is not looking at.
+        const openTab = tabs.find(t => t.path === step.filePath);
+        if (openTab && openTab.content !== openTab.saved) await save(openTab.path);
+        const r = await send('code.edit', {
+          workspaceId: workspacePath,
+          filePath: step.filePath,
+          instruction: step.instruction,
+        });
+        if (cancelRef.current) {
+          // Cancelled while this was in flight: the diff is real but was not
+          // asked for, so it is not offered for applying. Marking it 'pending'
+          // rather than 'done' keeps that honest.
+          mark(index, { status: 'pending', message: 'Cancelled' });
+          return;
+        }
+        if (r?.editId && r?.diffs?.length) {
+          const diff = r.diffs[0];
+          mark(index, { status: 'done', editId: r.editId, diff,
+                        message: 'Diff ready to review' });
+          collected.push({ filePath: step.filePath, editId: r.editId, diff });
+        } else {
+          mark(index, { status: 'failed',
+                        message: r?.message || r?.diffs?.[0]?.message
+                                 || 'No change proposed.' });
+        }
+      } catch (e: any) {
+        mark(index, { status: 'failed', message: e?.message || 'The edit failed.' });
+      }
+    };
+
+    // A bounded pool. With width 1 this is the old serial loop, which is the
+    // only honest way to talk to the local model.
+    let next = 0;
+    const run = async () => {
+      while (!cancelRef.current) {
+        const index = next++;
+        if (index >= total) return;
+        setBusy(`Diff ${Math.min(next, total)} of ${total}: ${steps[index].filePath}`);
+        await doOne(index);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(width, total) }, run));
+
+    setPrepared(collected);
+    setBusy('');
+    if (cancelRef.current) {
+      setNotice(`Cancelled — ${collected.length} diff${collected.length === 1 ? '' : 's'} ready`);
+      setTimeout(() => setNotice(''), 4000);
+    } else if (!collected.length) {
+      setError('No diffs were produced, so there is nothing to apply.');
+    }
+  }, [plan, send, workspacePath, tabs, save, planConcurrency]);
+
+  /**
+   * Write every prepared diff in one call.
+   *
+   * Only diffs that were generated AND shown can be applied — they are the ids
+   * `code.edit` returned, so the review step has already happened. The backend
+   * refuses anything it does not find pending, which is what stops this from
+   * becoming a way to write files unseen.
+   */
+  const applyAllDiffs = useCallback(async () => {
+    if (!prepared.length) return;
+    if (!window.confirm(
+      `Apply ${prepared.length} reviewed change`
+      + `${prepared.length === 1 ? '' : 's'}? `
+      + 'A backup of each file is kept beside it.'
+    )) return;
+    setBusy('Applying all'); setError(''); setApplied('');
+    try {
+      const r = await send('code.applyPlan', {
+        workspaceId: workspacePath,
+        edits: prepared.map(p => ({
+          filePath: p.filePath,
+          editId: p.editId,
+          // A step the planner called "create" writes a file that is not there
+          // yet; every other step must already exist.
+          create: plan?.steps.find(s => s.filePath === p.filePath)?.action === 'create',
+        })),
+      });
+      const done = r?.applied || [];
+      const left = r?.skipped || [];
+      if (r?.failed) {
+        setError(
+          `Stopped at ${r.failed.filePath}: ${r.failed.reason}`
+          + (done.length ? ` — ${done.length} file(s) were written first.` : '')
+        );
+      }
+      if (done.length) {
+        setApplied(`Applied ${done.length} change${done.length === 1 ? '' : 's'}`
+          + (left.length ? `, ${left.length} not attempted.` : '.'));
+      }
+      // Refresh every file that changed, so the tabs show what is on disk.
+      await Promise.all(done.map(async (d: any) => {
+        try {
+          const fresh = await send('code.read', {
+            workspaceId: workspacePath, filePath: d.filePath,
+          });
+          const content = String(fresh?.content ?? '');
+          setTabs(prev => prev.map(t => t.path === d.filePath
+            ? { ...t, content, saved: content, isNew: false } : t));
+        } catch { /* the file is written; a stale tab is not worth an error */ }
+      }));
+      // Mark the plan steps so the list reflects reality.
+      setPlan(prev => prev ? {
+        ...prev,
+        steps: prev.steps.map((s, i) => {
+          const hit = done.find((d: any) => d.index === i);
+          const missed = left.find((d: any) => d.index === i);
+          if (hit) return { ...s, status: 'applied', message: 'Written to disk' };
+          if (missed) return { ...s, status: 'skipped', message: missed.reason };
+          return s;
+        }),
+      } : prev);
+      setPrepared([]);
+      setPending(null);
+    } catch (e: any) {
+      setError(e?.message || 'The changes could not be applied.');
+    } finally { setBusy(''); }
+  }, [prepared, send, workspacePath, plan]);
+
   // ---- keyboard -----------------------------------------------------------
 
   const saveKeys = useMemo(() => keymap.of([
@@ -497,11 +901,17 @@ export default function CodePage() {
                 if (next.has(node.path)) next.delete(node.path); else next.add(node.path);
                 return next;
               })}
+              onContextMenu={e => openMenu(e, node)}
+              title={`${node.path}  (right-click for options)`}
               style={pad}
               className="w-full text-left py-[3px] pr-2 text-xs flex items-center gap-1 text-[#8b949e] hover:text-[#e8eaed] hover:bg-[#21262d]"
             >
               <span className="w-3 text-[10px]">{isOpen ? '▾' : '▸'}</span>
               <span className="truncate">{node.name}</span>
+              {aiContextFolders.includes(node.path) && (
+                <span className="ml-auto shrink-0 text-[10px] text-[#58a6ff]"
+                  title="Pinned as AI context">§</span>
+              )}
             </button>
             {isOpen && node.children && renderNodes(node.children, depth + 1)}
           </div>
@@ -514,6 +924,7 @@ export default function CodePage() {
         <button
           key={node.path}
           onClick={() => open(node.path)}
+          onContextMenu={e => openMenu(e, node)}
           style={pad}
           title={node.path}
           className={`w-full text-left py-[3px] pr-2 text-xs flex items-center gap-2 hover:bg-[#21262d] ${
@@ -547,8 +958,350 @@ export default function CodePage() {
     : notice ? <span className="text-[#3fb950]">{notice}</span>
     : <span className="text-[#484f58]">Mod+S saves · Mod+F finds inside the file</span>;
 
+  /**
+   * The composer, shared by both states.
+   *
+   * Built as a variable rather than duplicated because it must appear whether
+   * or not a file is open: planning is about the workspace, so needing an open
+   * tab first would be the wrong shape. The `activeTab`-only bits inside it are
+   * guarded.
+   */
+  const askPanel = (
+    <div className="border-t border-[#30363d] shrink-0">
+      {/*
+        A failed bind is stated here, next to the thing it disabled. It used to
+        appear only in the tree header, so the visible symptom was "the message
+        area is gone" rather than "the folder could not be opened".
+      */}
+      {bindError && (
+        <p className="px-3 pt-2 text-[11px] text-[#f85149]">
+          {bindError} — pick another folder above, then try again.
+        </p>
+      )}
+      <div className="flex items-center gap-1 px-3 pt-2 text-xs">
+        <button
+          onClick={() => setPanel('ai')}
+          className={`px-2 py-1 rounded-t ${panel === 'ai' ? 'bg-[#21262d] text-[#e8eaed]' : 'text-[#8b949e]'}`}
+        >Ask Addled</button>
+        <button
+          onClick={() => setPanel('search')}
+          className={`px-2 py-1 rounded-t ${panel === 'search' ? 'bg-[#21262d] text-[#e8eaed]' : 'text-[#8b949e]'}`}
+        >Search{scanned !== null && hits.length ? ` (${hits.length})` : ''}</button>
+      </div>
+
+      {panel === 'ai' ? (
+        <div className="p-3 space-y-2">
+          {/* pinned AI context — a hint for the planner, not a scope */}
+          {aiContextFolders.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {aiContextFolders.map(folder => (
+                <span key={folder}
+                  className="inline-flex items-center gap-1 bg-[#1f6feb22] border border-[#1f6feb55] rounded px-2 py-0.5 text-[10px] text-[#58a6ff]"
+                  title={folder}>
+                  § {folder.split(/[\\/]/).filter(Boolean).pop()}
+                  <button
+                    onClick={() => setAiContextFolders(prev => prev.filter(f => f !== folder))}
+                    className="text-[#8b949e] hover:text-[#f85149]"
+                    title="Remove from AI context">×</button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* the requirement: always plan before editing */}
+          <div className="flex gap-2 items-start">
+            <textarea
+              value={instruction}
+              onChange={e => setInstruction(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); makePlan(); }
+              }}
+              rows={2}
+              placeholder={bound
+                ? 'Describe the change — Addled plans which files to touch first…'
+                : 'Bind a workspace first…'}
+              className="flex-1 min-w-0 bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-xs text-[#e8eaed] placeholder-[#484f58] resize-none focus:outline-none focus:border-[#3380FF]"
+            />
+            <button
+              onClick={makePlan}
+              disabled={!instruction.trim() || wsState !== 'connected' || !bound || planning}
+              className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1.5 text-xs font-medium shrink-0"
+              title="Plan first — nothing is written until you approve a diff"
+            >{planning ? '…' : 'Plan'}</button>
+            {/*
+              Cancel, shown only while a bulk run is in flight. Generating diffs
+              for a wide plan on the local model is minutes of waiting, and
+              before this there was no way out of it short of reloading.
+
+              It sets a flag rather than aborting the socket: the loop checks it
+              between steps, and a step already running is allowed to finish.
+              `code.edit` only stages a pending edit, so letting one complete
+              costs time and nothing else.
+            */}
+            {busy && !planning && plan && (
+              <button
+                onClick={() => { cancelRef.current = true; setBusy('Cancelling…'); }}
+                className="border border-[#30363d] hover:border-[#f85149] hover:text-[#f85149] text-[#8b949e] rounded px-3 py-1.5 text-xs font-medium shrink-0"
+                title="Stop after the diff in flight finishes — nothing is written"
+              >Stop</button>
+            )}
+          </div>
+
+          {/* single file, one shot: the older, still-useful path */}
+          {activeTab && (
+            <button
+              onClick={askEdit}
+              disabled={!instruction.trim() || wsState !== 'connected' || Boolean(busy)}
+              className="text-[10px] text-[#8b949e] hover:text-[#58a6ff] disabled:opacity-40"
+              title={`Edit only ${activeTab.name}, skipping the plan`}
+            >Or edit just {activeTab.name} →</button>
+          )}
+
+          {/*
+            What this box can and cannot do.
+
+            It looks like the Chat composer but has a much smaller toolbox, and
+            nothing said so: the Code page's tools are read-only on purpose (a
+            change is proposed as a diff and applied by the user, so `write_file`
+            here would retire the review step), and it has no memory recall or
+            chat history. So a request that needs a web search, an MCP tool or a
+            second file works in Chat and does not work here — previously with no
+            hint as to why.
+          */}
+          <p className="text-[10px] text-[#484f58]">
+            Reads and searches the workspace, and proposes edits as a diff you
+            apply. It cannot run other tools — for those, use{' '}
+            <a href="/chat" className="text-[#58a6ff] hover:underline">Chat</a>.
+          </p>
+
+          {plan && (
+            <div className="border border-[#30363d] rounded bg-[#0d1117]">
+              <div className="flex items-center justify-between px-2 py-1 border-b border-[#21262d]">
+                <span className="text-[10px] text-[#8b949e]">
+                  Plan — {plan.steps.length} file{plan.steps.length === 1 ? '' : 's'}
+                </span>
+                <div className="flex items-center gap-2">
+                  {/*
+                    Lazy diffs. Generating is the expensive half, so the bulk
+                    path is offered only when it is worth the wait: a small plan.
+                    A wide one would be minutes of the model's time for diffs
+                    that may never be reviewed, so the per-file button is the
+                    way in and the hint below says why.
+                  */}
+                  {plan.steps.length > 1 && plan.steps.length <= MANY_FILES && (
+                    <button
+                      onClick={generateAllDiffs}
+                      disabled={Boolean(busy) || plan.steps.every(s => s.status === 'done')}
+                      className="text-[10px] px-1.5 py-0.5 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] disabled:opacity-40"
+                      title={planConcurrency > 1
+                        ? `Produce every diff (${planConcurrency} at a time) so the plan can be reviewed at once`
+                        : 'Produce every diff one at a time — this model answers one request at a time, so it will take a while'}
+                    >Generate all</button>
+                  )}
+                  {/*
+                    "Discard plan", not "Cancel". There is also a Cancel in the
+                    composer that stops a run in progress, and two buttons with
+                    the same word doing different things is a trap — one throws
+                    the plan away, the other stops the work. Named for what they
+                    actually do.
+                  */}
+                  <button onClick={cancelPlan}
+                    title="Throw this plan away — nothing is written"
+                    className="text-[10px] text-[#8b949e] hover:text-[#f85149]">Discard plan</button>
+                </div>
+              </div>
+              {plan.summary && (
+                <p className="px-2 py-1 text-[10px] text-[#8b949e] border-b border-[#21262d]">
+                  {plan.summary}
+                </p>
+              )}
+              {/*
+                A plan naming many files is more often a misread request than a
+                genuinely wide change. Say so rather than letting someone click
+                through twenty diffs — but do not block it, because a real
+                refactor can legitimately be wide.
+              */}
+              {plan.steps.length > MANY_FILES && (
+                <p className="px-2 py-1.5 text-[10px] text-[#d29922] border-b border-[#21262d]">
+                  ⚠ This plan touches {plan.steps.length} files. If that is more
+                  than you expected, cancel and describe the change more
+                  narrowly — a wide plan usually means the request was read
+                  loosely. Diffs are generated one file at a time from the list
+                  below, because generating all of them would take a long while.
+                </p>
+              )}
+              {plan.steps.length > 1 && plan.steps.length <= MANY_FILES
+                && planConcurrency === 1 && (
+                <p className="px-2 py-1.5 text-[10px] text-[#484f58] border-b border-[#21262d]">
+                  This model answers one request at a time, so generating all
+                  diffs will take a while — cancel at any point.
+                </p>
+              )}
+              <div className="max-h-52 overflow-y-auto">
+                {plan.steps.map((step, i) => (
+                  <div key={`${step.filePath}:${i}`}
+                    className="px-2 py-1.5 border-b border-[#21262d] last:border-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-[#e8eaed] truncate font-mono"
+                        title={step.filePath}>{step.filePath}</span>
+                      <span className={`ml-auto shrink-0 text-[10px] ${
+                        step.status === 'applied' ? 'text-[#3fb950]'
+                        : step.status === 'done' ? 'text-[#3fb950]'
+                        : step.status === 'failed' ? 'text-[#f85149]'
+                        : step.status === 'running' ? 'text-[#d29922]'
+                        : step.status === 'skipped' ? 'text-[#8b949e]'
+                        : 'text-[#484f58]'}`}>
+                        {step.status === 'applied' ? '✓ written'
+                          : step.status === 'done' ? '✓ diff ready'
+                          : step.status === 'failed' ? '✕ failed'
+                          : step.status === 'running' ? 'working…'
+                          : step.status === 'skipped' ? '– not applied'
+                          : step.action || 'edit'}
+                      </span>
+                      <button
+                        onClick={() => runPlanStep(i)}
+                        disabled={Boolean(busy) || step.status === 'done'
+                                  || step.status === 'applied'}
+                        className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] disabled:opacity-40"
+                      >{step.status === 'applied' ? 'Written'
+                         : step.status === 'done' ? 'Reviewing'
+                         : 'Generate diff'}</button>
+                    </div>
+                    {step.reason && (
+                      <p className="text-[10px] text-[#484f58] mt-0.5">{step.reason}</p>
+                    )}
+                    {step.message && step.status !== 'pending' && (
+                      <p className={`text-[10px] mt-0.5 ${
+                        step.status === 'failed' ? 'text-[#f85149]'
+                        : step.status === 'applied' ? 'text-[#3fb950]'
+                        : 'text-[#484f58]'}`}>{step.message}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {plan.uncertain?.length ? (
+                <div className="px-2 py-1.5 border-t border-[#21262d]">
+                  {plan.uncertain.map((u, i) => (
+                    <p key={i} className="text-[10px] text-[#d29922]">? {u.question}</p>
+                  ))}
+                </div>
+              ) : null}
+              {/*
+                Apply-all appears only once diffs exist. That ordering is the
+                safety property: it writes exactly the ids `code.edit` returned,
+                so nothing can be applied that has not been generated and put in
+                front of the user.
+              */}
+              {prepared.length > 0 && (
+                <div className="flex items-center gap-2 px-2 py-1.5 border-t border-[#21262d]">
+                  <span className="text-[10px] text-[#8b949e]">
+                    {prepared.length} reviewed change{prepared.length === 1 ? '' : 's'} ready
+                  </span>
+                  <button
+                    onClick={applyAllDiffs}
+                    disabled={Boolean(busy)}
+                    className="ml-auto text-[10px] px-2 py-0.5 rounded bg-[#238636] hover:bg-[#2ea043] disabled:opacity-40 text-white font-medium"
+                    title="Write every reviewed change. A backup of each file is kept beside it."
+                  >Apply all</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="p-3 space-y-2">
+          <div className="flex gap-2">
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') search(); }}
+              placeholder="Find in the workspace…"
+              className="flex-1 min-w-0 bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-xs text-[#e8eaed] placeholder-[#484f58]"
+            />
+            <button
+              onClick={search}
+              disabled={query.trim().length < 2 || Boolean(busy)}
+              className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1.5 text-xs font-medium"
+            >Search</button>
+          </div>
+          {scanned !== null && (
+            <p className="text-[11px] text-[#484f58]">
+              {hits.length} match{hits.length === 1 ? '' : 'es'} in {scanned} file{scanned === 1 ? '' : 's'}
+            </p>
+          )}
+          {hits.length > 0 && (
+            <div className="max-h-40 overflow-y-auto border border-[#30363d] rounded">
+              {hits.map((hit, i) => (
+                <button
+                  key={`${hit.filePath}:${hit.line}:${i}`}
+                  onClick={() => open(hit.filePath, hit.line)}
+                  className="w-full text-left px-2 py-1 text-[11px] hover:bg-[#21262d] border-b border-[#21262d] last:border-0"
+                >
+                  <span className="text-[#58a6ff]">{hit.filePath}:{hit.line}</span>
+                  <span className="text-[#8b949e] ml-2 font-mono">{hit.text}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="flex h-full">
+      {/* ---------------- right-click menu ---------------- */}
+      {menu && (
+        <div
+          className="fixed z-50 min-w-[210px] py-1 bg-[#161b22] border border-[#30363d] rounded shadow-lg text-xs"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="px-3 py-1 text-[10px] text-[#484f58] truncate border-b border-[#21262d] mb-1"
+            title={menu.node.path}>
+            {menu.node.type === 'dir' ? '📁 ' : ''}{menu.node.name}
+          </div>
+          {menu.node.type === 'dir' && !isRemote && (
+            <button
+              onClick={() => useAsWorkspace(menu.node.path)}
+              className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+              title="Rebind the editor (and Addled's workspace) to this folder"
+            >Use as workspace</button>
+          )}
+          {menu.node.type === 'dir' && isRemote && (
+            <div className="px-3 py-1.5 text-[#484f58]"
+              title="Binding a workspace is done on the machine running Addled">
+              Use as workspace — unavailable remotely
+            </div>
+          )}
+          {menu.node.type === 'dir' && (
+            <button
+              onClick={() => addAiContext(menu.node.path)}
+              disabled={aiContextFolders.includes(menu.node.path)}
+              className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d] disabled:opacity-40 disabled:hover:bg-transparent"
+            >
+              {aiContextFolders.includes(menu.node.path)
+                ? 'Already pinned as AI context' : 'Add as AI context'}
+            </button>
+          )}
+          {menu.node.type === 'file' && (
+            <>
+              <button
+                onClick={() => { setMenu(null); open(menu.node.path); }}
+                className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+              >Open file</button>
+              <button
+                onClick={() => {
+                  const dir = menu.node.path.split('/').slice(0, -1).join('/');
+                  addAiContext(dir || '.');
+                }}
+                className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+              >Add its folder as AI context</button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* ---------------- file tree ---------------- */}
       {!treeOpen && (
         <div className="w-9 border-r border-[#30363d] flex flex-col items-center shrink-0">
@@ -593,6 +1346,30 @@ export default function CodePage() {
             </div>
           )}
           {bindError && <p className="text-[11px] text-[#f85149]">{bindError}</p>}
+          {/*
+            Say which folders are being hidden rather than showing a partial
+            tree as if it were the whole thing. A folder that simply is not
+            there reads as the explorer being broken — which is exactly how it
+            was reported.
+          */}
+          {bound && !showAll && hiddenDirs.length > 0 && (
+            <p className="text-[10px] text-[#484f58]">
+              {hiddenDirs.length === 1
+                ? <>Hiding <span className="font-mono">{hiddenDirs[0]}</span></>
+                : <>Hiding {hiddenDirs.length} folders
+                    {' ('}
+                    <span className="font-mono">
+                      {hiddenDirs.slice(0, 3).join(', ')}
+                      {hiddenDirs.length > 3 ? ', …' : ''}
+                    </span>
+                    {')'}</>}
+              {' — '}
+              <button
+                onClick={() => { setShowAll(true); rebind(true); }}
+                className="text-[#58a6ff] hover:underline"
+              >show all</button>
+            </p>
+          )}
         </div>
 
         {bound && (
@@ -652,9 +1429,11 @@ export default function CodePage() {
               </label>
             </div>
             {truncated && (
-              <p className="px-3 pb-2 text-[11px] text-[#d29922]">
-                The list was capped — turn on “show all”, or filter to reach the rest.
-              </p>
+              <div className="border-t border-[#30363d] px-3 py-1.5 text-[10px] text-[#d29922] shrink-0">
+                Only the first {files.length} files are listed. Filter to reach
+                the rest, or tick “show all” if what you want is inside a
+                generated or dot folder.
+              </div>
             )}
           </>
         )}
@@ -707,7 +1486,12 @@ export default function CodePage() {
                 value={activeTab.content}
                 height="100%"
                 theme="none"
-                extensions={[...extensionsFor(activeTab.language), oneDark, chrome, saveKeys]}
+                extensions={[...extensionsFor(activeTab.language), oneDark, chrome, saveKeys,
+                             // Wrap long lines. Without this a long line ran off the
+                             // right edge and the only way to read it was the thin
+                             // horizontal scrollbar, which reads as "no scrollbar at
+                             // all". Wrapping is what a code editor is expected to do.
+                             EditorView.lineWrapping]}
                 onChange={value => edit(activeTab.path, value)}
                 onUpdate={onUpdate}
                 onCreateEditor={view => { viewRef.current = view; }}
@@ -752,87 +1536,35 @@ export default function CodePage() {
             )}
 
             {/* ask / search */}
-            <div className="border-t border-[#30363d] shrink-0">
-              <div className="flex items-center gap-1 px-3 pt-2 text-xs">
-                <button
-                  onClick={() => setPanel('ai')}
-                  className={`px-2 py-1 rounded-t ${panel === 'ai' ? 'bg-[#21262d] text-[#e8eaed]' : 'text-[#8b949e]'}`}
-                >Ask Addled</button>
-                <button
-                  onClick={() => setPanel('search')}
-                  className={`px-2 py-1 rounded-t ${panel === 'search' ? 'bg-[#21262d] text-[#e8eaed]' : 'text-[#8b949e]'}`}
-                >Search{scanned !== null && hits.length ? ` (${hits.length})` : ''}</button>
-              </div>
-
-              {panel === 'ai' ? (
-                <div className="p-3 flex gap-2">
-                  <input
-                    value={instruction}
-                    onChange={e => setInstruction(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') askEdit(); }}
-                    placeholder={`Ask Addled to change ${activeTab.name}…`}
-                    className="flex-1 min-w-0 bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-xs text-[#e8eaed] placeholder-[#484f58]"
-                  />
-                  <button
-                    onClick={askEdit}
-                    disabled={!instruction.trim() || wsState !== 'connected' || Boolean(busy)}
-                    className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1.5 text-xs font-medium"
-                  >Edit</button>
-                </div>
-              ) : (
-                <div className="p-3 space-y-2">
-                  <div className="flex gap-2">
-                    <input
-                      value={query}
-                      onChange={e => setQuery(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') search(); }}
-                      placeholder="Find in the workspace…"
-                      className="flex-1 min-w-0 bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-xs text-[#e8eaed] placeholder-[#484f58]"
-                    />
-                    <button
-                      onClick={search}
-                      disabled={query.trim().length < 2 || Boolean(busy)}
-                      className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1.5 text-xs font-medium"
-                    >Search</button>
-                  </div>
-                  {scanned !== null && (
-                    <p className="text-[11px] text-[#484f58]">
-                      {hits.length} match{hits.length === 1 ? '' : 'es'} in {scanned} file{scanned === 1 ? '' : 's'}
-                    </p>
-                  )}
-                  {hits.length > 0 && (
-                    <div className="max-h-40 overflow-y-auto border border-[#30363d] rounded">
-                      {hits.map((hit, i) => (
-                        <button
-                          key={`${hit.filePath}:${hit.line}:${i}`}
-                          onClick={() => open(hit.filePath, hit.line)}
-                          className="w-full text-left px-2 py-1 text-[11px] hover:bg-[#21262d] border-b border-[#21262d] last:border-0"
-                        >
-                          <span className="text-[#58a6ff]">{hit.filePath}:{hit.line}</span>
-                          <span className="text-[#8b949e] ml-2 font-mono">{hit.text}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+            {askPanel}
           </>
         ) : (
-          <div className="flex items-center justify-center h-full text-[#8b949e]">
-            <div className="text-center">
-              <span className="text-4xl mb-3 block">💻</span>
-              <p className="text-sm">
-                {bound ? 'Open a file from the tree to start editing'
-                  : 'Bind a workspace to start coding'}
-              </p>
-              {bound && (
-                <p className="text-[11px] text-[#484f58] mt-2">
-                  Or type a path under “new/file.py” to write a new one.
+          <>
+            <div className="flex-1 flex items-center justify-center text-[#8b949e]">
+              <div className="text-center">
+                <span className="text-4xl mb-3 block">💻</span>
+                <p className="text-sm">
+                  {bound ? 'Open a file from the tree to start editing'
+                    : 'Bind a workspace to start coding'}
                 </p>
-              )}
+                {bound && (
+                  <p className="text-[11px] text-[#484f58] mt-2">
+                    Or describe a change below — Addled plans which files to touch.
+                  </p>
+                )}
+              </div>
             </div>
-          </div>
+            {/*
+              The composer is shown even when nothing is bound. It used to be
+              `{bound && askPanel}`, so a FAILED bind looked like the message
+              area had vanished — the remembered folder had been deleted, the
+              bind errored, and the whole panel disappeared with the error
+              buried in the tree header. The panel is harmless without a
+              workspace: the buttons below are what need one, and they are
+              already disabled on `!bound`.
+            */}
+            {askPanel}
+          </>
         )}
 
         <div className="flex items-center gap-4 px-3 py-1.5 border-t border-[#30363d] text-[11px] shrink-0">

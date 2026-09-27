@@ -51,12 +51,10 @@ EXTENSION_MAP = {
     ".svelte": "svelte",
 }
 
-
 def detect(filepath: str) -> str:
     """Detect language from file path/extension."""
     ext = os.path.splitext(filepath)[1].lower()
     return EXTENSION_MAP.get(ext, ext.lstrip(".") if ext else "text")
-
 
 def detect_from_content(content: str, filepath: str = "") -> str:
     """Detect language from file content heuristics (fallback for unknown extensions)."""

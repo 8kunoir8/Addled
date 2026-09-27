@@ -152,12 +152,171 @@ def threshold_checks(market_search) -> None:
           allowed_installs == ["acme/pdf-tools"], allowed_installs)
 
 
+def installer_checks() -> None:
+    """Verify market installer upgrades: 1MB limit, URL normalization, HTML guard."""
+    from backend.skills.market import market, parse_skill_md, Path
+    import tempfile
+
+    # 1. Skill > 64KB (e.g. 120KB) parses cleanly
+    large_body = "# large-skill\n" + ("Lots of documentation and detailed guidance.\n" * 2500)
+    assert len(large_body.encode("utf-8")) > 64 * 1024
+    meta = parse_skill_md(large_body)
+    check("parse_skill_md accepts markdown > 64KB", meta["name"] == "large-skill", len(large_body))
+
+    # 2. SKILL.md > 1MB is rejected by _register_dir
+    huge_body = "# huge-skill\n" + ("x" * (1024 * 1024 + 100))
+    rejected_dir = False
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        (tdp / "SKILL.md").write_text(huge_body, encoding="utf-8")
+        try:
+            market._register_dir(tdp)
+        except ValueError as e:
+            rejected_dir = "too large" in str(e)
+    check("SKILL.md > 1MB is rejected by _register_dir", rejected_dir)
+
+    # 3. GitHub tree URL dispatches to install_from_github with ref and path
+    calls: list[tuple] = []
+
+    def fake_install_from_github(repo, path="", ref=""):
+        calls.append((repo, path, ref))
+        return {"name": "tree-skill"}
+
+    with mock.patch.object(market, "install_from_github", fake_install_from_github):
+        market.install_from_url("https://github.com/owner/my-repo/tree/main/skills/my-skill")
+    check("GitHub tree URL dispatches to install_from_github with ref and path",
+          calls == [("owner/my-repo", "skills/my-skill", "main")], calls)
+
+    # 4. GitHub repo root URL dispatches to install_from_github
+    calls.clear()
+    with mock.patch.object(market, "install_from_github", fake_install_from_github):
+        market.install_from_url("https://github.com/owner/root-repo.git")
+    check("GitHub repo root URL dispatches to install_from_github",
+          calls == [("owner/root-repo", "", "")], calls)
+
+    # 5. GitHub blob URL for SKILL.md attempts install_from_github first with parent folder
+    calls.clear()
+    with mock.patch.object(market, "install_from_github", fake_install_from_github):
+        market.install_from_url("https://github.com/owner/my-repo/blob/master/skills/foo/SKILL.md")
+    check("GitHub blob URL for SKILL.md dispatches to install_from_github for companion scripts",
+          calls == [("owner/my-repo", "skills/foo", "master")], calls)
+
+    # 6. HTML response rejection
+    class FakeHtmlResp:
+        def __init__(self):
+            self.headers = {"Content-Type": "text/html; charset=utf-8"}
+        def read(self, limit):
+            return b"<!DOCTYPE html><html><body>GitHub Page</body></html>"
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    html_err = ""
+    with mock.patch("urllib.request.urlopen", return_value=FakeHtmlResp()):
+        try:
+            market.install_from_url("https://some-server.com/not-a-skill.html")
+        except ValueError as e:
+            html_err = str(e)
+    check("HTML response is rejected with clear guidance",
+          "HTML webpage" in html_err, html_err)
+
+
+def non_skill_md_checks() -> None:
+    """Verify non-SKILL.md file discovery, fallback naming, and script selection."""
+    from backend.skills.market import (
+        market,
+        parse_skill_md,
+        _find_candidate_file_in_dir,
+        _find_gh_skill_entry,
+        _pick_script,
+        Path,
+    )
+    import tempfile
+
+    # 1. Candidate file detection in local directory
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        # Empty dir returns None
+        check("_find_candidate_file_in_dir returns None for empty dir",
+              _find_candidate_file_in_dir(tdp) is None)
+
+        # README.md detected when no SKILL.md
+        (tdp / "README.md").write_text("# Readme Skill\nA cool tool", encoding="utf-8")
+        cand = _find_candidate_file_in_dir(tdp)
+        check("_find_candidate_file_in_dir finds README.md",
+              cand is not None and cand.name == "README.md")
+
+        # SKILL.md takes priority over README.md
+        (tdp / "SKILL.md").write_text("# Official Skill", encoding="utf-8")
+        cand = _find_candidate_file_in_dir(tdp)
+        check("_find_candidate_file_in_dir prioritizes SKILL.md over README.md",
+              cand is not None and cand.name == "SKILL.md")
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        (tdp / "coder.agent.md").write_text("# Coder Agent", encoding="utf-8")
+        cand = _find_candidate_file_in_dir(tdp)
+        check("_find_candidate_file_in_dir finds *.agent.md",
+              cand is not None and cand.name == "coder.agent.md")
+
+    # 2. GitHub file listing discovery
+    gh_files = [
+        {"name": "helper.py", "type": "file"},
+        {"name": "readme.md", "type": "file", "download_url": "http://example.com/readme.md"},
+        {"name": "custom.agent.md", "type": "file", "download_url": "http://example.com/agent.md"},
+    ]
+    gh_entry = _find_gh_skill_entry(gh_files)
+    check("_find_gh_skill_entry finds readme.md before agent.md",
+          gh_entry is not None and gh_entry["name"] == "readme.md")
+
+    # 3. Script entrypoint selection
+    picked = _pick_script(["util.py", "main.py", "zebra.py"], "myskill")
+    check("_pick_script prefers main.py over alphabetical first", picked == "main.py", picked)
+    picked_named = _pick_script(["util.py", "myskill.py", "main.py"], "myskill")
+    check("_pick_script prefers <skill_name>.py over main.py", picked_named == "myskill.py", picked_named)
+
+    # 4. parse_skill_md with fallback name and h2/h3 headings
+    meta = parse_skill_md("## Secondary Heading\nThis tool processes data.\nMore lines.", fallback_name="fallback-name")
+    check("parse_skill_md parses ## heading as name", meta["name"] == "Secondary Heading")
+    check("parse_skill_md extracts first non-header line as description",
+          meta["description"] == "This tool processes data.", meta["description"])
+
+    meta_no_head = parse_skill_md("Just instructions without heading.", fallback_name="inferred-skill")
+    check("parse_skill_md uses fallback_name when no header exists",
+          meta_no_head["name"] == "inferred-skill", meta_no_head["name"])
+
+    # 5. _register_dir on folder with only README.md
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        (tdp / "README.md").write_text("# Readme Only\nWorks without SKILL.md", encoding="utf-8")
+        res = market._register_dir(tdp)
+        check("_register_dir succeeds on README.md only folder", res["name"] == "readme-only", res)
+
+    # 6. install_from_github with README.md target path
+    fake_contents = [
+        {"name": "README.md", "type": "file", "download_url": "https://example.com/README.md"},
+        {"name": "main.py", "type": "file", "download_url": "https://example.com/main.py", "size": 100},
+    ]
+    with mock.patch.object(market, "_gh_contents", return_value=fake_contents), \
+         mock.patch.object(market, "_download_text", return_value="# GH Tool\nGitHub tool instructions"), \
+         mock.patch.object(market, "_download_bytes", return_value=b"print('hello')"):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("backend.skills.market.MARKET_DIR", Path(td)):
+                inst_res = market.install_from_github("acme/gh-tool", "README.md")
+                check("install_from_github with README.md installs and discovers main.py",
+                      inst_res["name"] == "gh-tool" and "main.py" in inst_res.get("scripts", []),
+                      inst_res)
+
+
 def main() -> int:
     from backend.skills import market_search
 
     encoding_checks(market_search)
     query_checks(market_search)
     threshold_checks(market_search)
+    installer_checks()
+    non_skill_md_checks()
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")

@@ -87,7 +87,8 @@ def refusal(server_id: str, server_name: str, tool: str) -> dict:
         "message": (
             f"'{tool}' from the MCP server '{server_name}' has not been "
             "approved yet, so it did not run. Ask the user whether they want "
-            "to allow it. If they agree, call this tool again with "
-            "confirm=true; if they decline, do not call it again and tell "
-            "them it was skipped."),
+            "to allow it. If they agree, call this exact tool again with "
+            "the same arguments plus confirm=true. Do not call a separate "
+            "trust-check or verification tool unless the user specifically "
+            "asked for one; the confirm flag is the approval."),
     }

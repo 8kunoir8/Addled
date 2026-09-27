@@ -1,7 +1,15 @@
 """
 Onboarding wizard — first-run PyQt6 setup flow.
 
-Walks the user through: welcome → provider → character → voice → wake-word → ready.
+Walks the user through: welcome → provider → local model → appearance →
+workspace → voice → wake-word → ready.
+
+Every page here writes a setting that something actually reads. That is the
+rule this file is held to: a step that collects a value nobody consumes is a
+question asked for nothing, and it costs the user their first minute with the
+app. `scripts/check_wizard.py` fails by name when a page and its config key
+drift apart, which is how `character.name` was found being collected and
+discarded while the real key, `agent_name`, sat unset.
 """
 
 from __future__ import annotations
@@ -12,8 +20,8 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWizard, QWizardPage, QVBoxLayout, QLabel, QLineEdit,
-    QComboBox, QCheckBox, QPushButton, QHBoxLayout, QSlider,
-    QRadioButton, QButtonGroup, QGroupBox, QFrame, QApplication,
+    QComboBox, QCheckBox, QPushButton, QHBoxLayout,
+    QRadioButton, QFrame, QApplication,
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QPixmap, QIcon
@@ -34,21 +42,33 @@ LOCAL_AI_TEXT = """<h2>Local AI Model</h2>
 <p>Addled can run its own AI model on your PC — no account, no API key, and it
 keeps working offline.</p>
 <p style='color:#8b949e;font-size:12px;'>Nothing is downloaded until you agree.
-The model is about 2.4 GB and is fetched after setup finishes.</p>"""
+The model is about 5.03 GB and is fetched after setup finishes.</p>"""
 
-CHARACTER_TEXT = """<h2>Customize Your Companion</h2>
-<p>Choose how Addled appears on your screen.</p>"""
+CHARACTER_TEXT = """<h2>Name Your Companion</h2>
+<p>What should Addled be called in your chats?</p>"""
 
-VOICE_TEXT = """<h2>Voice Settings</h2>
-<p>Configure how Addled speaks to you.</p>"""
+WORKSPACE_TEXT = """<h2>Your Workspace</h2>
+<p>The folder Addled works in. Files it reads and writes are confined to this
+folder, and the Code page opens here.</p>
+<p style='color:#8b949e;font-size:12px;'>Leave it empty to decide later. You can
+change it any time from Settings, or by right-clicking a folder on the Code
+page.</p>"""
+
+VOICE_TEXT = """<h2>Voice</h2>
+<p>Configure how Addled speaks to you.</p>
+
+<p style='color:#8b949e;font-size:12px;'>Speaking uses Microsoft Edge's online
+voices — no key, but a connection.</p>"""
 
 WAKE_TEXT = """<h2>Wake Word</h2>
 <p>Choose how to get Addled's attention.</p>
-<p style='color:#8b949e;font-size:12px;'>Requires microphone access. Can be disabled later.</p>"""
+<p style='color:#8b949e;font-size:12px;'>Listens through your microphone and can
+be turned off at any time.</p>"""
 
-READY_TEXT = """<h2>You're All Set! ✨</h2>
+READY_TEXT = """<h2>You're All Set</h2>
 <p>Addled is configured and ready to help.</p>
-<p style='color:#8b949e;font-size:12px;'>The companion will appear on your screen once you finish.</p>"""
+<p style='color:#8b949e;font-size:12px;'>The companion appears on your screen
+once you finish.</p>"""
 
 
 class StyledPage(QWizardPage):
@@ -184,7 +204,7 @@ class ProviderPage(StyledPage):
 # ── Page 2b: Local AI model (ask before downloading) ─────────────────────────
 
 class LocalAIPage(StyledPage):
-    """Consent step for the ~2.4 GB local model download."""
+    """Consent step for the local model download."""
 
     def __init__(self):
         super().__init__()
@@ -223,48 +243,132 @@ class LocalAIPage(StyledPage):
         return self.download_radio.isChecked()
 
 
-# ── Page 3: Character ────────────────────────────────────────────────────────
+# ── Page 3: Name ─────────────────────────────────────────────────────────────
 
 class CharacterPage(StyledPage):
+    """The companion's name, and nothing else about how it looks.
+
+    Shape and Colour were asked here and are no longer offered anywhere: the
+    avatar's appearance is fixed, so a question about it is a question whose
+    answer changes nothing on screen. The name is different — it is written to
+    the top-level `agent_name`, which the character, the dashboard and every bot
+    all read, so it does change what the user sees on the next message.
+    """
+
     def __init__(self):
         super().__init__()
-        self.setTitle("Appearance")
+        self.setTitle("Name")
         layout = QVBoxLayout(self)
 
         label = QLabel(CHARACTER_TEXT)
         label.setWordWrap(True)
         layout.addWidget(label)
 
-        # Shape
-        shape_group = QGroupBox("Shape")
-        shape_layout = QVBoxLayout(shape_group)
-        self.shape_group = QButtonGroup(self)
-        shapes = [("Triangle", "triangle"), ("Circle", "circle"), ("Diamond", "diamond"),
-                   ("Hexagon", "hexagon"), ("Star", "star"), ("Square", "square")]
-        for label_text, shape_id in shapes:
-            rb = QRadioButton(label_text)
-            self.shape_group.addButton(rb)
-            shape_layout.addWidget(rb)
-            if shape_id == "triangle":
-                rb.setChecked(True)
-        layout.addWidget(shape_group)
-
-        # Name
-        name_label = QLabel("Companion Name:")
+        # Written to the top-level `agent_name`, never `character.name` — that
+        # key is read by nothing, and writing it is how the name a user typed
+        # used to be discarded.
+        name_label = QLabel("Companion name:")
         layout.addWidget(name_label)
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Addled")
         self.name_input.setText("Addled")
+        self.name_input.setMaxLength(32)
         layout.addWidget(self.name_input)
 
         layout.addStretch()
 
-    def selected_shape(self) -> str:
-        btn = self.shape_group.checkedButton()
-        return btn.text().lower() if btn else "triangle"
-
     def companion_name(self) -> str:
         return self.name_input.text().strip() or "Addled"
+
+# ── Page 3b: Workspace ───────────────────────────────────────────────────────
+
+class WorkspacePage(StyledPage):
+    """The folder Addled works in.
+
+    Worth a step rather than a default: it is the boundary every file tool is
+    confined to, the folder the Code page opens, and the one thing a coding
+    agent cannot guess correctly. Skipping is a first-class choice — an empty
+    root means "decide later", which the tools handle.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Workspace")
+        layout = QVBoxLayout(self)
+
+        label = QLabel(WORKSPACE_TEXT)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        row = QHBoxLayout()
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("No folder chosen")
+        row.addWidget(self.path_input)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+        row.addWidget(browse)
+        layout.addLayout(row)
+
+        self.found_note = QLabel("")
+        self.found_note.setWordWrap(True)
+        layout.addWidget(self.found_note)
+
+        layout.addStretch()
+        self._suggest()
+
+    def _suggest(self):
+        """Offer a sensible folder rather than an empty box.
+
+        Documents/Addled if it exists, else the home folder — a default the
+        user can accept in one click beats a blank field they have to think
+        about.
+        """
+        from pathlib import Path as _Path
+        home = _Path.home()
+        candidate = home / "Documents" / "Addled"
+        try:
+            if candidate.is_dir():
+                self.path_input.setText(str(candidate))
+                self.found_note.setText(
+                    "<span style='color:#8b949e;font-size:11px;'>"
+                    "This folder already exists.</span>")
+                return
+        except OSError:
+            pass
+        if home.is_dir():
+            self.path_input.setText(str(home))
+
+    def _browse(self):
+        from PyQt6.QtWidgets import QFileDialog
+        start = self.path_input.text().strip() or ""
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose the folder Addled works in", start)
+        if chosen:
+            self.path_input.setText(chosen)
+            self.found_note.setText("")
+
+    def workspace_root(self) -> str:
+        return self.path_input.text().strip()
+
+    def validatePage(self) -> bool:  # noqa: N802  (Qt name)
+        """Refuse a path that is not a real folder, rather than saving it.
+
+        A typo saved here becomes a workspace nothing can open, and the failure
+        would surface later as "the Code page is broken" rather than as this.
+        """
+        from pathlib import Path as _Path
+        raw = self.path_input.text().strip()
+        if not raw:
+            self.found_note.setText("")
+            return True
+        if _Path(raw).is_dir():
+            self.found_note.setText("")
+            return True
+        self.found_note.setText(
+            "<span style='color:#f85149;font-size:11px;'>"
+            "That folder does not exist. Pick one, or clear the box to decide "
+            "later.</span>")
+        return False
 
 
 # ── Page 4: Voice ────────────────────────────────────────────────────────────
@@ -280,47 +384,86 @@ class VoicePage(StyledPage):
         layout.addWidget(label)
 
         # Voice selector
-        voice_label = QLabel("TTS Voice:")
+        voice_label = QLabel("Voice:")
         layout.addWidget(voice_label)
         self.voice_combo = QComboBox()
-        self.voice_combo.addItems([
-            "en-US-JennyNeural (Female)",
-            "en-US-GuyNeural (Male)",
-            "en-GB-SoniaNeural (British Female)",
-            "en-GB-RyanNeural (British Male)",
-            "en-AU-NatashaNeural (Australian)",
-        ])
+        self.voice_combo.addItem("Jenny — US female", "en-US-JennyNeural")
+        self.voice_combo.addItem("Guy — US male", "en-US-GuyNeural")
+        self.voice_combo.addItem("Sonia — British female", "en-GB-SoniaNeural")
+        self.voice_combo.addItem("Ryan — British male", "en-GB-RyanNeural")
+        self.voice_combo.addItem("Natasha — Australian",
+                                 "en-AU-NatashaNeural")
         layout.addWidget(self.voice_combo)
 
-        # Speed
-        speed_label = QLabel("Speech Speed:")
-        layout.addWidget(speed_label)
-        speed_row = QHBoxLayout()
-        self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setRange(-50, 50)
-        self.speed_slider.setValue(0)
-        self.speed_label = QLabel("Normal")
-        self.speed_slider.valueChanged.connect(
-            lambda v: self.speed_label.setText(f"{'+' if v > 0 else ''}{v}%"))
-        speed_row.addWidget(self.speed_slider)
-        speed_row.addWidget(self.speed_label)
-        layout.addLayout(speed_row)
-
-        # Enable/disable
-        self.voice_enabled = QCheckBox("Enable voice responses")
+        self.voice_enabled = QCheckBox("Speak replies out loud")
         self.voice_enabled.setChecked(True)
         layout.addWidget(self.voice_enabled)
+
+        test_row = QHBoxLayout()
+        self.test_btn = QPushButton("Test this voice")
+        self.test_btn.clicked.connect(self._test_voice)
+        test_row.addWidget(self.test_btn)
+        self.test_note = QLabel("")
+        self.test_note.setWordWrap(True)
+        test_row.addWidget(self.test_note)
+        test_row.addStretch()
+        layout.addLayout(test_row)
 
         layout.addStretch()
 
     def selected_voice(self) -> str:
-        return self.voice_combo.currentText().split(" ")[0]
-
-    def speech_rate(self) -> str:
-        return f"{'+' if self.speed_slider.value() > 0 else ''}{self.speed_slider.value()}%"
+        # The id is the item's data, not its label: the label is for a person
+        # and the id is what the voice system reads.
+        return self.voice_combo.currentData() or "en-US-JennyNeural"
 
     def voice_on(self) -> bool:
         return self.voice_enabled.isChecked()
+
+    def _test_voice(self):
+        """Say one line through the chosen voice, off the GUI thread.
+
+        Best-effort and reported honestly: if the online voices are
+        unreachable, the user finds out here rather than by wondering why
+        Addled never speaks.
+        """
+        import threading
+        voice = self.selected_voice()
+        self.test_btn.setEnabled(False)
+        self.test_note.setText(
+            "<span style='color:#8b949e;font-size:11px;'>Speaking…</span>")
+
+        def _speak():
+            error = ""
+            try:
+                import asyncio as _aio
+                from backend.voice.tts import speak
+                # `speak` is async and this runs on a plain worker thread, so
+                # it needs its own loop — the Qt loop is already running on the
+                # main thread and cannot be entered from here.
+                _aio.run(speak("This is how I will sound.", voice=voice))
+            except Exception as e:  # noqa: BLE001
+                error = str(e)
+            try:
+                from PyQt6.QtCore import QMetaObject, Qt as _Qt, Q_ARG
+                QMetaObject.invokeMethod(
+                    self, "_apply_test_result",
+                    _Qt.ConnectionType.QueuedConnection, Q_ARG(str, error))
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=_speak, daemon=True).start()
+
+    def _apply_test_result(self, error: str):
+        """Back on the GUI thread — Qt widgets may only be touched from it."""
+        self.test_btn.setEnabled(True)
+        if error:
+            self.test_note.setText(
+                "<span style='color:#f85149;font-size:11px;'>"
+                f"Could not play: {error[:80]}</span>")
+        else:
+            self.test_note.setText(
+                "<span style='color:#3fb950;font-size:11px;'>"
+                "Heard it? That is the voice you will get.</span>")
 
 
 # ── Page 5: Wake Word ────────────────────────────────────────────────────────
@@ -335,29 +478,45 @@ class WakePage(StyledPage):
         label.setWordWrap(True)
         layout.addWidget(label)
 
+        self.wake_enabled = QCheckBox("Listen for a wake word")
+        self.wake_enabled.setChecked(True)
+        layout.addWidget(self.wake_enabled)
+
+        word_label = QLabel("Wake word:")
+        layout.addWidget(word_label)
         self.wake_combo = QComboBox()
-        self.wake_combo.addItems(["Addled", "Hey Addled", "Hey Buddy", "Computer", "Assistant"])
+        self.wake_combo.addItems(["Hey Addled", "Addled", "Hey Buddy",
+                                  "Computer", "Assistant"])
         self.wake_combo.setEditable(True)
         layout.addWidget(self.wake_combo)
 
-        self.wake_note = QLabel(
-            "<span style='color:#8b949e;font-size:11px;'>"
-            "You can type a custom wake word.</span>"
-        )
+        self.wake_note = QLabel("")
         self.wake_note.setWordWrap(True)
         layout.addWidget(self.wake_note)
 
-        self.wake_enabled = QCheckBox("Enable wake word detection")
-        self.wake_enabled.setChecked(True)
-        layout.addWidget(self.wake_enabled)
+        self.mic_ok = _microphone_available()
+        if not self.mic_ok:
+            # Turning listening on with no microphone is a promise the app
+            # cannot keep, and the user would only find out from silence.
+            self.wake_enabled.setChecked(False)
+            self.wake_enabled.setEnabled(False)
+            self.wake_note.setText(
+                "<span style='color:#d29922;font-size:11px;'>"
+                "No microphone was found, so this is off for now. Addled will "
+                "ask again from Settings once you plug one in.</span>")
+        else:
+            self.wake_note.setText(
+                "<span style='color:#8b949e;font-size:11px;'>"
+                "You can type any phrase. Turning this on means Addled listens "
+                "for it whenever it is running.</span>")
 
         layout.addStretch()
 
     def wake_word(self) -> str:
-        return self.wake_combo.currentText().strip()
+        return self.wake_combo.currentText().strip() or "Hey Addled"
 
     def wake_on(self) -> bool:
-        return self.wake_enabled.isChecked()
+        return self.wake_enabled.isChecked() and self.mic_ok
 
 
 # ── Page 6: Ready ────────────────────────────────────────────────────────────
@@ -373,7 +532,13 @@ class ReadyPage(StyledPage):
         layout.addWidget(label)
 
         self.autostart = QCheckBox("Launch Addled when Windows starts")
-        self.autostart.setChecked(False)
+        # Reflect reality if a shortcut already exists (a re-run of setup, or an
+        # earlier install), rather than showing unchecked and then overwriting
+        # a choice the user already made.
+        try:
+            self.autostart.setChecked(autostart_enabled())
+        except Exception:  # noqa: BLE001
+            self.autostart.setChecked(False)
         layout.addWidget(self.autostart)
         layout.addStretch()
 
@@ -432,6 +597,7 @@ class OnboardingWizard(QWizard):
         self._provider = ProviderPage()
         self._local = LocalAIPage()
         self._character = CharacterPage()
+        self._workspace = WorkspacePage()
         self._voice = VoicePage()
         self._wake = WakePage()
         self._ready = ReadyPage()
@@ -440,14 +606,26 @@ class OnboardingWizard(QWizard):
         self.addPage(self._provider)
         self.addPage(self._local)
         self.addPage(self._character)
+        self.addPage(self._workspace)
         self.addPage(self._voice)
         self.addPage(self._wake)
         self.addPage(self._ready)
 
     def get_settings(self) -> dict:
-        """Collect all user choices as a config dict."""
+        """Collect all user choices as a config dict.
+
+        Every key here is one something reads. The map from a page to a key is
+        the contract `scripts/check_wizard.py` holds this file to, because a
+        step that saves nothing is indistinguishable from a working one until a
+        user notices their choice never took.
+        """
         approved = self._local.download_approved()
         return {
+            # Top-level, not under `character`: this is what the character, the
+            # dashboard and the bots read. The page used to write
+            # `character.name`, which nothing consumed, so the name the user
+            # typed was discarded.
+            "agent_name": self._character.companion_name(),
             "providers": {
                 "active": self.PROVIDER_MAP.get(
                     self._provider.selected_provider(), "local"),
@@ -457,23 +635,26 @@ class OnboardingWizard(QWizard):
                 "download_approved": approved,
                 "declined": not approved,
             },
-            "character": {
-                "name": self._character.companion_name(),
-                "shape": self._character.selected_shape(),
+            # Shape and colour are NOT written: nothing on screen changes with
+            # them, so asking would be a question with no visible answer. The
+            # avatar keeps whatever settings.json holds (`triangle`, the Addled
+            # blue), and both stay editable there by anyone who wants to.
+            "workspace": {
+                # An empty root means "decide later"; every file tool already
+                # treats that as "no workspace yet" rather than an error.
+                "root": self._workspace.workspace_root(),
             },
             "voice": {
-                "enabled": self._voice.voice_on(),
-                "voice": self._voice.selected_voice(),
-                "rate": self._voice.speech_rate(),
-            },
-            "wake": {
-                "enabled": self._wake.wake_on(),
-                "word": self._wake.wake_word(),
+                "tts_voice": self._voice.selected_voice(),
+                "auto_tts": self._voice.voice_on(),
+                "wake_word": self._wake.wake_word(),
+                "mic_enabled": self._wake.wake_on(),
             },
             "system": {
                 "autostart": self._ready.autostart.isChecked(),
                 "onboarded": True,
             },
+            "first_run_complete": True,
         }
 
     def apply_settings(self):
@@ -481,6 +662,13 @@ class OnboardingWizard(QWizard):
         from backend.config import config
         settings = self.get_settings()
         for section, values in settings.items():
+            # A top-level scalar (`agent_name`, `first_run_complete`) is not a
+            # section. Treating it as one wrote `agent_name: {a: d, d: d, ...}`
+            # — a dict where a string belonged — which is how the companion
+            # name could be set and never seen again.
+            if not isinstance(values, dict):
+                config.set(section, value=values)
+                continue
             for key, val in values.items():
                 config.set(section, key, value=val)
 
@@ -492,28 +680,105 @@ class OnboardingWizard(QWizard):
             config.set("providers", "builtin", provider_id, "api_key",
                        value=api_key)
 
-        # Handle autostart
-        if self._ready.autostart.isChecked():
-            _enable_autostart()
+        # A workspace folder the user typed but that does not exist would save
+        # as a dead path, and every file tool would then refuse to work in it
+        # while reporting "folder not found". Create it here, where the intent
+        # is clear, rather than leaving the user to work it out later.
+        self._ensure_workspace()
+
+        # Handle autostart. `set_autostart` applies it AND records the choice,
+        # so the Startup shortcut and the setting cannot disagree.
+        try:
+            set_autostart(self._ready.autostart.isChecked())
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not set autostart: %s", e)
 
         log.info("Onboarding complete. Settings saved.")
 
+    def _ensure_workspace(self) -> None:
+        from backend.config import config
+        from pathlib import Path as _Path
+        root = str(config.get("workspace", "root", default="") or "").strip()
+        if not root:
+            return
+        try:
+            _Path(root).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.warning("could not create the workspace %s: %s", root, e)
 
-def _enable_autostart():
-    """Add Addled to Windows startup."""
+def _microphone_available() -> bool:
+    """Whether a recording device exists.
+
+    Checked so the wake-word step can decline honestly rather than promise to
+    listen on a machine with no microphone. Best-effort: a probe that fails is
+    reported as "available", because refusing the feature over a probing error
+    would be the worse mistake.
+    """
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        return any(int(d.get("max_input_channels") or 0) > 0 for d in devices)
+    except Exception as e:  # noqa: BLE001
+        log.debug("microphone probe failed, assuming present: %s", e)
+        return True
+
+
+def _autostart_shortcut() -> str:
+    import os
+    startup = os.path.join(os.environ.get("APPDATA", ""),
+                           r"Microsoft\Windows\Start Menu\Programs\Startup")
+    return os.path.join(startup, "Addled.bat")
+
+def _apply_autostart(enabled: bool) -> bool:
+    """Add or remove Addled's entry in the Windows Startup folder.
+
+    Reversible on purpose: the wizard could previously only ADD the shortcut,
+    so turning autostart off left a file behind that kept launching the app.
+    Returns whether the change was made; a machine without a Startup folder
+    (not Windows) reports False rather than raising.
+    """
     try:
         import os
-        startup = os.path.join(os.environ.get("APPDATA", ""),
-                               r"Microsoft\Windows\Start Menu\Programs\Startup")
+        shortcut = _autostart_shortcut()
+        if not enabled:
+            if os.path.isfile(shortcut):
+                os.remove(shortcut)
+            return True
+        startup = os.path.dirname(shortcut)
         if not os.path.isdir(startup):
-            return
+            return False
         exe = sys.executable
         main_script = Path(__file__).parent.parent / "main.py"
-        shortcut = os.path.join(startup, "Addled.bat")
         with open(shortcut, "w") as f:
             f.write(f'@echo off\n"{exe}" "{main_script}"\n')
-    except Exception as e:
-        log.warning("Failed to set autostart: %s", e)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not apply autostart=%s: %s", enabled, e)
+        return False
+
+def autostart_enabled() -> bool:
+    """Whether Addled currently starts with Windows."""
+    try:
+        import os
+        return os.path.isfile(_autostart_shortcut())
+    except Exception:  # noqa: BLE001
+        return False
+
+def set_autostart(enabled: bool) -> dict:
+    """Set autostart and record it. Used by Settings and the wizard alike.
+
+    One entry point so the file on disk and the stored setting cannot disagree —
+    the state used to be applied but never recorded, which is what made it
+    impossible to show or undo.
+    """
+    applied = _apply_autostart(bool(enabled))
+    try:
+        from backend.config import config
+        config.set("system", "autostart", value=bool(enabled))
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not record the autostart setting: %s", e)
+    return {"success": applied, "autostart": bool(enabled),
+            "error": "" if applied else "No Startup folder on this system."}
 
 
 def show_onboarding():

@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "agent-reasoning-mcp": {
+      "type": "stdio",
+      "command": "agent-reasoning-mcp",
+      "args": [
+        "run"
+      ],
+      "env": {
+        "AGENT_REASONING_MCP_PROJECT": "addled"
+      }
+    }
+  }
+}

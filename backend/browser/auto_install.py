@@ -129,12 +129,88 @@ def maybe_trigger(backend: str) -> str:
 
 
 async def approve(backend: str) -> dict:
-    """Dashboard-approved install. Returns {success, status}."""
+    """Dashboard-approved install. Returns {success, status}.
+
+    Clears the failure backoff first: the backoff exists to stop the app
+    retrying on its own, and a person pressing the button is not that. Doing it
+    before the early returns matters too — otherwise the backoff lingered past
+    the press and the next automatic attempt was still suppressed, which is the
+    state a user cannot see or clear.
+    """
     if backend not in ("playwright", "framework"):
         return {"success": False, "error": "unknown backend"}
+    _fail_until[backend] = 0.0
     if installing(backend):
         return {"success": True, "status": "installing"}
     if is_installed(backend):
         return {"success": True, "status": "installed"}
     ok = await _run(backend)
     return {"success": ok, "status": "installed" if ok else "failed"}
+
+def _version_of(package: str) -> str:
+    """The installed version of a package, or "" when it is not there.
+
+    Read from metadata rather than importing the package: importing
+    browser-use pulls in a large dependency tree, and the Settings page only
+    needs a version string to show.
+    """
+    try:
+        from importlib import metadata
+        return metadata.version(package)
+    except Exception:  # noqa: BLE001
+        return ""
+
+def status(backend: str) -> dict:
+    """What the Settings page needs to draw one backend's row.
+
+    Reports installed / installing / retryable, plus the version and what the
+    install will actually do, so the button can say so before it is pressed
+    rather than after. A failure within the backoff window reports when it may
+    be tried again, because "failed" with a live button that silently does
+    nothing is the worst of both.
+    """
+    if backend not in ("playwright", "framework"):
+        return {"backend": backend, "known": False}
+    installed = is_installed(backend)
+    busy = installing(backend)
+    package = "playwright" if backend == "playwright" else "browser-use"
+    retry_in = max(0, int(_fail_until.get(backend, 0.0) - time.time()))
+    return {
+        "backend": backend,
+        "known": True,
+        "installed": installed,
+        "installing": busy,
+        "retryInSeconds": retry_in,
+        "version": _version_of(package) if installed else "",
+        "package": package,
+        # What pressing the button runs, said plainly. The browser download is
+        # the large part, so a user is not surprised by it.
+        "installs": (["playwright (pip)", "the Chromium browser (~150 MB)"]
+                     if backend == "playwright"
+                     else ["browser-use (pip)"]),
+    }
+
+def status_all() -> dict:
+    """Both backends at once, for one round trip from the page."""
+    from backend.config import config
+    policy = "ask"
+    try:
+        policy = str(config.get("browser", "auto_install", default="ask"))
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "policy": policy,
+        "backends": [status("playwright"), status("framework")],
+    }
+
+def reset_backoff(backend: str) -> dict:
+    """Clear the failure backoff so the user can retry immediately.
+
+    The backoff exists to stop the app retrying an install by itself every few
+    seconds. A person pressing "Install" again is a different thing, and
+    refusing them for an hour because the network was briefly down is wrong.
+    """
+    if backend not in ("playwright", "framework"):
+        return {"success": False, "error": "unknown backend"}
+    _fail_until[backend] = 0.0
+    return {"success": True, "backend": backend}

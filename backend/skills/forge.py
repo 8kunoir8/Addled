@@ -61,6 +61,25 @@ def pip_argv(install_cmd: str) -> list[str] | None:
     return args
 
 
+def defined_async_functions(code: str) -> list[str]:
+    """The names of the top-level async functions a generated module defines.
+
+    The forge asks the model for a function named after the skill, but the name
+    is a slug of the task text ("get_this_machine_hostname") while a model will
+    naturally write something of its own ("probe_machine_name"). Binding
+    ``SKILL_DEF.handler`` to the requested name then produced a module that
+    raised `NameError: name 'get_this_machine_hostname' is not defined` at
+    import — so the skill was written, failed to load, and was deleted again.
+    Reading the name back out of the code is what makes the binding true.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    return [node.name for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef)]
+
+
 def build_skill_module(skill_name: str, package: str, task_description: str,
                        code: str, params_schema: dict) -> str:
     """The complete generated module, ready to write and import.
@@ -76,8 +95,13 @@ def build_skill_module(skill_name: str, package: str, task_description: str,
     comment and turns the rest of the sentence into code — the module then loads
     as `NameError: name 'newline' is not defined`. A one-line description is what
     the prompt catalogue needs as well.
+
+    The handler is bound to the function the code actually defines, falling back
+    to the requested name only when there is nothing to bind to.
     """
     purpose = " ".join(str(task_description or "").split())[:200]
+    defined = defined_async_functions(code)
+    handler = defined[0] if defined else skill_name
     return "\n".join([
         f"# Auto-generated skill: {skill_name}",
         f"# Package: {package}",
@@ -91,7 +115,7 @@ def build_skill_module(skill_name: str, package: str, task_description: str,
         f"    name={skill_name!r},",
         f"    description={purpose!r},",
         f"    parameters={params_schema!r},",
-        f"    handler={skill_name},",
+        f"    handler={handler},",
         '    category="forged",',
         ")",
         "",
@@ -153,6 +177,7 @@ class SkillForge:
         Returns: {package, install_cmd, approach, confidence}
         """
         # Try web search first
+        search_error = ""
         try:
             from backend.browser.browser_engine import browser
             import urllib.parse
@@ -164,8 +189,16 @@ class SkillForge:
                 snippet = extract.get("text", "")[:3000]
             else:
                 snippet = ""
-        except Exception:
+                search_error = str(nav.get("error") or "navigation failed")
+        except Exception as e:
             snippet = ""
+            search_error = f"{type(e).__name__}: {e}"
+            # Playwright is an optional install, so its absence is expected on
+            # many machines — but a *silent* empty snippet made a broken
+            # browser indistinguishable from a search that found nothing, and
+            # discovery then fell through to the web-less fallback with no
+            # explanation anywhere.
+            log.info("Forge discovery web search skipped: %s", search_error)
 
         # Ask the LLM to suggest a solution
         if provider:
@@ -182,10 +215,20 @@ class SkillForge:
                     f'"code_hint": "example usage code"}}'
                 )
                 from backend.providers import router
+                from backend.providers import budget
+                pid = str(getattr(provider, "provider_id", "") or "")
+                prompt, max_tokens = budget.fit_single_prompt(
+                    prompt, pid, want_reply=1000)
+                if max_tokens <= 0:
+                    fallback = self._discovery_fallback(task_description)
+                    fallback["note"] = (
+                        f"{pid or 'The model'} has no room for the discovery "
+                        "prompt.")
+                    return fallback
                 result = await provider.chat(
                     [{"role": "user", "content": prompt}],
                     model=router.for_provider(provider, "reasoning"),
-                    max_tokens=1000, temperature=0.3,
+                    max_tokens=max_tokens, temperature=0.3,
                 )
                 if result.ok:
                     text = result.response.strip()
@@ -195,10 +238,20 @@ class SkillForge:
                             text = text[4:]
                         text = text.strip()
                     return json.loads(text)
-            except Exception:
-                pass
+            except Exception as e:
+                # A model that answered with prose instead of JSON used to be
+                # indistinguishable from one that was never asked.
+                log.info("Forge discovery via model failed: %s", e)
 
-        # Fallback: search results without LLM
+        # Fallback: no usable answer from the web or the model
+        fallback = self._discovery_fallback(task_description)
+        if search_error:
+            fallback["note"] = f"web search unavailable ({search_error})"
+        return fallback
+
+    @staticmethod
+    def _discovery_fallback(task_description: str) -> dict:
+        """What discovery returns when no model could be consulted."""
         return {
             "package": "unknown",
             "install_cmd": "",
@@ -256,6 +309,19 @@ class SkillForge:
             return ForgeResult(False, skill_name, "failed",
                               "No AI provider available for code generation")
 
+        # A slug of the task text can be long and unlovely — "python library
+        # implement a function called scrape_website pip install" truncates to
+        # "a_tool_named_scrape_website_th". Asked for that, a model writes
+        # something of its own anyway, so the name is a preference and the
+        # module binds to whatever was actually defined.
+        requested = skill_name if len(skill_name) <= 40 else ""
+        name_line = (f"            - Be async: `async def {requested}(params: dict) -> dict:`"
+                     if requested else
+                     "            - Be async: `async def <a_short_snake_case_name>(params: dict) -> dict:`")
+        start_line = (f"            Start with: async def {requested}(params: dict) -> dict:"
+                      if requested else
+                      "            Start with: async def <a_short_snake_case_name>(params: dict) -> dict:")
+
         prompt = textwrap.dedent(f"""
             Generate a Python async function that wraps the capability: {task_description}
 
@@ -265,23 +331,34 @@ class SkillForge:
             Example: {code_hint}
 
             The function must:
-            - Be async: `async def {skill_name}(params: dict) -> dict:`
+{name_line}
             - Accept a `params` dict with relevant parameters
             - Return a dict with at least {{"success": True/False}}
             - Handle errors gracefully with try/except
             - Be self-contained (imports inside the function)
 
             Output ONLY the function code. No markdown, no explanation.
-            Start with: async def {skill_name}(params: dict) -> dict:
+{start_line}
         """)
 
         skill_path = None
         try:
             from backend.providers import router
+            from backend.providers import budget
+            pid = str(getattr(provider, "provider_id", "") or "")
+            # The generated function is what is being paid for here, so the
+            # reply reserve is generous; the prompt is what gives way.
+            prompt, max_tokens = budget.fit_single_prompt(
+                prompt, pid, want_reply=2000)
+            if max_tokens <= 0:
+                return ForgeResult(
+                    False, skill_name, "failed",
+                    f"{pid or 'The model'} cannot hold the code-generation "
+                    f"prompt. Switch provider, or forge with a larger model.")
             result = await provider.chat(
                 [{"role": "user", "content": prompt}],
                 model=router.for_provider(provider, "reasoning"),
-                max_tokens=2000, temperature=0.3,
+                max_tokens=max_tokens, temperature=0.3,
             )
             if not result.ok:
                 return ForgeResult(False, skill_name, "failed",
@@ -392,6 +469,7 @@ class SkillForge:
 
         package = discovery.get("package", "")
         install_cmd = discovery.get("install_cmd", "")
+        note = str(discovery.get("note") or "")
 
         # 2. Install if needed
         if install_cmd and package not in ("unknown", ""):
@@ -406,6 +484,8 @@ class SkillForge:
         # 4. Generate
         result = await self.generate(skill_name, task_description, discovery, provider)
         if not result.success:
+            if note:
+                result.detail = f"{result.detail} (discovery: {note})"
             return result
 
         # 5. Validate
@@ -415,6 +495,8 @@ class SkillForge:
                 return ForgeResult(False, skill_name, "failed",
                                   f"Generated skill failed validation: {validation.get('error')}")
 
+        if note:
+            result.detail = f"{result.detail} (discovery: {note})"
         return result
 
     # ── Helpers ──────────────────────────────────────────────────────────

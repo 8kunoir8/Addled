@@ -541,6 +541,128 @@ class SkillRegistry:
             return len(self.enabled_list_all())
         return sum(1 for s in self.enabled_list_all() if s.name in only)
 
+    def filter_for_query(self, query: str, max_tools: int = 10) -> set[str]:
+        """Select a concise subset of relevant skills for prompt-based tool calling.
+
+        Instead of injecting 50+ tool schemas (~4,700 tokens) into the context
+        of local models, selects core utilities plus skills relevant to the
+        user's query.
+
+        ``max_tools`` defaults to 10: 4 core utilities are always included,
+        leaving up to 6 slots for wiki, SOP, MCP, or domain tools that match
+        the query. At ~80 tokens per schema that is ~800 tokens total — well
+        within an 8,192-token window even before budget pruning.
+        """
+        import re
+
+        enabled = {s.name: s for s in self.enabled_list_all()}
+        if not enabled:
+            return set()
+
+        core_tools = {"web_search", "read_file", "write_file", "run_command"}
+        discovery_tools = {"find_mcp_server", "forge_skill", "list_forged"}
+        # Wiki/knowledge intent: when the user asks about docs, notes, or what
+        # Addled knows, the wiki tools should be offered — not only when the
+        # literal word "wiki" appears.
+        knowledge_terms = {
+            "wiki", "doc", "docs", "documentation", "notes", "note",
+            "article", "knowledge", "reference", "manual", "page", "pages",
+            "about", "explain", "understand",
+        }
+        wiki_tools = {"wiki_search", "wiki_read", "wiki_links", "wiki_lint"}
+        # Procedure/SOP intent: "how do we do X", "standard procedure", "recipe".
+        procedure_terms = {
+            "procedure", "procedures", "sop", "sops", "recipe", "recipes",
+            "guide", "guideline", "guidelines", "workflow", "runbook",
+            "standard", "standards", "steps", "rules", "rule", "how",
+        }
+        sop_tools = {"sop_lookup", "sop_list", "sop_save"}
+
+        terms = set(_significant_terms(query or ""))
+        q_lower = (query or "").lower()
+        asks_for_tools = bool(terms & {
+            "tool", "tools", "skill", "skills", "mcp", "server", "servers",
+            "forge", "forged", "market", "registry", "capability", "capabilities",
+            "search", "trust", "trusted", "verify", "verification",
+        })
+        asks_for_knowledge = bool(terms & knowledge_terms)
+        asks_for_procedures = bool(terms & procedure_terms)
+
+        scores: dict[str, float] = {}
+        for name, skill in enabled.items():
+            score = 1.5 if name in core_tools else 0.0
+            name_lower = name.lower()
+            name_parts = set(name_lower.split("_"))
+            category = skill.category.lower()
+
+            if asks_for_tools and name in discovery_tools:
+                score += 6.0
+            if asks_for_tools and category in {"mcp", "market", "forged", "meta"}:
+                score += 4.0
+
+            # Knowledge/wiki intent: boost wiki tools and the memory category.
+            if asks_for_knowledge:
+                if name in wiki_tools:
+                    score += 6.0
+                if category == "memory" and name in wiki_tools:
+                    score += 2.0
+
+            # Procedure/SOP intent: boost SOP tools.
+            if asks_for_procedures:
+                if name in sop_tools:
+                    score += 6.0
+
+            # MCP domain-term matching: an MCP tool named
+            # ``mcp__postgres__query`` should surface when the user asks about
+            # "database", "sql", or "postgres" — not only when they say "mcp".
+            if category == "mcp" and name.startswith("mcp__"):
+                # mcp__<server>__<tool> → extract server and tool parts
+                parts = name_lower.split("__")
+                if len(parts) >= 3:
+                    server_parts = set(parts[1].split("_"))
+                    tool_parts = set(parts[2].split("_"))
+                    if (server_parts & terms) or (tool_parts & terms):
+                        score += 5.0
+                    # Also check description for domain overlap
+                    desc_words = set(re.findall(
+                        r"[\w']{3,}",
+                        (skill.description or "").lower()))
+                    if desc_words & terms:
+                        score += min(len(desc_words & terms), 3) * 1.5
+
+            if name_lower in q_lower:
+                score += 5.0
+            elif name_parts & terms:
+                score += 3.0
+
+            if category in terms:
+                score += 2.0
+
+            desc_words = set(re.findall(r"[\w']{3,}", (skill.description or "").lower()))
+            overlap = desc_words & terms
+            if overlap:
+                score += min(len(overlap), 3) * 1.0
+
+            if score > 0:
+                scores[name] = score
+
+        if not scores:
+            return {name for name in core_tools if name in enabled}
+
+        sorted_tools = sorted(scores.keys(), key=lambda n: scores[n], reverse=True)
+        selected = list(sorted_tools[:max_tools])
+        if asks_for_tools:
+            for name in discovery_tools:
+                if name in enabled and name not in selected:
+                    selected.append(name)
+        # Force-include core utilities so the model can always read, write,
+        # search the web, and run a command — they are the four things every
+        # turn might need regardless of the query's topic.
+        for c in core_tools:
+            if c in enabled and c not in selected:
+                selected.append(c)
+        return set(selected[:max_tools])
+
     def to_prompt_tools(self, only: set[str] | None = None) -> str:
         """For providers without native tool support: the catalogue.
 
@@ -563,13 +685,38 @@ class SkillRegistry:
         return "\n".join(lines)
 
     async def execute(self, name: str, params: dict) -> SkillResult:
-        """Execute a skill by name. Returns result for the AI provider."""
+        """Execute a skill by name. Returns result for the AI provider.
+
+        Two gates are enforced here, at the single seam every tool call goes
+        through:
+
+        - the enable/disable switch (`is_enabled`), and
+        - `requires_approval`, which until now was declared on a skill and
+          **read by nothing but the dashboard listing**.
+
+        That second one was a real hole, not a formality: `delete_file` and
+        `write_file` are registered with `requires_approval=True`, and they call
+        `FileOps` directly rather than through `ActionExecutor`, so the
+        `DestructionGate` never saw them either. A model could delete or
+        overwrite a file from a plain chat turn with no prompt at all — the
+        gate's own `DESTRUCTIVE_ACTIONS` set names `delete_file` while no code
+        path consulted it for that skill.
+
+        A skill that needs approval now goes through the same waiting path
+        `run_command` uses, so the answer is the user's and it arrives on the
+        turn that asked.
+        """
         skill = self._skills.get(name)
         if not skill:
             return SkillResult(False, name, error=f"Unknown skill: {name}")
         if not self.is_enabled(name):
             return SkillResult(False, name,
                                error=f"Skill '{name}' is disabled")
+
+        if getattr(skill, "requires_approval", False):
+            result = await self._execute_gated(name, skill, params)
+            if result is not None:
+                return result
 
         try:
             result = await skill.handler(params)
@@ -585,6 +732,59 @@ class SkillRegistry:
         except Exception as e:
             log.exception("Skill %s failed", name)
             return SkillResult(False, name, error=str(e))
+
+    async def _execute_gated(self, name: str, skill,
+                             params: dict) -> SkillResult | None:
+        """Ask for approval before running a destructive skill.
+
+        Returns None when the caller should proceed (approved, or no approval
+        machinery is running) and a SkillResult when the turn must be told to
+        wait or that the user said no.
+
+        Never raises: a failure to reach the approval path must not silently
+        grant permission, so it falls back to refusing.
+        """
+        try:
+            from backend.actions.executor import executor as _exec
+        except Exception as e:  # noqa: BLE001
+            log.warning("approval path unavailable for %s: %s", name, e)
+            return SkillResult(
+                False, name,
+                error=(f"'{name}' needs your approval, but the approval path "
+                       "is not running. Use the dashboard."),
+                data={"requires_approval": True})
+        try:
+            # AWAITED. This is an `async def`; calling it without `await`
+            # returned a coroutine object, which is neither True nor False, so
+            # every destructive skill fell through to "waiting for approval"
+            # and never ran even after the user agreed.
+            pending = await _exec.request_approval(name, params)
+        except AttributeError:
+            # The executor has no such helper (older build): refuse rather
+            # than run a destructive action ungated.
+            return SkillResult(
+                False, name,
+                error=f"'{name}' needs approval before it can run.",
+                data={"requires_approval": True})
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not queue approval for %s: %s", name, e)
+            return SkillResult(
+                False, name,
+                error=f"'{name}' needs approval before it can run.",
+                data={"requires_approval": True})
+        if pending is True:
+            return None            # approved — run it
+        if pending is False:
+            return SkillResult(False, name,
+                               error="The user denied this action.",
+                               data={"denied": True})
+        # A dict: still waiting. Report the id so the turn can say so.
+        info = pending if isinstance(pending, dict) else {}
+        return SkillResult(
+            False, name,
+            data={"requires_approval": True, **info},
+            error=(info.get("message")
+                   or f"'{name}' is waiting for your approval."))
 
     def _register_guideline_skills(self):
         """External guideline packs (ponytail review, status)."""
@@ -624,24 +824,189 @@ class SkillRegistry:
         self._register_meta_skills()
         self._register_guideline_skills()
         self._register_memory_skills()
+        self._register_swarm_skills()
+
+    def _register_swarm_skills(self):
+        """Tools a swarm agent uses to coordinate with its peers.
+
+        Only meaningful inside a flow — a note is delivered to the other agents
+        working the same wave. Called from a normal chat turn it is a no-op
+        that says so, rather than an error.
+        """
+        async def swarm_note(params: dict) -> dict:
+            from backend.swarm.orchestrator import swarm
+            text = str(params.get("note") or params.get("message") or "").strip()
+            if not text:
+                return {"success": False,
+                        "error": "Pass the note text in 'note'."}
+            return swarm.note(
+                from_agent=str(params.get("from") or "an agent"),
+                text=text,
+                to=str(params.get("to") or ""))
+        self.register(SkillDefinition(
+            "swarm_note",
+            "Leave a short note for the other agents working on this flow right "
+            "now — a warning, a decision that affects them, or a hand-off. Use "
+            "it when you discover something another agent's work depends on "
+            "(a name you changed, a constraint you hit). Keep it to one or two "
+            "sentences; it is read by people, not filed.",
+            {"type": "object", "properties": {
+                "note": {"type": "string",
+                         "description": "The note, one or two sentences."},
+                "to": {"type": "string",
+                       "description": "Optional: the name of one agent it is "
+                                      "for. Omit to send to the whole wave."},
+            }, "required": ["note"]},
+            swarm_note, "system",
+        ))
+
+        async def swarm_notes(params: dict) -> dict:
+            from backend.swarm.orchestrator import swarm
+            # Reading without consuming: the wave delivers notes itself, so this
+            # is for an agent that wants to look rather than be handed them.
+            seen = swarm._notes_seen.setdefault("__read__", set())
+            lines = []
+            for i, entry in enumerate(swarm._notes):
+                if i in seen:
+                    continue
+                seen.add(i)
+                lines.append(f"[{entry['from']}] {entry['text']}")
+            return {"success": True, "notes": lines, "count": len(lines)}
+        self.register(SkillDefinition(
+            "swarm_notes",
+            "Read the notes the other agents on this flow have left. They are "
+            "also handed to you automatically before you start, so this is for "
+            "checking again partway through.",
+            {"type": "object", "properties": {}},
+            swarm_notes, "system",
+        ))
+
+        async def swarm_roster(params: dict) -> dict:
+            """List the saved agent desks, and the built-in types."""
+            from backend.swarm import roster
+            if params.get("types"):
+                return {"success": True, "types": roster.type_catalogue()}
+            return {"success": True, "agents": roster.definitions(),
+                    "types": [t["type"] for t in roster.type_catalogue()]}
+        self.register(SkillDefinition(
+            "swarm_roster",
+            "List the saved swarm agents (their names, roles, briefs, skills "
+            "and models). Pass types=true to list the built-in agent types and "
+            "the default skills each one gets.",
+            {"type": "object", "properties": {
+                "types": {"type": "boolean",
+                          "description": "List built-in types instead."},
+            }},
+            swarm_roster, "system",
+        ))
+
+        async def swarm_learn(params: dict) -> dict:
+            """Record a correction so an agent does it right next time.
+
+            Split into standing rules (apply to every future task) and one-offs
+            (about the task that earned them). This is the loop that makes an
+            agent get better at this user's work specifically.
+            """
+            from backend.swarm import roster
+            agent_id = str(params.get("agent") or params.get("agentId") or "")
+            text = str(params.get("rule") or params.get("correction") or "").strip()
+            if not agent_id:
+                return {"success": False,
+                        "error": "Name the agent this applies to."}
+            if not text:
+                return {"success": False,
+                        "error": "Give the rule or correction text."}
+            # Accept a name as well as an id — a user says "the reviewer", not
+            # "agent_7f3a21bc".
+            if not roster.get(agent_id):
+                lowered = agent_id.strip().lower()
+                match = next((e for e in roster.definitions()
+                              if str(e.get("name", "")).lower() == lowered), None)
+                if match:
+                    agent_id = match["id"]
+                else:
+                    return {"success": False,
+                            "error": (f"No agent '{agent_id}'. Use swarm_roster "
+                                      "to see the saved agents.")}
+            kind = str(params.get("kind") or "standing").lower()
+            if kind in ("oneoff", "one-off", "one_off", "task"):
+                return roster.add_one_off(agent_id, text)
+            return roster.add_rule(agent_id, text)
+        self.register(SkillDefinition(
+            "swarm_learn",
+            "Record how a swarm agent should do something differently next "
+            "time. Use 'standing' (default) for a rule that applies to every "
+            "future task — 'proposals are always one page' — and 'one-off' for "
+            "a note about the task that just ran. Use this when the user "
+            "corrects a result rather than waiting to be told.",
+            {"type": "object", "properties": {
+                "agent": {"type": "string",
+                          "description": "The agent id or name."},
+                "rule": {"type": "string",
+                         "description": "The rule, in one sentence."},
+                "kind": {"type": "string",
+                         "description": "'standing' or 'one-off'."},
+            }, "required": ["agent", "rule"]},
+            swarm_learn, "system",
+        ))
 
     # ── System ───────────────────────────────────────────────────────────
 
     def _register_system_skills(self):
         async def run_command(params: dict) -> dict:
-            from backend.actions.terminal import TerminalExecutor
-            t = TerminalExecutor()
-            return await t.execute(
-                str(params.get("command", "")),
-                params.get("cwd"),
-                params.get("timeout", 30),
-            )
+            """Run a PowerShell command, asking in-band when it is destructive.
+
+            This used to construct a TerminalExecutor and call it directly,
+            which skipped the action executor and with it the destruction gate's
+            approval handle: a gated command came back as "requires approval"
+            with no approval_id, and nothing could ever approve it. Going
+            through `execute_for_chat` means a safe command runs immediately and
+            a destructive one waits for the user's answer on the same turn.
+            """
+            from backend.actions.executor import executor
+            from dataclasses import asdict
+            result = await executor.execute_for_chat("run_command", {
+                "command": str(params.get("command", "")),
+                "cwd": params.get("cwd"),
+                "timeout": params.get("timeout", 30),
+            })
+            payload = asdict(result)
+            if result.data:
+                payload.update(result.data)
+            if not result.success:
+                # A failed command reported only a non-zero exit code and its
+                # stderr, leaving `error` empty: the model saw success=false
+                # with nothing to act on and invented an explanation. stderr is
+                # where the shell says what it objected to.
+                if not payload.get("error"):
+                    payload["error"] = (str((result.data or {}).get("stderr")
+                                            or "").strip()
+                                        or f"Command exited with code "
+                                           f"{(result.data or {}).get('exit_code')}")
+            # A command that needed a live shell fails here in a way that reads
+            # like a broken tool. Name the tool that does have state, so the
+            # model opens a session instead of retrying the same stateless call.
+            try:
+                from backend.actions.session import looks_interactive
+                cmd = str(params.get("command", ""))
+                if not result.success and looks_interactive(cmd):
+                    payload["hint"] = (
+                        "This command needs a shell that keeps its state "
+                        "between calls. Open one with session_open, then "
+                        "session_send the command into it.")
+            except Exception:  # noqa: BLE001
+                pass
+            return payload
         self.register(SkillDefinition(
             "run_command",
             "Run a command in Windows PowerShell 5.1 on the user's PC. "
             "Use PowerShell syntax: ';' to chain commands (NOT '&&'), "
             "$env:USERPROFILE instead of '~', 'Test-Path' to check paths, "
             "'New-Item -ItemType Directory -Path X' to create folders. "
+            "You have real access to the user's machine through this tool — "
+            "safe commands run immediately and a destructive one waits for the "
+            "user to approve it, so when that happens tell the user it is "
+            "awaiting their approval instead of saying you cannot run it. "
             "Returns stdout/stderr of the command. High-output commands "
             "(git, pip, pytest, npm, ruff, gh, docker, kubectl, cargo) are "
             "auto-compressed by RTK; for other long outputs prefix with "
@@ -652,6 +1017,107 @@ class SkillRegistry:
                 "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30},
             }, "required": ["command"]},
             run_command, "system", True,
+        ))
+
+        # ---- interactive sessions ------------------------------------------
+        # A shell that stays alive between calls, for the work a one-shot
+        # command cannot do: a `cd` that sticks, an env var the next command
+        # reads, a REPL (python -i), an open ssh. Opt-in — `run_command` stays
+        # the stateless default, because a live shell that outlives the call is
+        # exactly the statefulness that makes a runaway hard to reason about.
+        async def session_open(params: dict) -> dict:
+            from backend.actions import session as sessions
+            cwd = params.get("cwd")
+            if cwd and not str(cwd).strip():
+                cwd = None
+            return await sessions.sessions.open(
+                str(params.get("session") or "main"), cwd=cwd)
+        self.register(SkillDefinition(
+            "session_open",
+            "Open a long-lived interactive shell (PowerShell on Windows) that "
+            "keeps its working directory and environment between calls. Use it "
+            "when a task needs state a one-shot command cannot keep: changing "
+            "directory and running several commands there, setting an env var "
+            "for later commands, running a REPL (python -i), or holding an ssh "
+            "connection open. Safe: it only starts a shell, runs nothing. "
+            "After it, use session_send to type into it.",
+            {"type": "object", "properties": {
+                "session": {"type": "string",
+                            "description": "Name for the session, e.g. 'main'. "
+                                           "Reopening the same name reuses it."},
+                "cwd": {"type": "string",
+                        "description": "Working directory to start in."},
+            }},
+            session_open, "system",
+        ))
+
+        async def session_send(params: dict) -> dict:
+            from backend.actions import session as sessions
+            return await sessions.sessions.send(
+                str(params.get("session") or "main"),
+                str(params.get("command") or ""),
+                wait_s=float(params.get("wait") or 30))
+        self.register(SkillDefinition(
+            "session_send",
+            "Type a command into an open interactive session and read its "
+            "output. The session keeps its state, so a `cd` here affects the "
+            "next session_send. If the command is still running when the wait "
+            "ends (a REPL, a server), the result says so and you read more with "
+            "session_read. Requires session_open first.",
+            {"type": "object", "properties": {
+                "session": {"type": "string", "description": "Session name."},
+                "command": {"type": "string",
+                            "description": "The line to type into the shell."},
+                "wait": {"type": "integer",
+                         "description": "Seconds to wait for it to finish.",
+                         "default": 30},
+            }, "required": ["command"]},
+            session_send, "system",
+        ))
+
+        async def session_read(params: dict) -> dict:
+            from backend.actions import session as sessions
+            return await sessions.sessions.read(
+                str(params.get("session") or "main"),
+                wait_s=float(params.get("wait") or 2))
+        self.register(SkillDefinition(
+            "session_read",
+            "Read whatever an interactive session has printed since the last "
+            "read. Use it after session_send reported that a command was still "
+            "running.",
+            {"type": "object", "properties": {
+                "session": {"type": "string", "description": "Session name."},
+                "wait": {"type": "integer",
+                         "description": "Seconds to wait before reading.",
+                         "default": 2},
+            }},
+            session_read, "system",
+        ))
+
+        async def session_close(params: dict) -> dict:
+            from backend.actions import session as sessions
+            return await sessions.sessions.close(
+                str(params.get("session") or "main"))
+        self.register(SkillDefinition(
+            "session_close",
+            "Close an interactive session and stop its shell. Do this when the "
+            "work that needed it is done — sessions are also closed "
+            "automatically after 30 minutes idle.",
+            {"type": "object", "properties": {
+                "session": {"type": "string", "description": "Session name."},
+            }},
+            session_close, "system",
+        ))
+
+        async def session_list(params: dict) -> dict:
+            from backend.actions import session as sessions
+            live = sessions.sessions.list_sessions()
+            return {"success": True, "sessions": live, "count": len(live)}
+        self.register(SkillDefinition(
+            "session_list",
+            "List the interactive sessions that are currently open.",
+            {"type": "object", "properties": {}},
+            session_list, "system",
         ))
 
         async def get_screen_size(params: dict) -> dict:
@@ -883,6 +1349,132 @@ class SkillRegistry:
             search_files, "files",
         ))
 
+        async def search_in_files(params: dict) -> dict:
+            """Find which files CONTAIN a piece of text.
+
+            `search_files` above matches file *names* against a glob, so it
+            cannot answer "where is this function defined?" — the question that
+            has to be answered before editing anything. Without this the agent's
+            only options were guessing a path from a description and reading it,
+            which is how a change ends up proposed against the wrong file.
+
+            Confined to the bound workspace the same way the code.* methods are,
+            so a search cannot be used to read outside it.
+            """
+            import os as _os
+            from backend.codemode import (OutsideWorkspace,
+                                          resolve_in_workspace)
+            from backend.workspace import root as _workspace_root
+
+            needle = str(params.get("query") or "").strip()
+            if len(needle) < 2:
+                return {"matches": [], "error": "Use at least two characters."}
+
+            where = str(params.get("directory") or ".").strip() or "."
+            limit = max(1, min(int(params.get("limit") or 60), 200))
+            # Default to no filter. `extensions` is accepted as a string OR a
+            # list: the schema says string, but a model reliably sends
+            # ["py"] and the old code called `.split(",")` on it, which is how a
+            # search silently came back with nothing.
+            suffix = params.get("extensions") or ""
+            if isinstance(suffix, (list, tuple)):
+                suffix = ",".join(str(x) for x in suffix)
+            suffix = str(suffix).strip()
+
+            try:
+                root = resolve_in_workspace(_workspace_root(), ".")
+            except OutsideWorkspace as exc:
+                return {"matches": [], "error": str(exc)}
+
+            # A directory that does not exist must be reported, not treated as
+            # an empty tree. Returning "no matches" for a bogus path taught the
+            # model that the symbol was absent from a project it never searched,
+            # and it then reported that to the user as a finding.
+            if not _os.path.isdir(_os.path.join(root, where)):
+                here = sorted(
+                    d for d in _os.listdir(root)
+                    if _os.path.isdir(_os.path.join(root, d))
+                    and d not in {".git", "node_modules", "__pycache__"}
+                )
+                return {
+                    "matches": [], "scanned": 0,
+                    "error": (f"There is no folder '{where}' in the workspace. "
+                              f"Omit 'directory' to search the whole workspace, "
+                              f"or use one of: {', '.join(here[:20]) or '(none)'}"),
+                }
+            try:
+                start = resolve_in_workspace(_workspace_root(), where)
+            except OutsideWorkspace as exc:
+                return {"matches": [], "error": str(exc)}
+
+            wanted = tuple(
+                s if s.startswith(".") else "." + s
+                for s in (x.strip() for x in suffix.split(",")) if s
+            )
+            skip = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                    "dist", "build", ".next"}
+            needle_cf = needle.casefold()
+            matches, scanned, truncated = [], 0, False
+            for dirpath, dirnames, filenames in _os.walk(start):
+                dirnames[:] = sorted(d for d in dirnames if d not in skip)
+                for name in sorted(filenames):
+                    if wanted and not name.endswith(wanted):
+                        continue
+                    path = _os.path.join(dirpath, name)
+                    try:
+                        if _os.path.getsize(path) > 1_000_000:
+                            continue
+                        with open(path, "r", encoding="utf-8",
+                                  errors="replace") as fh:
+                            text = fh.read()
+                    except OSError:
+                        continue
+                    if "\x00" in text:          # binary
+                        continue
+                    scanned += 1
+                    rel = _os.path.relpath(path, root).replace(_os.sep, "/")
+                    for line_no, line in enumerate(text.splitlines(), 1):
+                        if needle_cf in line.casefold():
+                            matches.append({
+                                "filePath": rel,
+                                "line": line_no,
+                                "text": line.strip()[:200],
+                            })
+                            if len(matches) >= limit:
+                                truncated = True
+                                break
+                    if truncated:
+                        break
+                if truncated:
+                    break
+            return {"matches": matches, "scanned": scanned,
+                    "truncated": truncated,
+                    "error": "" if matches else
+                             "No file in the workspace contains that text."}
+
+        self.register(SkillDefinition(
+            "search_in_files",
+            "Search the workspace for files CONTAINING a piece of text. Use this "
+            "to find where a function, class or string is defined or used before "
+            "editing it — searching beats guessing a filename.",
+            {"type": "object", "properties": {
+                "query": {"type": "string",
+                          "description": "Text to look for, e.g. a function name"},
+                "directory": {"type": "string",
+                              "description": ("Folder to search, relative to the "
+                                              "workspace root. Omit it to search "
+                                              "everything — safer than guessing a "
+                                              "folder name."),
+                              "default": "."},
+                "extensions": {"type": "string",
+                               "description": ("Optional file filter, e.g. '.py' or "
+                                               "'.py,.ts'. Leave empty to search "
+                                               "all text files.")},
+                "limit": {"type": "integer", "description": "Max matches", "default": 60},
+            }, "required": ["query"]},
+            search_in_files, "files",
+        ))
+
         async def delete_file(params: dict) -> dict:
             from backend.actions.file_ops import FileOps
             return await FileOps().delete(str(params.get("path", "")))
@@ -1047,6 +1639,157 @@ class SkillRegistry:
     # ── Code ─────────────────────────────────────────────────────────────
 
     def _register_code_skills(self):
+        async def self_read(params: dict) -> dict:
+            """Read one of Addled's own core files, under backend/."""
+            from backend.codemode import selfmod
+            path, err = selfmod._resolve(str(params.get("path") or ""))
+            if err:
+                return {"success": False, "error": err}
+            if not path.is_file():
+                return {"success": False,
+                        "error": f"{params.get('path')} does not exist."}
+            return {"success": True, "path": params.get("path"),
+                    "content": path.read_text(encoding="utf-8",
+                                              errors="replace")}
+        self.register(SkillDefinition(
+            "self_read",
+            "Read one of Addled's own source files under backend/, to understand "
+            "how a feature works before proposing a change to it. Read-only.",
+            {"type": "object", "properties": {
+                "path": {"type": "string",
+                         "description": "Path relative to backend/, e.g. "
+                                        "'skills/tool_loop.py'."},
+            }, "required": ["path"]},
+            self_read, "system",
+        ))
+
+        async def self_propose(params: dict) -> dict:
+            """Stage a change to Addled's own code. Writes nothing."""
+            from backend.codemode import selfmod
+            return selfmod.propose(
+                str(params.get("path") or ""),
+                str(params.get("content") or ""),
+                reason=str(params.get("reason") or ""))
+        self.register(SkillDefinition(
+            "self_propose",
+            "Propose a change to Addled's OWN source (a file under backend/). "
+            "This does NOT change anything: it stages the change and returns a "
+            "diff and a token. Show the user the diff and get their agreement "
+            "before calling self_apply. Files that decide what is permitted "
+            "(safety/, config.py, main.py, the executor) are refused. Only .py "
+            "files under backend/ can be changed; a new module goes through "
+            "forge_skill instead.",
+            {"type": "object", "properties": {
+                "path": {"type": "string",
+                         "description": "Path relative to backend/."},
+                "content": {"type": "string",
+                            "description": "The complete new contents of the "
+                                           "file."},
+                "reason": {"type": "string",
+                           "description": "Why this change is wanted."},
+            }, "required": ["path", "content"]},
+            self_propose, "system", True,
+        ))
+
+        async def self_apply(params: dict) -> dict:
+            """Apply a staged self-change. Requires explicit confirmation."""
+            from backend.codemode import selfmod
+            return selfmod.apply(
+                str(params.get("token") or ""),
+                confirm=bool(params.get("confirm")),
+                allow_dirty=bool(params.get("allow_dirty")))
+        self.register(SkillDefinition(
+            "self_apply",
+            "Apply a staged change to Addled's own code. You MUST have shown "
+            "the user the diff and they MUST have agreed, then pass confirm=true. "
+            "The change does not take effect until Addled restarts. Undo it with "
+            "self_revert, which needs the same token.",
+            {"type": "object", "properties": {
+                "token": {"type": "string",
+                          "description": "The token self_propose returned."},
+                "confirm": {"type": "boolean",
+                            "description": "Set true only after the user has "
+                                           "agreed to this exact diff."},
+                "allow_dirty": {"type": "boolean",
+                                "description": "Apply even though the file "
+                                               "changed since it was staged."},
+            }, "required": ["token", "confirm"]},
+            self_apply, "system", True,
+        ))
+
+        async def self_revert(params: dict) -> dict:
+            """Undo a staged or applied self-change by token."""
+            from backend.codemode import selfmod
+            return selfmod.revert(str(params.get("token") or ""))
+        self.register(SkillDefinition(
+            "self_revert",
+            "Undo a change made to Addled's own code, restoring the original "
+            "file. Works whether or not it was applied yet. A restart applies "
+            "the restore.",
+            {"type": "object", "properties": {
+                "token": {"type": "string",
+                          "description": "The token from self_propose."},
+            }, "required": ["token"]},
+            self_revert, "system", True,
+        ))
+
+        async def self_pending(params: dict) -> dict:
+            from backend.codemode import selfmod
+            items = selfmod.list_pending()
+            return {"success": True, "pending": items, "count": len(items)}
+        self.register(SkillDefinition(
+            "self_pending",
+            "List the changes to Addled's own code that are staged or were "
+            "applied and can still be reverted.",
+            {"type": "object", "properties": {}},
+            self_pending, "system",
+        ))
+
+        async def verify_code(params: dict) -> dict:
+            """Run the project's own check, so "done" means something.
+
+            The command is discovered, never invented (see
+            backend/codemode/verify.py). `path` defaults to the bound workspace.
+            """
+            from backend.codemode import verify as verify_mod
+            root = str(params.get("path") or "").strip()
+            if not root:
+                try:
+                    from backend.workspace import root as ws_root
+                    root = str(ws_root() or "")
+                except Exception:  # noqa: BLE001
+                    root = ""
+            if not root:
+                return {"success": False, "ran": False,
+                        "error": ("No workspace is bound and no path was given, "
+                                  "so there is nothing to verify.")}
+            result = await verify_mod.run_verification(
+                root, command=str(params.get("command") or ""),
+                timeout=int(params.get("timeout") or 300))
+            result["success"] = bool(result.get("ok"))
+            result["verdict"] = verify_mod.verdict_line(result)
+            return result
+        self.register(SkillDefinition(
+            "verify_code",
+            "Run the project's own test/verify command and report whether it "
+            "passed, so a change can be called verified rather than merely "
+            "finished. The command is taken from the project (a verify/test "
+            "script, a Makefile target, or the test runner its layout implies) "
+            "and never invented. Use it after making changes. Returns the exit "
+            "code, a pass/fail summary and the output.",
+            {"type": "object", "properties": {
+                "path": {"type": "string",
+                         "description": "Project root. Defaults to the "
+                                        "bound workspace."},
+                "command": {"type": "string",
+                            "description": "Override the detected command."},
+                "timeout": {"type": "integer",
+                            "description": "Seconds before the check is killed.",
+                            "default": 300},
+            }},
+            verify_code, "code",
+        ))
+
         async def code_read(params: dict) -> dict:
             import os
             path = str(params.get("path", ""))
@@ -1054,7 +1797,7 @@ class SkillRegistry:
                 return {"success": False, "error": f"File not found: {path}"}
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            from backend.code.lang_detect import detect
+            from backend.codemode.lang_detect import detect
             return {"success": True, "content": content,
                     "language": detect(path), "path": path}
         self.register(SkillDefinition(
@@ -1127,6 +1870,25 @@ class SkillRegistry:
                 "end": {"type": "string", "description": "End date filter (YYYY-MM-DD)"},
             }},
             calendar_list, "integrations",
+        ))
+
+        async def calendar_delete(params: dict) -> dict:
+            from backend.integrations.calendar_integration import calendar
+            target = str(params.get("id") or params.get("title", "")).strip().lower()
+            if not target:
+                return {"success": False, "error": "id or title is required"}
+            for ev in calendar.get_events():
+                if ev.get("id", "").lower() == target or ev.get("title", "").strip().lower() == target:
+                    ok = calendar.delete_event(ev.get("id", ""))
+                    return {"success": ok, "message": f"Deleted event '{ev.get('title')}'"}
+            return {"success": False, "error": f"no event matching '{target}'"}
+        self.register(SkillDefinition(
+            "calendar_delete", "Delete a calendar event by ID or title",
+            {"type": "object", "properties": {
+                "id": {"type": "string", "description": "Event ID to delete"},
+                "title": {"type": "string", "description": "Event title to delete"},
+            }},
+            calendar_delete, "integrations",
         ))
 
     # ── Web Search ───────────────────────────────────────────────────────
@@ -1233,7 +1995,16 @@ class SkillRegistry:
                                 "via": "direct", "text": text[:6000]}
             except Exception as e:
                 log.debug("web_fetch direct fetch failed: %s", e)
-            # 2) Search fallback: find the page's content via search results
+            # 2) Search fallback: find the page's content via search results.
+            #
+            # Gated exactly like `web_search`, because it IS `web_search`'s
+            # engine: without `_engine_ready` a cooling-down engine was still
+            # hit here, without `_looks_relevant` the model was handed the
+            # off-topic page set that check exists to reject (Bing's HTML
+            # endpoint answers a different question often enough to matter),
+            # and without `_record_engine` this path could never contribute to
+            # the failure count that drives the cooldown — so the counter was
+            # half-fed and a blocked page kept paying the 12s timeout.
             try:
                 from urllib.parse import urlparse, unquote
                 p = urlparse(url)
@@ -1241,9 +2012,22 @@ class SkillRegistry:
                 slug = unquote(p.path).strip("/").split("/")[-1]
                 slug = slug.replace("-", " ").replace("_", " ")
                 query = f"{domain} {slug}".strip()
+
+                if not _engine_ready("bing"):
+                    return {"success": False,
+                            "error": ("The site blocked automated access, and "
+                                      "the search fallback is cooling down "
+                                      "after repeated failures. Try again in a "
+                                      "few minutes.")}
                 res = await _search_bing(query)
                 if not res.get("success"):
                     res = await _search_bing(f"{domain} {slug} latest")
+                if res.get("success") and not _looks_relevant(query, res):
+                    _record_engine("bing", False)
+                    res = {"success": False,
+                           "error": "results did not match the page"}
+                else:
+                    _record_engine("bing", bool(res.get("success")))
                 if res.get("success"):
                     return {"success": True, "url": url, "via": "search-fallback",
                             "snippet": res.get("snippet"),

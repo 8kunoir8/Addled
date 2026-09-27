@@ -38,3 +38,5 @@ backend/memory/*
 # voice needs them present, so this is the one ignored directory that ships.
 backend/voice/models/
 
+
+.agent-reasoning-mcp

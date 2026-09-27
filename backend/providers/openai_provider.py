@@ -6,6 +6,7 @@ Also serves as base for LM Studio and any custom OpenAI-compatible API.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import AsyncIterator
 
@@ -46,8 +47,57 @@ def http_error_detail(exc: httpx.HTTPStatusError) -> str:
     return f"HTTP {response.status_code}: {detail}"
 
 
+def _parse_sse_as_completion(text: str, model: str) -> dict:
+    """Reassemble a non-requested SSE stream into a normal chat completion dict.
+
+    Some routers always return SSE regardless of whether ``stream`` was sent.
+    Collect delta content from every ``data:`` line and rebuild a minimal
+    non-streaming response so the rest of the call-path stays unchanged.
+    """
+    content_parts: list[str] = []
+    result_model = model
+    usage: dict = {}
+    tool_calls: list = []
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if raw == "[DONE]":
+            break
+        try:
+            chunk = json.loads(raw)
+        except Exception:
+            continue
+        result_model = chunk.get("model", result_model)
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        for choice in chunk.get("choices", []):
+            delta = choice.get("delta", {})
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+            for tc in delta.get("tool_calls", []):
+                idx = tc.get("index", 0)
+                while len(tool_calls) <= idx:
+                    tool_calls.append({"id": "", "type": "function",
+                                       "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    tool_calls[idx]["id"] = tc["id"]
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    tool_calls[idx]["function"]["name"] += fn["name"]
+                if fn.get("arguments"):
+                    tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+    message: dict = {"role": "assistant", "content": "".join(content_parts)}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return {
+        "choices": [{"message": message, "finish_reason": "stop"}],
+        "model": result_model,
+        "usage": usage,
+    }
+
+
 class OpenAIProvider(BaseProvider):
-    provider_id = "openai"
     provider_name = "OpenAI"
     supports_vision = True
     supports_streaming = True
@@ -87,7 +137,12 @@ class OpenAIProvider(BaseProvider):
             async with self._get_client() as client:
                 resp = await client.post("/chat/completions", json=payload)
                 resp.raise_for_status()
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except Exception:
+                    # Server returned SSE even though we didn't request streaming
+                    # (some routers/proxies always stream). Reconstruct from chunks.
+                    data = _parse_sse_as_completion(resp.text, model)
                 choice = data["choices"][0]
                 message = choice.get("message", {})
                 return ProviderResult(

@@ -37,8 +37,9 @@ launch.bat
 > **Self-contained installer**: `build.bat` bundles Python 3.14.7 + all core
 > dependencies — no Python install needed on the target PC.
 > Optional extras: local vision (`torch` + `transformers`, ~400 MB) and
-> browser automation (`pip install playwright && playwright install chromium`).
-> The **local AI model** (llamafile + Qwen3-4B, ~2.4 GB) is downloaded on demand
+> browser automation (Playwright + Chromium, ~150 MB) — both installable from
+> the app itself (Settings → Browser for Playwright).
+> The **local AI model** (llamafile + Qwen3-8B-Q4_K_M, ~5.03 GB) is downloaded on demand
 > after you approve it — never bundled.
 > Voice models are fetched by `scripts/fetch_voice_models.py` (~650 MB:
 > Silero VAD + Kokoro TTS). STT uses faster-whisper (downloads on first use;
@@ -87,7 +88,7 @@ launch.bat
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
 | Desktop Shell | Electron 28, system tray, auto-updater, backend auto-respawn | ✅ Built |
 | Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
-| Communication | WebSocket JSON-RPC 2.0 (161 handlers) | ✅ Built |
+| Communication | WebSocket JSON-RPC 2.0 (183 handlers) | ✅ Built |
 
 ---
 
@@ -116,10 +117,10 @@ Full chat UI with streaming responses, markdown rendering, conversation history.
 | Ollama | Local | — | ✅ |
 | LM Studio | Local | — | ✅ |
 
-**Local by default**: with no API key configured, Addled runs **Qwen3-4B-Instruct-2507**
-(3-bit GGUF) through **llamafile** on `127.0.0.1` — fully offline, no account. The
+**Local by default**: with no API key configured, Addled runs **Qwen3-8B-Q4_K_M**
+(4-bit GGUF) through **llamafile** on `127.0.0.1` — fully offline, no account. The
 model is **not** bundled with the installer: Addled asks once (setup wizard and a
-dashboard prompt) before downloading ~2.4 GB, and the download resumes if it is
+dashboard prompt) before downloading ~5.03 GB, and the download resumes if it is
 interrupted. Decline and Addled falls back to **OpenRouter**
 (`nvidia/nemotron-3-ultra-550b-a55b:free`) — paste a key in Settings → Providers.
 `Hugging Face (Local)` runs any Hugging Face chat model in-process with
@@ -241,11 +242,24 @@ LLM-based goal decomposition into sequential steps, background execution with ch
 ### 💻 Code Engine
 Workspace folder binding with a real editor (tabs, syntax highlighting, save with Ctrl+S, workspace-wide search), language detection for 32 languages across 42 extensions, unified diff generation/apply/revert, and LLM-powered code editing where you review the diff before it is applied. Every read and write is **confined to the bound folder** — a path that tries to leave it is refused, including for remote callers.
 
+Edits are proposed as **anchored changes** — find the exact existing text, replace it — rather than by rewriting the whole file. Only what changed appears in the diff, untouched lines cannot drift, and there is no file-size ceiling to hit. Matching tolerates indentation and whitespace drift, and a change that would be ambiguous (the anchor appears twice) is **refused rather than guessed**.
+
+- **Plan first**: a multi-file request searches the project, names the files it believes are involved, and only then proposes edits, so a cross-file change is not guessed from the one open file.
+- **Verified**: after a plan is applied, Addled runs the project's **own** check — a `verify`/`test` script, a Makefile target, or the runner the folder layout implies — and reports whether it passed. It never invents a command; a project with no check is reported as unverified rather than given a green tick.
+- **Undo is git**: if the workspace is a repository, an applied plan leaves a commit describing what changed, so "undo the last change" is an ordinary `git revert` and your own log records what Addled did. It commits on top and never rewrites your history.
+- **Self-modification**: Addled can change its own source on request, but only as a staged proposal you approve after seeing the diff, with the files that decide what is permitted deliberately excluded. It takes effect after a restart, and every such change is recorded in the journal.
+
 ### 🐝 Agent Swarm
-7 agent types (coder, writer, analyst, planner, researcher, devops, general) with unique system prompts and tool access. Parallel execution via asyncio. Dashboard spawn/stop/task controls.
+**9 agent types** (coder, reviewer, analyst, researcher, writer, planner, devops, qa, general) with role-appropriate prompts and **default skill sets** — the coder desk gets `verify_code` and the Karpathy/Ponytail guidelines, the researcher gets `web_search` + the wiki, the QA desk gets a verifier.
+
+Agents are **saved, not throwaway**. Five ship ready to use (Planner, Researcher, Coder, Reviewer, QA) and each keeps a name, role, **brief** (standing instructions read before every task), **learned rules**, its own skill set and optionally its own model — so a routine desk can run on the local model while the reasoning desk uses a cloud one. They survive a restart, and deleting one is respected rather than re-seeded.
+
+- **Learns from corrections**: send a result back with a correction and it is recorded as a standing rule for that agent ("proposals are always one page") or as a one-off for that task, and applied from the next run.
+- **Mid-flight notes**: agents working a step in parallel can leave each other short notes — a warning, a decision — which reach the others while it can still change the outcome.
+- Flows support dependencies, parallel peers with a merge step, `until` gates with retry, and pass/fail branching with a jump budget.
 
 ### 🌐 Browser Automation
-Playwright-powered Chromium browser when installed — navigate, click, type, extract text, screenshot, history navigation. **Without Playwright, navigation automatically falls back to a lightweight HTTP fetch** (browser-like headers, HTML→text), and blocked sites are re-discovered through search results. Web search asks Google News RSS and the MediaWiki API first, then Bing News RSS, then scrapes Bing and DuckDuckGo with a relevance gate, and falls back to the browser — so it keeps working on networks where a single engine is unreachable.
+Playwright-powered Chromium browser when installed — navigate, click, type, extract text, screenshot, history navigation. **Install it from Settings → Browser** with a button per backend that says what it will download (~150 MB for Chromium), or let the on-demand policy offer it when a task needs it. **Without Playwright, navigation automatically falls back to a lightweight HTTP fetch** (browser-like headers, HTML→text), and blocked sites are re-discovered through search results. Web search asks Google News RSS and the MediaWiki API first, then Bing News RSS, then scrapes Bing and DuckDuckGo with a relevance gate, and falls back to the browser — so it keeps working on networks where a single engine is unreachable.
 
 ### 📅 Calendar, Tasks & Scheduling
 Local calendar with Google Calendar OAuth sync — and a **tick-driven task scheduler** (no cron/APScheduler): one-shot and recurring tasks (daily / weekly / monthly) with `notify` (reminder: bubble + spoken TTS) and `chat` (run a prompt later) actions. Calendar events fire reminders before they start; relative dates like "tomorrow 3pm" are normalized on add. Tasks are created from the **Calendar page** (day-click sidebar with edit/pause/delete), from **chat** via the `task_schedule` skill, and from **voice** — including a heuristic parser fallback that works when the LLM provider is down. Memory-maintenance housekeeping jobs run through the same scheduler. IMAP/SMTP email — fetch unread, send, search.
@@ -259,7 +273,7 @@ A persistent **mood & emotion engine** (valence + energy, decays over time) driv
 ### � Remote access (Tailscale)
 Reach Addled from your phone or another machine, in a browser, over Tailscale — status, sign-in and `tailscale serve` sharing are all managed from the **Remote** page, which can also run the official Tailscale installer when you ask it to (nothing installs on its own).
 
-The WebSocket API has **no authentication of its own**, and several of its 161 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
+The WebSocket API has **no authentication of its own**, and several of its 183 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
 
 - It serves the login page and the dashboard, and only bridges a WebSocket to `127.0.0.1:9876` **after** validating a session. It binds loopback only; Tailscale terminates TLS and proxies to it, so the browser gets a real `https://<machine>.<tailnet>.ts.net` URL and `wss://` works without Addled handling a certificate.
 - The **password is scrypt-hashed** (`settings.json`), sessions are **in-memory only** (a restart logs everyone out), login attempts are **rate-limited per address**, and the session cookie is `HttpOnly` + `SameSite=Lax` (+ `Secure` over HTTPS).
@@ -287,17 +301,22 @@ A **Karpathy-pattern wiki** instead of another chat transcript: markdown pages u
 **Voice input**: wake word → command → chat → spoken reply. **Silero VAD** segments real speech for turn detection (RMS fallback). STT: **faster-whisper** (local, offline; tiny/small selectable) with **SenseVoice** auto-activating when funasr is available. **TTS**: **Kokoro** neural voices fully offline (local 82M ONNX) with **edge-tts** online fallback — engine selectable in Settings → Voice, with an **Auto TTS toggle** so dashboard chat and character prompts speak replies out loud. **Voice pickers** list what is actually available rather than asking you to type a voice name: the installed Kokoro pack is read straight out of `voices-v1.0.bin` (54 voices, offline, without loading the model) and the Edge voices come from the service, cached for a day with a curated offline fallback. Both are grouped by language and follow the **Language** setting, and where an engine simply cannot speak the chosen language — Kokoro has no Indonesian voice — Addled says so and routes to one that can. Speech input is local & offline; Edge TTS is the only network-dependent part. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
 
 ### � Skills & Market
-60 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
+77 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
+
+Two things worth calling out:
+
+- **Destructive skills ask first.** `requires_approval` is enforced at the single registry seam, so `delete_file`, `write_file`, the desktop-control skills, `self_apply` and market script skills all stop for approval on the turn that asked. Previously the flag was declared and displayed but never read, and the file skills bypassed the destruction gate entirely.
+- **Interactive sessions.** For work a one-shot command cannot do — a `cd` that sticks, an env var the next command reads, a REPL, an open ssh — `session_open` starts a real shell that keeps its state, and `session_send` types into it. Market script arguments are passed as an **argv list, never folded into a shell string**, so an argument containing PowerShell metacharacters is data rather than code.
 
 ### 🌐 Browser & Desktop
-Four browser backends with **task-based routing**: your running Chrome/Edge via CDP (read-only by default, opt-in), Playwright's own Chromium, the **browser-use** AI framework for open-ended tasks (used only when installed AND an LLM is available), and an always-on HTTP fallback. Missing backends can **auto-install on demand** (`ask` / `off` / `auto` policy with a dashboard approval banner). **Desktop control** (mouse/keyboard) is first-class but off by default: session grants via dashboard prompt, screen-bounds checks, typing caps, hotkey whitelist, pyautogui FAILSAFE, and egress logging.
+Four browser backends with **task-based routing**: your running Chrome/Edge via CDP (read-only by default, opt-in), Playwright's own Chromium, the **browser-use** AI framework for open-ended tasks (used only when installed AND an LLM is available), and an always-on HTTP fallback. Backends are installed from the Settings page with a manual button (or on demand, `ask` / `off` / `auto` policy with a dashboard approval banner). **Desktop control** (mouse/keyboard) is first-class but off by default: session grants via dashboard prompt, screen-bounds checks, typing caps, hotkey whitelist, pyautogui FAILSAFE, and egress logging.
 
 ### �📦 Installer & Auto-Update
-Windows NSIS + portable installer via electron-builder. **Weekly auto-update** against the latest GitHub release (version discovery via the GitHub API; delta updates via latest.yml + blockmap). If the repo is private, the check degrades gracefully and resumes automatically once it's public. Manual "Check for Updates" in the tray. First-run PyQt6 onboarding wizard (7 steps).
+Windows NSIS + portable installer via electron-builder. **Weekly auto-update** against the latest GitHub release (version discovery via the GitHub API; delta updates via latest.yml + blockmap). If the repo is private, the check degrades gracefully and resumes automatically once it's public. Manual "Check for Updates" in the tray. First-run PyQt6 onboarding wizard (8 steps: provider, local model, name, workspace folder, voice, wake word, autostart).
 
 ---
 
-## WebSocket API (161 handlers)
+## WebSocket API (183 handlers)
 
 ### Core
 `chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `guide.status` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
@@ -306,19 +325,22 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 `goal.create` `goal.list` `goal.start` `goal.cancel`
 
 ### Code
-`code.bind` `code.read` `code.edit` `code.apply`
+`code.bind` `code.read` `code.edit` `code.apply` `code.applyPlan` `code.write` `code.grep` `code.plan` `code.verify` `code.git.status` `code.git.diff` `code.git.revert`
 
 ### Excel
 `excel.read` `excel.write`
 
 ### Swarm
-`swarm.spawn` `swarm.list` `swarm.run` `swarm.stop`
+`swarm.spawn` `swarm.list` `swarm.run` `swarm.stop` `swarm.flow` `swarm.memory` `swarm.roster` `swarm.define` `swarm.forget` `swarm.restore` `swarm.revise` `swarm.notes`
 
 ### Calendar & Email
 `calendar.add` `calendar.list` `calendar.delete` `calendar.update` `tasks.schedule` `tasks.list` `tasks.update` `tasks.pause` `tasks.resume` `tasks.cancel` `tasks.month` `email.fetch` `email.send` `email.search`
 
 ### Browser
-`browser.navigate` `browser.go_back` `browser.go_forward` `browser.click` `browser.type` `browser.screenshot` `browser.extract` `browser.close` `browser.status` `browser.task` `browser.installApprove`
+`browser.navigate` `browser.go_back` `browser.go_forward` `browser.click` `browser.type` `browser.screenshot` `browser.extract` `browser.close` `browser.status` `browser.task` `browser.installApprove` `browser.installStatus` `browser.installNow`
+
+### System
+`system.status` `system.setAutostart`
 
 ### Privacy & Monitoring
 `privacy.setZones` `privacy.list` `privacy.excludeApp` `privacy.removeApp` `egress.list` `snapshot.list`
@@ -365,7 +387,7 @@ Addled/
 │   ├── main.py              # Entry point + onboarding + single-instance lock + kill switch + voice
 │   ├── config.py            # Portable JSON settings
 │   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
-│   ├── ws_server.py         # 161 JSON-RPC 2.0 handlers + server pushes
+│   ├── ws_server.py         # 183 JSON-RPC 2.0 handlers + server pushes
 │   ├── providers/           # 10 AI providers (base + registry + selector + router)
 │   │                        #   + live model catalog + local Florence-2 vision
 │   ├── mcp_client/          # MCP client (stdio + streamable HTTP) → tools as skills
@@ -383,10 +405,11 @@ Addled/
 │   │                       #   facts, knowledge graph, snapshot store, maintenance
 │   ├── browser/             # Playwright browser automation
 │   ├── goals/               # Planner, executor, store
-│   ├── code/                # Diff engine (apply with backup), language detection
-│   ├── swarm/               # Agent orchestrator
+│   ├── codemode/            # Diff engine, anchored edits, git safety net,
+│   │                        #   verification, self-modification
+│   ├── swarm/               # Agent orchestrator + the saved roster
 │   ├── integrations/        # Calendar (Google OAuth), Email (IMAP/SMTP)
-│   ├── onboarding/          # PyQt6 setup wizard (7 pages)
+│   ├── onboarding/          # PyQt6 setup wizard (8 pages)
 │   └── cognition/           # Decision engine
 ├── dashboard/
 │   └── src/app/
@@ -449,7 +472,8 @@ gh release edit vX.Y.Z --draft=false
 > **Self-contained**: the installer bundles Python 3.14.7 + all core
 > dependencies — no Python install needed on the target PC.
 > Optional extras on the target PC: local vision (`torch` + `transformers`)
-> and browser automation (`playwright install chromium`).
+> and browser automation (Playwright + Chromium, installable from
+> Settings → Browser).
 
 ---
 

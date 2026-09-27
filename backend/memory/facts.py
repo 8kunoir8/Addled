@@ -17,6 +17,15 @@ from pathlib import Path
 log = logging.getLogger("addled.facts")
 
 FACTS_PATH = Path(__file__).parent / "facts.json"
+# The next id to hand out. Persisted so an id is never reused.
+#
+# `next_id = max(ids) + 1` was computed from the CURRENT list, which is trimmed
+# to `facts_max`. So once the cap was reached and the oldest fact dropped, its
+# id was immediately handed to the new fact — and `delete_fact(id)` plus
+# `autolink.forget_ref("fact", id)` would then act on a different fact than the
+# one the user (or the dashboard) meant. Ids have to be monotonic, not "whatever
+# is highest right now".
+_COUNTER_PATH = Path(__file__).parent / "facts_counter.json"
 
 
 def _load() -> list[dict]:
@@ -38,6 +47,32 @@ def _save(facts: list[dict]) -> None:
         log.warning("Could not save facts: %s", e)
 
 
+def _next_id() -> int:
+    """The next unused fact id. Monotonic — never reuses a retired id."""
+    nid = 1
+    try:
+        if _COUNTER_PATH.exists():
+            data = json.loads(_COUNTER_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("next_id"), int):
+                nid = int(data["next_id"])
+    except (json.JSONDecodeError, OSError):
+        nid = 1
+    if nid <= 1:
+        # No usable counter (fresh install, or an upgrade from before it
+        # existed): continue past whatever the stored facts already use, so
+        # numbering does not restart underneath existing ids.
+        try:
+            nid = max((int(f.get("id", 0)) for f in _load()), default=0) + 1
+        except Exception:  # noqa: BLE001
+            nid = 1
+    try:
+        _COUNTER_PATH.write_text(json.dumps({"next_id": nid + 1}),
+                                 encoding="utf-8")
+    except OSError as e:
+        log.warning("Could not save the facts id counter: %s", e)
+    return nid
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
@@ -57,7 +92,7 @@ def add_fact(text: str, source: str = "manual") -> dict | None:
     norm = _norm(text)
     if any(_norm(f.get("text", "")) == norm for f in facts):
         return None
-    next_id = max((int(f.get("id", 0)) for f in facts), default=0) + 1
+    next_id = _next_id()
     fact = {"id": next_id, "text": text, "ts": time.time(), "source": source}
     facts.append(fact)
     max_facts = int(config.get("memory", "facts_max", default=200))

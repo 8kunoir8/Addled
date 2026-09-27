@@ -24,9 +24,16 @@ def embed_text(text: str, dim: int = DIM) -> np.ndarray:
 
 
 def _embedder_kind() -> str:
+    """The embedder *and model* a row was written with.
+
+    Deliberately not `embedder_kind()`: 'onnx' and 'transformers' can be
+    different models, and two different 384-dim models produce incomparable
+    vectors. Tagging with the model is what lets a change be detected and the
+    old rows migrated instead of silently mixed in.
+    """
     try:
-        from backend.memory.embedding import embedder_kind
-        return embedder_kind()
+        from backend.memory.embedding import embedder_id
+        return embedder_id()
     except Exception:
         return "hash"
 
@@ -108,22 +115,45 @@ def _context_block(memories: list[str]) -> str:
 
 
 async def build_memory_context_hybrid(query: str, top_k: int = 3) -> str | None:
-    """Semantic (MiniLM) recall fused with BM25 keywords via RRF."""
+    """Semantic (MiniLM) recall fused with BM25 keywords via RRF.
+
+    Two similarity bars, not one, because they answer different questions:
+
+    * the *retrieval floor* decides who is allowed into the ranking. It is
+      deliberately low — a candidate that does not make the ranking can never
+      be considered, so this bar should only exclude genuine noise.
+    * the *relevance gate* decides which of the ranked candidates is worth its
+      tokens in the prompt, and stays strict.
+
+    Using the gate for both was measured on this machine to admit ~0 semantic
+    candidates: English-centric MiniLM scores Indonesian and code-mixed turns at
+    0.23-0.33, under the 0.35 gate, so every recall came from BM25 alone and
+    "hybrid search" was a description rather than a fact.
+    """
     from backend.config import config
     from backend.memory.bm25 import bm25_index
     from backend.memory.embedding import embed_text_async
     from backend.memory.vector_store import vector_store
 
-    min_sim = config.get("memory", "min_similarity", default=0.05)
+    gate = float(config.get("memory", "min_similarity", default=0.35))
+    floor = float(config.get("memory", "retrieval_min_similarity",
+                             default=gate))
+    # Never let a misconfigured floor sneak past the gate it feeds.
+    floor = min(floor, gate)
     try:
         vec = await embed_text_async(query)
         sem = vector_store.search(
             vec, category="conversation",
-            top_k=top_k * 2, min_similarity=min_sim,
+            top_k=top_k * 2, min_similarity=floor,
         )
     except Exception as e:
         log.debug("semantic recall failed (%s) — hash fallback", e)
         return build_memory_context(query, top_k=top_k)
+
+    # Appended to the context block so the reason a turn recalled nothing is
+    # visible in the chat UI rather than guessed at.
+    if not sem:
+        log.debug("recall: no semantic candidate cleared %.2f", floor)
 
     key = []
     if config.get("memory", "hybrid_search", default=True):
@@ -135,22 +165,45 @@ async def build_memory_context_hybrid(query: str, top_k: int = 3) -> str | None:
     # Reciprocal rank fusion over semantic + keyword rankings
     fused: dict[int, dict] = {}
 
-    def add(hit_id, score, text):
+    def add(hit_id, score, text, similarity=None):
         text = str(text or "").strip()
         if not text:
             return
         if hit_id not in fused:
-            fused[hit_id] = {"score": 0.0, "text": text}
+            fused[hit_id] = {"score": 0.0, "text": text,
+                             "similarity": similarity}
         fused[hit_id]["score"] += score
+        # Keep the best similarity seen for this row, so the gate below judges
+        # a semantic hit on its own merit rather than on a fused rank.
+        if similarity is not None:
+            current = fused[hit_id].get("similarity")
+            if current is None or similarity > current:
+                fused[hit_id]["similarity"] = similarity
 
     for rank, h in enumerate(sem):
         meta = h.get("metadata") or {}
-        add(h["id"], 1.0 / (60 + rank), meta.get("text"))
+        add(h["id"], 1.0 / (60 + rank), meta.get("text"),
+            h.get("similarity"))
+
     for rank, k in enumerate(key):
         add(k["id"], 1.0 / (60 + rank), k.get("text"))
 
-    ordered = sorted(fused.values(), key=lambda x: -x["score"])[:top_k]
-    texts = [f["text"] for f in ordered]
+    ordered = sorted(fused.values(), key=lambda x: -x["score"])
+
+    # The gate applies to the fused result. A row that reached the ranking on
+    # keyword match alone has no similarity and is kept — BM25 already decided
+    # it was relevant, and that is the half of hybrid search that works well
+    # here. A row that only just cleared the floor is judged on its own score.
+    kept = []
+    for item in ordered:
+        similarity = item.get("similarity")
+        if similarity is not None and similarity < gate:
+            continue
+        kept.append(item)
+        if len(kept) >= top_k:
+            break
+
+    texts = [f["text"] for f in kept]
     if not texts:
         return None
     return _context_block(texts)

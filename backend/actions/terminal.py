@@ -84,13 +84,6 @@ class TerminalExecutor:
         if not command.strip():
             return {"success": False, "error": "Empty command"}
 
-        # Check against the danger list (matches DestructionGate)
-        cmd_lower = command.lower().strip()
-        is_dangerous = any(cmd_lower.startswith(c) for c in DANGEROUS_COMMANDS)
-        if is_dangerous and not allow_dangerous:
-            return {"success": False, "error": "This command requires approval. Use the dashboard to confirm.",
-                    "requires_approval": True}
-
         # Defensive translation of common bash-isms for Windows PowerShell 5.1
         if sys.platform == "win32":
             command = command.replace(" && ", " ; ")
@@ -132,6 +125,44 @@ class TerminalExecutor:
                 "stderr": stderr.decode("utf-8", errors="replace")[:10000],
                 "exit_code": proc.returncode,
                 "rewritten": rewritten,
+            }
+        except asyncio.TimeoutError:
+            return {"success": False, "error": f"Command timed out after {timeout}s"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def execute_argv(self, argv: list[str], cwd: str | None = None,
+                           timeout: int = 30) -> dict:
+        """Run a program directly with an argument list — NO shell involved.
+
+        `execute()` builds a string and hands it to `powershell -Command`, which
+        is right for a command an LLM wrote and wrong for anything carrying a
+        caller-supplied argument. Interpolating an argument into that string
+        means PowerShell parses it, so a value containing `$(...)`, a backtick,
+        or an unbalanced quote runs as code instead of being passed as data.
+
+        This method never involves a shell: the OS receives the argv as separate
+        strings, so an argument can only ever be an argument. Anything that
+        spawns a program with parameters from the model or the user should use
+        it rather than building a command line.
+        """
+        if not argv or not str(argv[0]).strip():
+            return {"success": False, "error": "Empty command"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *[str(a) for a in argv],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(),
+                                                    timeout=timeout)
+            return {
+                "success": proc.returncode == 0,
+                "stdout": stdout.decode("utf-8", errors="replace")[:50000],
+                "stderr": stderr.decode("utf-8", errors="replace")[:10000],
+                "exit_code": proc.returncode,
+                "rewritten": False,
             }
         except asyncio.TimeoutError:
             return {"success": False, "error": f"Command timed out after {timeout}s"}

@@ -26,6 +26,52 @@ class ProviderResult:
     reasoning_content: str = ""
 
 
+# Provider ids that serve ONE generation at a time.
+#
+# Kept here rather than in the swarm orchestrator so every caller agrees on the
+# same answer. The orchestrator already treats these as single-generation when
+# it decides whether a flow's steps may run concurrently, and the Code page needs
+# the same fact to decide how many diffs to request at once — two copies of this
+# list would drift, and drifting here means firing parallel requests at a server
+# that can only queue them.
+SINGLE_GENERATION_PROVIDERS = frozenset(
+    {"local", "huggingface", "huggingface_local", "lmstudio", "ollama"}
+)
+
+# The widest a caller should go when the provider CAN serve several at once.
+# A burst of twenty model calls is its own kind of rude — it hits rate limits,
+# and on a metered provider it costs real money — so this is a ceiling, not a
+# target.
+MAX_CONCURRENCY = 3
+
+
+def concurrency_width(provider, wanted: int = MAX_CONCURRENCY) -> int:
+    """How many model requests may be in flight at once for `provider`.
+
+    Returns 1 for a single-generation provider, whatever the caller asked for.
+    That is the honest answer rather than a failure: the local model queues
+    concurrent requests, so firing several would look parallel and behave
+    serially, which is worse than saying so.
+
+    An UNKNOWN provider is also width 1. A missing or unrecognised id is not
+    permission to fan out — the cost of guessing wrong is a burst of requests at
+    something that may queue, rate-limit, or bill per call, and the cost of
+    being conservative is only that the work happens in order.
+
+    Never fewer than 1, so a caller can treat the result as a width without
+    guarding against zero.
+    """
+    pid = str(getattr(provider, "provider_id", "") or "").strip().lower()
+    if not pid:
+        return 1                       # unknown: assume it queues
+    if pid in SINGLE_GENERATION_PROVIDERS:
+        return 1
+    try:
+        return max(1, min(int(wanted), MAX_CONCURRENCY))
+    except (TypeError, ValueError):
+        return 1
+
+
 class BaseProvider(ABC):
     """Abstract base for all AI providers."""
 

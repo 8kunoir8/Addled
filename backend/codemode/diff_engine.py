@@ -9,8 +9,7 @@ import logging
 import os
 import shutil
 
-log = logging.getLogger("addled.code.diff")
-
+log = logging.getLogger("addled.codemode.diff")
 
 def generate_diff(original: str, modified: str, filepath: str = "file") -> dict:
     """Generate a unified diff between original and modified text."""
@@ -45,7 +44,6 @@ def generate_diff(original: str, modified: str, filepath: str = "file") -> dict:
         "raw_diff": "\n".join(diff),
     }
 
-
 def apply_content(filepath: str, content: str, backup: bool = True,
                   create: bool = False) -> dict:
     """Replace a file's full content (with optional .bak backup).
@@ -72,7 +70,6 @@ def apply_content(filepath: str, content: str, backup: bool = True,
         return {"success": True, "backup": backup_path, "created": not exists}
     except Exception as e:
         return {"success": False, "error": str(e)}
-
 
 def apply_diff(filepath: str, diff_text: str, backup: bool = True) -> dict:
     """Apply a unified diff to a file. Optionally creates a backup."""
@@ -107,7 +104,6 @@ def apply_diff(filepath: str, diff_text: str, backup: bool = True) -> dict:
         return {"success": False, "error": result.stderr.strip()}
     except Exception as e:
         return {"success": False, "error": str(e)}
-
 
 def revert_diff(filepath: str, backup_path: str | None = None) -> dict:
     """Revert a file to its backup or original state."""

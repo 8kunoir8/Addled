@@ -181,14 +181,16 @@ export const GUIDE: GuideEntry[] = [
     id: 'character',
     title: 'Character and appearance',
     icon: '🎭',
-    summary: 'The floating companion: skins, states, size, and how it behaves.',
+    summary: 'The floating companion: name, skins, size, and how it behaves.',
     what:
-      'The character is the part of Addled you see all day, and it is meant to be a companion rather than a status bar. It reacts to what Addled is doing — idle, thinking, speaking — and it can be as plain as a shape or as finished as a multi-frame animated sprite. A sprite skin is what most people end up using: when one is active it replaces the drawn shape entirely, so the old shape, colour and eyes controls stop having an effect while a skin is on.',
+      'The character is the part of Addled you see all day, and it is meant to be a companion rather than a status bar. It reacts to what Addled is doing — idle, thinking, speaking — and it can be as plain as a drawn shape or as finished as a multi-frame animated sprite. A sprite skin is what most people end up using: when one is active it replaces the drawn shape entirely.',
     how: [
       'Open Settings → Character and pick a skin. The skins section lists the built-in sprites and their frame sets.',
-      'Set size, opacity, movement speed, idle wander range and the screen corner it prefers.',
-      'Set the glow intensity for a soft halo. Glow blends over whatever is drawn, sprite or shape.',
+      'Set the name Addled answers to. This is the same name used across chat, the dashboard and the bots.',
+      'Set size and movement speed — how large it is, and how briskly it drifts.',
+      'Turn on starting with Windows if you want it there when you sign in.',
       'The character changes state on its own as Addled works; no configuration is needed for that.',
+      'Shape, colour, glow and eyes still exist in the character itself and in settings.json, but they are not offered in the interface — the skins are the supported way to change how it looks.',
     ],
     settingsTabs: ['character', 'appearance'],
     routes: [
@@ -298,14 +300,18 @@ export const GUIDE: GuideEntry[] = [
     how: [
       'Open the Skills page to see everything installed, grouped by category, with each one on or off.',
       'Turn off anything you do not want used. A disabled skill is not offered to the model at all, so it cannot be called by accident.',
+      'Destructive skills ask first. Deleting or overwriting a file, running a risky command and applying a change to Addled\'s own code all stop for your approval, and the request waits on the page rather than silently failing.',
+      'For work that needs a terminal to keep its state — changing directory and running several commands there, setting an environment variable for later, a REPL, an open ssh session — Addled opens a live shell instead of separate commands. Type into it and the next command sees what the last one did.',
       'Search the market when you want a capability that is missing. Addled searches public skill repositories, shows what it found with its match score, and installs only what you approve.',
       'Use the forge when nothing suitable exists: describe what you want and Addled writes a new skill for it, which you then review like any other file.',
+      'Ask Addled to change its own code and it proposes the change first, showing the diff, and applies nothing until you agree. The files that decide what is permitted are deliberately excluded, and the change takes effect after a restart.',
       'Skills you installed appear in the same list and can be removed from it.',
       'Install the token saver from Settings → Tools if you want long command output compressed before the model reads it — git, pip, pytest, npm, gh, docker. It is a 6 MB download of two other projects\' binaries (rtk and ripgrep) from their GitHub releases, verified against the sha256 GitHub publishes for them. It is not bundled, so a fresh copy of Addled has none until you click Install; without it, commands run unchanged.',
     ],
     routes: [{ href: '/skills', label: 'Skills' }],
     settingsTabs: ['tools'],
-    skills: ['forge_skill', 'list_forged', 'find_mcp_server'],
+    skills: ['forge_skill', 'list_forged', 'find_mcp_server',
+             'session_open', 'verify_code', 'self_propose'],
     showSkillCatalogue: true,
   },
 
@@ -343,22 +349,26 @@ export const GUIDE: GuideEntry[] = [
     id: 'goals-swarm',
     title: 'Goals, tasks and swarm',
     icon: '🎯',
-    summary: 'Work that takes longer than one reply, and several agents at once.',
+    summary: 'Work that takes longer than one reply, and swarm agents that remember.',
     what:
-      'A goal is an objective Addled works on across turns rather than answering once: it can be started, checked on and cancelled, and it keeps its own state between attempts. Tasks are timed jobs — something to do at a time, or on a repeat. The swarm runs several agents on the same objective at once, each with a different angle, and merges what they produce; it is slower and more expensive than a single turn and worth it when a problem genuinely benefits from parallel attempts. Every agent works through the same pipeline as the Chat page, so it has the same skills and tools: an agent reads files, searches the web and runs procedures rather than only writing prose.',
+      'A goal is an objective Addled works on across turns rather than answering once: it can be started, checked on and cancelled, and it keeps its own state between attempts. Tasks are timed jobs — something to do at a time, or on a repeat. The swarm runs several agents on the same objective at once, each with a different angle, and merges what they produce; it is slower and more expensive than a single turn and worth it when a problem genuinely benefits from parallel attempts. Every agent works through the same pipeline as the Chat page, so it has the same skills and tools: an agent reads files, searches the web and runs procedures rather than only writing prose.\n\nSwarm agents are saved, not throwaway. Addled ships five — Planner, Researcher, Coder, Reviewer and QA — and each keeps a name, a role, a brief (how you want its work done) and a set of skills. They survive a restart, so "my Reviewer" is a thing you can build up over time rather than a one-off. Alongside the brief each agent keeps standing rules learned from your corrections, which is how it gets better at your work specifically.',
     how: [
       'Open the Goals page and describe the objective. Addled plans, works, and reports back as it goes.',
       'Watch progress on the page; a goal can be cancelled at any point and keeps whatever it produced.',
       'Schedule a task for work that should happen later or repeatedly.',
-      'Use the Swarm page when one attempt is not enough: give it the objective and a count, and compare the results it comes back with.',
-      'Give an agent a task that needs a tool — "what is the size of this file?" — and it will use one. The badge on its card says what it may use: "all skills & tools" unless it was deliberately given a narrower set.',
-      'Stop removes an agent and cancels the work it was doing, so a run you no longer want does not keep costing you.',
+      'Use the Swarm page for several agents at once. Each desk is a saved definition: edit its brief and skills on the page and they apply from the next task, with no restart.',
+      'Write a brief the way you would brief a colleague: tone, red lines, where to be careful. It is read before every task that agent runs.',
+      'Correct a result and it is learned: send the work back with your correction and Addled records it as a standing rule for that agent — "proposals are always one page" — so the next run starts from it. Say it is a one-off and it applies only to that piece of work.',
+      'Give an agent a task that needs a tool — "what is the size of this file?" — and it will use one. The card says what it may use: "all skills & tools" unless it was deliberately given a narrower set.',
+      'Point an agent at a model if you want to: a cheap local model for routine desks, a stronger cloud one for the reasoning desk. Left empty, the normal routing decides.',
+      'Stop removes an agent from this session; deleting it removes the saved definition too. Delete the definition and it stays deleted — Addled will not re-add a desk you removed.',
       'Expect a goal or a swarm to take minutes, not seconds. They are local loops around your provider, and their speed is the model\'s speed.',
     ],
     routes: [
       { href: '/goals', label: 'Goals' },
       { href: '/swarm', label: 'Swarm' },
     ],
+    skills: ['swarm_note', 'swarm_roster', 'swarm_learn'],
     needs: [
       {
         flag: 'any_model_ready',
@@ -372,22 +382,23 @@ export const GUIDE: GuideEntry[] = [
     id: 'code',
     title: 'Code and workspace',
     icon: '💻',
-    summary: 'The built-in editor, and what confinement to one folder means.',
+    summary: 'The built-in editor, verified edits, and what confinement means.',
     what:
-      'The Code page is a real editor for one folder — a workspace — with syntax highlighting, tabs and saving, plus an AI edit loop. The important part is the workspace: you bind one folder, and every read, write and edit is confined to it. Paths that try to leave it are refused, and a file outside the workspace cannot be read or written even by a mistake. That single rule is what makes it safe to let Addled edit code at all.',
+      'The Code page is a real editor for one folder — a workspace — with syntax highlighting, tabs and saving, plus an AI edit loop. The important part is the workspace: you bind one folder, and every read, write and edit is confined to it. Paths that try to leave it are refused, and a file outside the workspace cannot be read or written even by a mistake. That single rule is what makes it safe to let Addled edit code at all.\n\nA suggested edit is applied by finding the exact text to change and replacing it, rather than by rewriting the whole file. That matters in practice: only the lines that actually changed appear in the diff, the untouched parts cannot drift, and a long file is edited as easily as a short one. You still review and apply it — nothing is written until you press Apply.',
     how: [
       'Bind a folder on the Code page. Addled opens whatever the Workspace setting points at, so set that first if you would rather not retype it.',
       'Open a file from the tree, edit it, and press Ctrl+S to save. Ctrl+F finds inside the file.',
       'Use the search panel to find a word across the whole workspace and jump to the line.',
       'Ask for a change in the box at the bottom. Addled proposes an edit, you see the diff, and nothing is written until you press Apply. Unsaved editor text is saved first, so the diff always describes what you are looking at.',
-      'When the change depends on the rest of the project, let Addled read it: the suggestions run with read-only tools, so it can look up a helper or a convention instead of guessing. It still cannot write — approving the diff is the only way a file changes.',
-      'Keep suggested edits to files under about 12,000 characters. Addled rewrites the whole file in one answer, and a longer file is refused with that reason rather than half-answered, because a partial answer would read as a deletion.',
-      'Create a new file by typing its path in the tree.',
-      'Checkpoint before large changes: an applied edit keeps the previous version beside the file as a .bak.',
+      'For a change that spans files, ask it to plan first: Addled searches the project, names the files it believes are involved, and only then proposes edits — so a multi-file change is not guessed from one open file.',
+      'When the change depends on the rest of the project, let Addled read it: the suggestions run with read-only tools, so it can look up a helper, a documented convention or a saved procedure instead of guessing. It still cannot write — approving the diff is the only way a file changes.',
+      'After applying a plan, Addled runs the project\'s own check — its test script, a Makefile target, or the runner the folder layout implies — and tells you whether it passed. A change that does not pass is reported as unverified rather than done.',
+      'If the workspace is a git repository, applying a plan leaves a commit naming what changed. That makes "undo the last change" a normal git revert, and your own log shows what Addled did and when.',
+      'Checkpoint before large changes: an applied edit also keeps the previous version beside the file as a .bak.',
     ],
     routes: [{ href: '/code', label: 'Code' }],
     settingsTabs: ['workspace', 'safety'],
-    skills: ['code_read', 'code_edit', 'read_file', 'write_file'],
+    skills: ['code_read', 'code_edit', 'read_file', 'write_file', 'verify_code'],
     needs: [
       {
         flag: 'workspace_configured',
@@ -475,6 +486,8 @@ export const GUIDE: GuideEntry[] = [
       'Two related abilities with different risk. Browser automation opens pages, reads them and clicks through them — it stays inside the browser. Desktop control reaches the real mouse and keyboard, which means it can act on any window, including things that matter. Both exist so Addled can finish a job that leaves the page, and both are off or gated until you turn them on.',
     how: [
       'Use the Browser page to see where Addled is browsing and to take over when it gets stuck.',
+      'Install the browser backends from Settings → Browser whenever you want them: the page shows which are present and has an Install button for each, saying what it will download before you press it. It is a one-time download into Addled\'s own Python.',
+      'Let them install on demand instead if you prefer: with the ask policy (the default), a task that needs a backend stops and offers to install it rather than failing.',
       'Turn on desktop control in Settings → Desktop when you want Addled to click and type outside the browser. It is off by default.',
       'Expect a session-level grant as well as the setting: even switched on, permission is asked for per session so it cannot quietly stay granted.',
       'Watch the permission banner: while desktop control is active it stays visible, and you can revoke it from there.',
@@ -548,7 +561,7 @@ export const GUIDE: GuideEntry[] = [
       'Every Settings tab, and the part of Addled it controls. Each tab explains its own individual options; this is the map.',
     how: [
       'Providers — which AI the answers come from, keys, and per-task model routing.',
-      'Character — the floating companion: skin, size, behaviour, glow.',
+      'Character — the floating companion: skin, size and behaviour.',
       'Voice — speech recognition and speech output, and which engine each uses.',
       'Workspace — the one folder Addled treats as its project.',
       'Safety — file access rules, desktop permissions, privacy zones, egress, kill switch.',
@@ -585,6 +598,8 @@ export const APP_VERSION = process.env.NEXT_PUBLIC_ADDED_VERSION || '0.0.0';
  */
 export const LIMITS: string[] = [
   'A local model has a small context window (around 8,000 tokens). Long files, long chats and multi-file edits will run out of room, where a cloud model with a large window would not.',
-  'Coding that plans, edits several files, runs the tests and reads the failures is not implemented yet. Today the editor can propose one file\'s change at a time and you review the diff.',
+  'Addled plans a multi-file change, applies it, runs your project\'s own check and reports whether it passed — but it does not yet loop on a failure by itself. When the check fails, the result says so and the next attempt is yours to ask for.',
+  'Undo for an applied change is git, and only in a folder that is already a repository. Everywhere else the .bak beside each file is the way back.',
+  'Changing Addled\'s own code takes effect after a restart, not immediately: reloading the running source would leave it half-loaded.',
   'A feature that needs a runtime you do not have says so with a badge instead of failing later. Playwright and uvx are the two that are commonly missing.',
 ];

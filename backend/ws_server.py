@@ -23,6 +23,22 @@ _engine_ref = None
 # Pending code edits awaiting user approval: {workspaceId::filePath: content}
 _pending_edits: dict[str, str] = {}
 
+# Strong references to the background jobs this module starts.
+#
+# `asyncio` keeps only a WEAK reference to a running task, so a bare
+# `create_task(...)` whose result is dropped can be garbage-collected mid-run —
+# the job stops with no exception, no log line and no trace. That is how a
+# chat reply could be silently not spoken, or a compaction silently never
+# happen. Every fire-and-forget call here goes through `_spawn` instead.
+_background_tasks: set = set()
+
+def _spawn(coro):
+    """Start a background job and keep it alive until it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 def set_engine(engine):
     """Called by main.py to give WS handlers access to engine state."""
     global _engine_ref
@@ -272,12 +288,111 @@ def _extract_code(text: str) -> str:
         return match.group(1).strip("\n")
     return body
 
+def _extract_json_object(text: str) -> dict | None:
+    """Pull the first JSON object out of a model reply, or None.
+
+    Models wrap JSON in a fence, in prose, or both. Rather than a regex that
+    would fail on a nested brace, this scans for the first balanced `{...}`
+    and parses that — so a fenced block, a bare object, and "Here is the plan:
+    {...}" all work. Returns None when there is no parseable object, which the
+    caller treats as "not the anchored shape" and falls back from.
+    """
+    if not text:
+        return None
+    import json
+    body = text
+    # Prefer the contents of a fenced block when there is one.
+    import re
+    fence = re.search(r"```[a-zA-Z]*\n(.*?)```", body, re.DOTALL)
+    if fence:
+        body = fence.group(1)
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for i, ch in enumerate(body):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    try:
+                        parsed = json.loads(body[start:i + 1])
+                    except json.JSONDecodeError:
+                        start = -1
+                        continue
+                    if isinstance(parsed, dict):
+                        return parsed
+                    start = -1
+    return None
+
 
 # Tools the Code page's "Ask the model" box may use. Read-only on purpose: the
 # change it produces is reviewed as a diff and applied by the user, and none of
 # these can write, so that review step cannot be skipped by the model itself.
+#
+# Wiki and procedure tools are read-only too (`wiki_search`, `wiki_read`,
+# `sop_lookup`, `sop_list`), so they are safe here: the model can look up
+# project documentation or coding recipes, but still cannot write to the wiki
+# or save a new procedure without going through the Chat page where the user
+# sees the call. `wiki_write`, `wiki_ingest`, and `sop_save` are deliberately
+# excluded — a code edit must not have side effects beyond the diff.
 _CODE_EDIT_TOOLS = ("code_read", "read_file", "list_dir", "search_files",
-                    "file_info")
+                    "file_info",
+                    "wiki_search", "wiki_read", "sop_lookup", "sop_list")
+
+# Tools the PLANNER may use. Also read-only, and deliberately the same set —
+# planning must be able to look at the project without being able to change it.
+#
+# `search_in_files` is the important one, and getting its NAME wrong is a real
+# failure mode this list already hit once: it said `code_grep`, which is a
+# WebSocket method for the UI's search panel, NOT an agent skill. The model was
+# therefore never offered a content search, and planned against filenames it
+# guessed from the request ("registry.py", "likely contains…") instead of files
+# it had found. Verified by tracing: with `code_grep` absent the planner made
+# ZERO tool calls. `search_files` matches file NAMES against a glob and cannot
+# substitute — only `search_in_files` looks inside them.
+#
+# The planner also gets `wiki_search`, `wiki_read`, `sop_lookup`, and
+# `sop_list`: a good plan names the right files, but it also follows the
+# project's own conventions and standard procedures. Without these, the
+# planner invented a structure that contradicted a documented standard.
+_PLAN_TOOLS = ("code_read", "search_in_files", "read_file", "list_dir",
+               "search_files", "file_info",
+               "wiki_search", "wiki_read", "sop_lookup", "sop_list")
+
+# How many reviewed edits one `code.apply_plan` call may write. The page warns
+# from 8 files, so reaching this means something is wrong rather than thorough.
+_MAX_PLAN_APPLIES = 40
+
+
+def _plan_concurrency() -> int:
+    """How many Code-page diffs may be requested at once right now.
+
+    Reads the active provider and asks the shared helper, so the page is told
+    the truth about whether asking for several at once achieves anything. On the
+    local model the answer is 1, and the UI says so rather than pretending.
+    """
+    try:
+        from backend.providers.base import concurrency_width
+        from backend.providers.registry import get_provider
+        return concurrency_width(get_provider())
+    except Exception as e:
+        log.debug("plan concurrency probe failed: %s", e)
+        return 1
 
 # The editor rewrites a whole file in one reply, so the file has to fit with
 # room to think. Above this a partial answer would diff as a mass deletion.
@@ -455,14 +570,12 @@ async def run_chat_pipeline(
                     mood_engine.event("chat_reply")
             except Exception:
                 pass
-            # Episodic timeline: journal every real turn, not a swarm worker's
-            try:
-                from backend.memory.journal import record as journal_record
-                journal_record("user", message)
-                if not text.startswith(("[Not connected:", "[Provider")):
-                    journal_record("assistant", text[:500])
-            except Exception:
-                pass
+            # The journal write moved into `_run_chat_pipeline_inner`, next to
+            # the history and memory writes. It was here, which meant only turns
+            # arriving through this wrapper were journaled — the swarm and the
+            # code page were not — and adding it to the inner function without
+            # removing it here would have journaled every chat turn TWICE, since
+            # this function calls that one.
         if (announce and text.startswith(("[Not connected:", "[Provider"))
                 and _engine_ref is not None):
             try:
@@ -500,6 +613,25 @@ async def _speak_reply(text: str, voice: str | None = None) -> dict:
                 pass
 
 
+def _record_scope(record):
+    """Unpack ``record`` into three booleans: (history, memory, journal).
+
+    ``record`` can be:
+    - ``True``  → write everything
+    - ``False`` → write nothing
+    - a set of strings like ``{"history", "memory", "journal"}`` → write only
+      the named categories.  A swarm worker, for instance, passes
+      ``{"memory", "journal"}`` so its chatter doesn't flood the user's
+      chat history but the knowledge and timeline are still captured.
+    """
+    if isinstance(record, set):
+        return ("history" in record,
+                "memory" in record,
+                "journal" in record)
+    flag = bool(record)
+    return flag, flag, flag
+
+
 async def _run_chat_pipeline_inner(
     message: str,
     params: dict | None = None,
@@ -515,6 +647,15 @@ async def _run_chat_pipeline_inner(
 
     # params is optional; several paths below read from it unconditionally.
     params = params or {}
+
+    # The auto-forge path fires from deep inside the tool loop, where the only
+    # thing in hand is a function name the model invented. Publishing the
+    # user's own request here is what lets it search the web for the capability
+    # instead of the name — see backend/skills/tool_loop.py.
+    try:
+        config.set("_forge", "request", value=str(message or "")[:600])
+    except Exception:
+        pass
 
     # Prompt guard check
     if config.get("safety", "prompt_guard", default=True):
@@ -552,6 +693,40 @@ async def _run_chat_pipeline_inner(
             if not sys_prompt.strip():
                 sys_prompt = (f"You are {agent_name}, a helpful AI desktop "
                               "companion with access to system tools.")
+            capabilities_ctx = (
+                "You are deeply integrated into the Addled desktop app with real tools and background services:\n"
+                "- Shell: Run Windows PowerShell 5.1 commands on the user's own PC (`run_command`) — read and write files, inspect processes, run git/pip/npm/build commands. You DO have access to the user's system through this tool; never tell the user you cannot run commands or lack system access. Chain with ';' (not '&&'). Safe commands run immediately; a destructive one (delete, format, shutdown, restart) asks the user to approve it first, so say that it is waiting for approval rather than that you are unable to do it.\n"
+                "- Calendar: Add events (`calendar_add`), list/check events (`calendar_list`), delete events (`calendar_delete`).\n"
+                "- Task Scheduler: Background daemon runs 24/7. Schedule tasks/reminders (`task_schedule`), list scheduled tasks (`task_list`), cancel tasks (`task_cancel`).\n"
+                "- Desktop & Screen: Inspect screen (`screen_read`), click/type (`desktop_click`, `desktop_type`), scroll, manage windows, control volume/brightness.\n"
+                "- Browser: Navigate web pages, click, type, extract content (`browser_open`, `browser_click`, `browser_extract`).\n"
+                "- Files & Workspace: Read, write, and search workspace files (`read_file`, `write_file`, `search_files`).\n"
+                "- Memory: Remember facts (`remember`), recall past notes (`recall`).\n"
+                "When asked about abilities or asked to check/manage calendar, schedule, tasks, reminders, desktop, files, or to run a command, acknowledge these capabilities and call the appropriate tool."
+            )
+            sys_prompt = sys_prompt + "\n\n" + capabilities_ctx
+        # Context window sizing: local models get a lean 6-message (3-turn) window
+        # so remaining tokens belong to memory and tools; cloud gets 20 turns.
+        provider_id = getattr(provider, "provider_id", "") or ""
+        default_context_len = 6 if provider_id == "local" else 20
+        context_len = int(config.get("chat", "context_messages", default=default_context_len))
+        context = chat_history.get_context(max_messages=context_len)
+
+        # Context-aware query expansion for long-term recall: if message is a short follow-up
+        recall_query = message
+        words = (message or "").split()
+        short_indexicals = {"why", "why?", "explain", "continue", "how so", "what about", "and then",
+                            "kenapa", "kenapa?", "jelaskan", "lanjutkan", "lalu", "mengapa", "bagaimana"}
+        clean_msg = (message or "").strip().lower()
+        if (len(words) < 5 and len(message or "") < 25) or clean_msg in short_indexicals:
+            prev_user_text = ""
+            for turn in reversed(context):
+                if turn.get("role") == "user" and turn.get("content") != message:
+                    prev_user_text = turn.get("content", "")
+                    break
+            if prev_user_text:
+                recall_query = f"{prev_user_text}\n{message}"
+
         # Core memory: durable facts the agent saved about the user. Only the
         # ones that relate to what was just said — an unrelated fact is not
         # context, it is something the model can end up answering instead of the
@@ -570,7 +745,6 @@ async def _run_chat_pipeline_inner(
         # Episodic timeline: recent day summaries (persistent identity), gated
         # like the facts — "yesterday we..." is worth its tokens only when the
         # day is about this.
-        from backend.memory import relevance
         timeline_ctx = await relevance.timeline_block(message)
         if timeline_ctx:
             sys_prompt = sys_prompt + "\n\n" + timeline_ctx
@@ -599,50 +773,28 @@ async def _run_chat_pipeline_inner(
         except Exception as e:
             log.debug("procedure context failed: %s", e)
 
-        # Memory-grounded conversation: volunteer relevant past organically
-        sys_prompt += ("\n\nIf a saved fact, a previous conversation, or a "
-                       "recent day's summary is clearly relevant to this "
-                       "conversation, mention it naturally (e.g. 'last time "
-                       "we...', 'you mentioned before that...'). Do not force "
-                       "it when nothing fits.")
+        # Session continuity: recent session summaries (long-run memory), gated
+        # the same way
+        session_ctx = await relevance.summaries_block(message)
+        if session_ctx:
+            sys_prompt = sys_prompt + "\n\n" + session_ctx
 
-        # Language mirroring. This line is the general statement; the binding one
-        # is `reply_directive` below, which lands *after* the tool catalogue in
-        # the turn being answered. Kept because a cloud model honours it and it
-        # costs a line.
-        sys_prompt += ("\n\nAlways reply in the same language the user "
-                       "writes or speaks in.")
-
-        # Where a file goes. Nothing used to say, so asked for a file "in the
-        # workspace" the model wrote `workspace\notes.txt` — inventing a
-        # subdirectory inside the root it had already been given — and then
-        # reported that longer path as the location, which at least matched
-        # where the file really was.
-        try:
-            from backend.workspace import root as _workspace_root
-            folder = _workspace_root()
-            if folder:
-                sys_prompt += (f"\n\nFiles: the workspace root is {folder}. "
-                               "Give file paths relative to it — "
-                               "'notes.txt', not 'workspace/notes.txt'.")
-        except Exception as e:  # noqa: BLE001
-            log.debug("workspace hint skipped: %s", e)
-
-        context = chat_history.get_context(max_messages=config.get("chat", "context_messages", default=20))
+        # Rolling conversation continuity (long chats — compaction summaries)
+        from backend.memory.compaction import build_rolling_context
+        rolling_ctx = build_rolling_context()
+        if rolling_ctx:
+            sys_prompt = sys_prompt + "\n\n" + rolling_ctx
 
         # Long-term recall: inject relevant past conversation turns
         # (semantic + hybrid when enabled; legacy hash path otherwise)
         from backend.memory.recall import (build_memory_context,
                                            build_memory_context_hybrid)
         if config.get("memory", "semantic_embeddings", default=True):
-            memory_ctx = await build_memory_context_hybrid(message)
+            memory_ctx = await build_memory_context_hybrid(recall_query)
         else:
-            memory_ctx = build_memory_context(message)
-        user_messages = [
-            {"role": m["role"], "content": m["content"]} for m in context
-        ]
+            memory_ctx = build_memory_context(recall_query)
         if memory_ctx:
-            user_messages.insert(0, {"role": "user", "content": memory_ctx})
+            sys_prompt = sys_prompt + "\n\n" + memory_ctx
 
         # Memory anchors for the chat UI: which memories were injected
         try:
@@ -657,6 +809,10 @@ async def _run_chat_pipeline_inner(
                 anchors.append({"type": "wiki", "text": wiki_ctx[:300]})
             if sop_ctx:
                 anchors.append({"type": "procedure", "text": sop_ctx[:300]})
+            if rolling_ctx:
+                anchors.append({"type": "rolling", "text": rolling_ctx[:300]})
+            if session_ctx:
+                anchors.append({"type": "session", "text": session_ctx[:300]})
             if anchors:
                 get_server().broadcast_nowait("memory.anchors",
                                                {"anchors": anchors})
@@ -671,19 +827,6 @@ async def _run_chat_pipeline_inner(
         except Exception:
             pass
 
-        # Session continuity: recent session summaries (long-run memory), gated
-        # the same way
-        from backend.memory import relevance
-        session_ctx = await relevance.summaries_block(message)
-        if session_ctx:
-            user_messages.insert(0, {"role": "user", "content": session_ctx})
-
-        # Rolling conversation continuity (long chats — compaction summaries)
-        from backend.memory.compaction import build_rolling_context
-        rolling_ctx = build_rolling_context()
-        if rolling_ctx:
-            user_messages.insert(0, {"role": "user", "content": rolling_ctx})
-
         # Temporal fact triples (Graphiti-lite) — relational questions only
         rel_kw = ("decide", "decided", "prefer", "preference", "favorite",
                   "project", "working on", "what is my", "name of", "use for",
@@ -691,17 +834,16 @@ async def _run_chat_pipeline_inner(
                   "last time", "why did", "who is", "where is", "which file",
                   "document", "notes", "note about")
         triples = []
-        if any(k in message.lower() for k in rel_kw):
+        if any(k in (recall_query or "").lower() for k in rel_kw):
             try:
                 from backend.memory.knowledge_graph import kg
-                triples = kg.semantic_search(message, top_k=8)
+                triples = kg.semantic_search(recall_query, top_k=8)
                 if triples:
                     lines = "\n".join(
                         f"- {t['subject']} {t['relation']} {t['object']}"
                         for t in triples)
-                    user_messages.insert(0, {"role": "user", "content":
-                        "[Saved facts] Things on record about the user:\n" +
-                        lines + "\nUse them when relevant."})
+                    sys_prompt += ("\n\n[Saved facts] Things on record about the user:\n" +
+                                   lines + "\nUse them when relevant.")
             except Exception as e:
                 log.debug("triple lookup failed: %s", e)
 
@@ -734,12 +876,44 @@ async def _run_chat_pipeline_inner(
                     if len(related_lines) >= cap:
                         break
                 if related_lines:
-                    user_messages.insert(0, {"role": "user", "content":
-                        "[Related] Connected in the user's memory graph:\n" +
-                        "\n".join(related_lines) +
-                        "\nMention these only when they help the answer."})
+                    sys_prompt += ("\n\n[Related] Connected in the user's memory graph:\n" +
+                                   "\n".join(related_lines) +
+                                   "\nMention these only when they help the answer.")
         except Exception as e:
             log.debug("related lookup failed: %s", e)
+
+        # Memory-grounded conversation: volunteer relevant past organically
+        sys_prompt += ("\n\nIf a saved fact, a previous conversation, or a "
+                       "recent day's summary is clearly relevant to this "
+                       "conversation, mention it naturally (e.g. 'last time "
+                       "we...', 'you mentioned before that...'). Do not force "
+                       "it when nothing fits.")
+
+        # Language mirroring. This line is the general statement; the binding one
+        # is `reply_directive` below, which lands *after* the tool catalogue in
+        # the turn being answered. Kept because a cloud model honours it and it
+        # costs a line.
+        sys_prompt += ("\n\nAlways reply in the same language the user "
+                       "writes or speaks in.")
+
+        # Where a file goes. Nothing used to say, so asked for a file "in the
+        # workspace" the model wrote `workspace\notes.txt` — inventing a
+        # subdirectory inside the root it had already been given — and then
+        # reported that longer path as the location, which at least matched
+        # where the file really was.
+        try:
+            from backend.workspace import root as _workspace_root
+            folder = _workspace_root()
+            if folder:
+                sys_prompt += (f"\n\nFiles: the workspace root is {folder}. "
+                               "Give file paths relative to it — "
+                               "'notes.txt', not 'workspace/notes.txt'.")
+        except Exception as e:  # noqa: BLE001
+            log.debug("workspace hint skipped: %s", e)
+
+        user_messages = [
+            {"role": m["role"], "content": m["content"]} for m in context
+        ]
 
         # Does this look like code/file work? Shared by project injection and by
         # the model router (substantive code work leans on the reasoning role).
@@ -870,6 +1044,13 @@ async def _run_chat_pipeline_inner(
                 # always code, even when the instruction is one short line.
                 force_role=explicit_role or force_role,
             )
+            # An explicit model wins over the routed one. This is how a roster
+            # agent pins its own model — a grunt desk on the local model while
+            # the reasoning desk runs on a cloud one — without every other
+            # surface having to know about it.
+            pinned = str((params or {}).get("model") or "").strip()
+            if pinned:
+                route_model = pinned
             log.debug("Chat route: role=%s model=%s provider=%s",
                       role, route_model,
                       getattr(provider, "provider_id", "?"))
@@ -915,13 +1096,27 @@ async def _run_chat_pipeline_inner(
 
         if response_text and not response_text.startswith("[Provider:") and not response_text.startswith("[Not connected:"):
             if record:
-                chat_history.add_message("user", message)
-                chat_history.add_message("assistant", response_text,
-                    tokens={"in": result.get("tokens", 0), "out": 0})
-                # Remember for the long term
-                from backend.memory.recall import remember_async
-                await remember_async("user", message)
-                await remember_async("assistant", response_text)
+                # `record` may be True/False or a set naming what to keep, so a
+                # caller can say "remember this, but do not put it in my chat".
+                # A swarm flow runs five agents; without that distinction their
+                # chatter buries the user's own conversation, and the choice was
+                # previously all-or-nothing.
+                write_history, write_memory, write_journal = _record_scope(record)
+                if write_history:
+                    chat_history.add_message("user", message)
+                    chat_history.add_message("assistant", response_text,
+                        tokens={"in": result.get("tokens", 0), "out": 0})
+                if write_memory:
+                    # Remember for the long term. Only a real exchange: a
+                    # refusal or a provider error is not knowledge, and memory
+                    # full of failure strings makes recall worse, not better.
+                    from backend.memory.recall import remember_async
+                    await remember_async("user", message)
+                    await remember_async("assistant", response_text)
+                if write_journal:
+                    from backend.memory.journal import record as journal_record
+                    journal_record("user", message)
+                    journal_record("assistant", response_text[:500])
             return {
                 "response": response_text,
                 "tokens": result.get("tokens", 0),
@@ -947,8 +1142,30 @@ async def start_ws_server(host: str = "127.0.0.1", port: int = 9876):
     await _server.start(host, port)
 
 
+def _autostart_state() -> bool:
+    """Whether Addled's Startup shortcut exists. Never raises."""
+    try:
+        from backend.onboarding.wizard import autostart_enabled
+        return autostart_enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
 def _register_default_handlers():
     """Register built-in JSON-RPC handlers."""
+
+    # Bring the saved swarm agents back before anything can ask for them, so
+    # the Agents page shows the user's desks rather than an empty room the
+    # first time it is opened after a restart. Best-effort: a broken roster
+    # must not stop the server from starting.
+    try:
+        from backend.swarm import roster as _roster
+        _roster.seed_if_empty()
+        from backend.swarm.orchestrator import swarm as _swarm
+        restored = _swarm.load_roster()
+        if restored:
+            log.info("Swarm roster restored: %d agent(s)", restored)
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not restore the swarm roster: %s", e)
 
     async def system_status(params: dict, ws) -> dict:
         from backend.config import config
@@ -962,6 +1179,9 @@ def _register_default_handlers():
             "provider": config.active_provider,
             "agentName": config.agent_name,
             "characterState": char_state,
+            # The real state of the Startup shortcut, not the stored preference:
+            # the file is the truth, and it can be removed by hand.
+            "autostart": _autostart_state(),
             "uptime": int(getattr(_engine_ref, '_tick_count', 0) * 5) if _engine_ref else 0,
         }
 
@@ -1258,6 +1478,16 @@ def _register_default_handlers():
             data = redact_settings(data)
         return {"settings": data}
 
+    async def system_set_autostart(params: dict, ws) -> dict:
+        """Turn "start with Windows" on or off.
+
+        Not a plain settings.set: autostart is a shortcut in the Startup folder
+        as well as a stored value, and a settings-only write would show the
+        toggle as on while no shortcut existed. This owns both.
+        """
+        from backend.onboarding import wizard as onboarding
+        return onboarding.set_autostart(bool(params.get("enabled")))
+
     async def settings_set(params: dict, ws) -> dict:
         from backend.config import config
         section = params.get("section")
@@ -1308,7 +1538,14 @@ def _register_default_handlers():
         inputs.
         """
         from backend.workspace import describe
-        return {"success": True, **describe()}
+        info = describe()
+        try:
+            from backend.memory.session_context import session_context
+            session_context._load()
+            info["active_workspace"] = session_context.active_workspace or info.get("root", "")
+        except Exception:
+            info["active_workspace"] = info.get("root", "")
+        return {"success": True, **info}
 
     # ---- Phase 3: Chat with prompt guard + provider integration ---------------
 
@@ -1323,7 +1560,7 @@ def _register_default_handlers():
             reply = result.get("response", "") if isinstance(result, dict) else ""
             if reply and not reply.startswith(("[Not connected:", "[Provider")):
                 from backend.memory.compaction import maybe_compact
-                asyncio.create_task(maybe_compact())
+                _spawn(maybe_compact())
         except Exception:
             log.debug("compaction dispatch failed", exc_info=True)
         # Auto-speak replies when voice.auto_tts is enabled (Settings → Voice)
@@ -1332,7 +1569,7 @@ def _register_default_handlers():
             if config.get("voice", "auto_tts", default=True):
                 reply = result.get("response", "")
                 if reply and not reply.startswith(("[Not connected:", "[Provider")):
-                    asyncio.create_task(_speak_reply(reply))
+                    _spawn(_speak_reply(reply))
                     log.info("Auto-TTS: speaking chat reply (%d chars)", len(reply))
         except Exception:
             log.debug("Auto-TTS dispatch failed", exc_info=True)
@@ -1364,26 +1601,31 @@ def _register_default_handlers():
     async def action_approve(params: dict, ws) -> dict:
         """Approve a pending destructive action by its approval_id."""
         from backend.actions.executor import executor
+        from backend.actions import approval_notice
         approval_id = params.get("approvalId", "")
         if not approval_id:
             return {"success": False, "error": "approvalId is required"}
         result = await executor.approve(approval_id)
+        approval_notice.remember(approval_id)
         return {"success": result.success, "action_type": result.action_type,
                 "summary": result.summary, "error": result.error, "data": result.data}
 
     async def action_deny(params: dict, ws) -> dict:
         """Deny a pending destructive action."""
         from backend.actions.executor import executor
+        from backend.actions import approval_notice
         approval_id = params.get("approvalId", "")
         if not approval_id:
             return {"success": False, "error": "approvalId is required"}
         result = executor.deny(approval_id)
+        approval_notice.remember(approval_id)
         return {"success": result.success, "summary": result.summary, "error": result.error}
 
     async def action_pending(params: dict, ws) -> dict:
-        """List actions waiting for approval."""
+        """Approvals still waiting, for a dashboard that connected late."""
         from backend.actions.executor import executor
-        return {"pending": executor.pending_approvals()}
+        pending = executor.pending_approvals()
+        return {"success": True, "pending": pending, "count": len(pending)}
 
     # ---- Excel operations -----------------------------------------------------
 
@@ -1464,14 +1706,26 @@ def _register_default_handlers():
         }
 
     async def memory_delete_summary(params: dict, ws) -> dict:
+        """Delete one session summary.
+
+        Takes the summary's `id` (what `memory.getSummaries` returns). The old
+        `index` parameter is still accepted, but a position does not survive the
+        50-entry rotation the store keeps — it was deleting whichever summary
+        happened to sit at that slot rather than the one the user picked.
+        """
         from backend.memory.session_summary import delete_summary
-        idx = params.get("index")
-        if not isinstance(idx, int) or idx < 0:
-            return {"success": False, "error": "index is required"}
-        ok = delete_summary(idx)
+        ref = params.get("id")
+        if ref is None:
+            ref = params.get("index")
+        if not isinstance(ref, int) or ref < 0:
+            return {"success": False,
+                    "error": "id is required (the summary's own id)"}
+        ok = delete_summary(ref)
         if ok:
+            # Same id, so the link graph and the summary store agree about
+            # which entry is gone.
             from backend.memory import autolink
-            autolink.forget_ref("summary", idx)
+            autolink.forget_ref("summary", ref)
         return {"success": ok}
 
     async def memory_delete_memory(params: dict, ws) -> dict:
@@ -1516,6 +1770,30 @@ def _register_default_handlers():
         from backend.memory.knowledge_graph import kg
         return {"triples": kg.list_recent(int(params.get("limit", 50))),
                 "count": kg.count()}
+
+    async def memory_health(params: dict, ws) -> dict:
+        """What the retrieval stack is actually doing, and what is wrong.
+
+        Reported because the failures here are silent: no semantic embedder, a
+        store with no rows, or a relevance gate that admits nothing all look
+        identical from the outside — the agent just answers from the
+        conversation alone. `probe` runs one real recall so that is visible.
+        """
+        from backend.memory.health import report, probe
+        out = report()
+        if params.get("probe"):
+            out["probe"] = await probe(str(params.get("query") or "what did we work on"))
+        return out
+
+    async def memory_reembed(params: dict, ws) -> dict:
+        """Migrate stored vectors to the current embedder.
+
+        Needed after changing `memory.embedder`: two 384-dim models produce
+        incomparable vectors, so rows left behind do not error, they rank
+        wrongly. The background job does this in batches; this runs it now.
+        """
+        from backend.memory.reembed import reembed_all
+        return await reembed_all()
 
     async def memory_delete_triple(params: dict, ws) -> dict:
         from backend.memory.knowledge_graph import kg
@@ -2019,9 +2297,10 @@ def _register_default_handlers():
         goal_executor.set_executor(action_exec)
         goal_executor.set_store(goal_store)
 
-        # Fire and forget — run in background
-        import asyncio
-        asyncio.create_task(goal_executor.run_goal(goal_id))
+        # Fire and forget — run in background. Through `_spawn` so the task
+        # keeps a strong reference: a goal half-run and then collected would
+        # look like it simply stopped, with nothing in the log to say why.
+        _spawn(goal_executor.run_goal(goal_id))
         return {"success": True, "goalId": goal_id, "status": "started"}
 
     async def goal_cancel(params: dict, ws) -> dict:
@@ -2036,8 +2315,16 @@ def _register_default_handlers():
 
     # Generated or vendored directories the file tree hides by default. The page
     # offers "show everything", so nothing is permanently unreachable.
+    #
+    # `vendor` and `target` are DELIBERATELY not here. They are generated in
+    # some ecosystems, but they are real source in others — `vendor/` holds
+    # committed dependencies in Go and PHP, and `target/` holds hand-written
+    # code in Rust and Maven projects. Hiding them made a bound workspace show
+    # folders simply vanish, which reads as a bug because it is one. The rest
+    # below are generated in every ecosystem that uses them, so hiding those is
+    # safe.
     _SKIP_DIRS = {'.git', '.hg', '.svn', 'node_modules', '__pycache__', '.next',
-                  'dist', 'build', 'out', 'venv', '.venv', 'target', 'vendor',
+                  'dist', 'build', 'out', 'venv', '.venv',
                   'site-packages', '.mypy_cache', '.pytest_cache', '.ruff_cache',
                   '.idea', '.vs', '.gradle'}
 
@@ -2046,20 +2333,41 @@ def _register_default_handlers():
         if not folder:
             return {"workspaceId": None, "files": [], "error": "No folder path provided"}
         import os
-        from backend.code.lang_detect import detect
+        from pathlib import Path
+        from backend.codemode.lang_detect import detect
         if not os.path.isdir(folder):
             return {"workspaceId": folder, "files": [], "error": f"Folder not found: {folder}"}
+        folder = str(Path(folder).resolve())
+        try:
+            from backend.config import config
+            config.set("workspace", "root", value=folder)
+            from backend.memory.session_context import session_context
+            session_context._load()
+            session_context.active_workspace = folder
+            session_context.save()
+        except Exception as e:
+            log.debug("workspace scope update failed: %s", e)
         limit = 400
         show_all = bool(params.get("includeIgnored"))
         files = []
         truncated = False
+        # Which directories were left out, so the page can SAY so rather than
+        # presenting a partial tree as if it were the whole thing. A folder
+        # quietly missing reads as a bug; a folder missing with a note does not.
+        hidden_dirs: list[str] = []
         try:
             for root, dirs, filenames in os.walk(folder):
                 if show_all:
                     dirs[:] = [d for d in dirs if d != '.git']
                 else:
-                    dirs[:] = [d for d in dirs if not d.startswith('.')
-                               and d not in _SKIP_DIRS]
+                    kept = []
+                    for d in dirs:
+                        if d.startswith('.') or d in _SKIP_DIRS:
+                            rel = os.path.relpath(os.path.join(root, d), folder)
+                            hidden_dirs.append(rel.replace(os.sep, '/'))
+                        else:
+                            kept.append(d)
+                    dirs[:] = kept
                 dirs.sort()
                 for f in sorted(filenames):
                     fp = os.path.join(root, f)
@@ -2078,12 +2386,85 @@ def _register_default_handlers():
         except Exception as e:
             return {"workspaceId": folder, "files": [], "error": str(e)}
         return {"workspaceId": folder, "files": files,
-                "truncated": truncated, "limit": limit}
+                "truncated": truncated, "limit": limit,
+                "hiddenDirs": hidden_dirs[:20],
+                "hiddenDirCount": len(hidden_dirs)}
+
+    async def code_git_status(params: dict, ws) -> dict:
+        """Whether the workspace is a git repo, and what is uncommitted.
+
+        The Code page shows this so the user can see that applying a plan will
+        leave a revertible commit, and that their own uncommitted work is still
+        there. A non-repo workspace is reported as such, not as an error.
+        """
+        from backend.codemode import gitops
+        wp = str(params.get("workspaceId") or "")
+        if not wp:
+            return {"isRepo": False, "available": gitops.available(),
+                    "error": "No workspace is bound."}
+        try:
+            return gitops.status(wp)
+        except Exception as e:  # noqa: BLE001
+            log.debug("git status failed: %s", e)
+            return {"isRepo": False, "error": str(e)}
+
+    async def code_git_diff(params: dict, ws) -> dict:
+        """The uncommitted diff of the workspace, for the page's git view."""
+        from backend.codemode import gitops
+        wp = str(params.get("workspaceId") or "")
+        if not wp:
+            return {"diff": "", "error": "No workspace is bound."}
+        files = params.get("files") or None
+        return {"diff": gitops.diff(wp, files=files,
+                                    staged=bool(params.get("staged")))}
+
+    async def code_git_revert(params: dict, ws) -> dict:
+        """Undo the last change Addled committed to the workspace.
+
+        Only ever reverts a commit the caller names — normally the sha returned
+        by `code.applyPlan` — and only via `git revert`, so it adds an inverse
+        commit instead of rewriting history the user may have pushed.
+        """
+        from backend.codemode import gitops
+        wp = str(params.get("workspaceId") or "")
+        sha = str(params.get("sha") or "").strip()
+        if not wp:
+            return {"success": False, "error": "No workspace is bound."}
+        if not sha:
+            return {"success": False,
+                    "error": "Name the commit to revert (the sha code.applyPlan "
+                             "returned)."}
+        result = gitops.revert_commit(wp, sha)
+        return {"success": bool(result.get("ok")),
+                "sha": result.get("sha") or "",
+                "error": "" if result.get("ok") else (result.get("reason") or "")}
+
+    async def code_verify(params: dict, ws) -> dict:
+        """Run the workspace's own test/verify command.
+
+        The Code page calls this after applying a plan so the result can say
+        "verified" rather than only "written". The command is discovered from
+        the project and never invented — a workspace with no check reports that
+        plainly, which is more useful than a green tick over nothing.
+        """
+        from backend.codemode import verify as verify_mod
+        wp = str(params.get("workspaceId") or "")
+        if not wp:
+            return {"ok": False, "ran": False,
+                    "error": "No workspace is bound."}
+        detected = verify_mod.detect_command(wp)
+        if params.get("detectOnly"):
+            return {"ok": False, "ran": False, **detected}
+        result = await verify_mod.run_verification(
+            wp, command=str(params.get("command") or detected.get("command") or ""),
+            timeout=int(params.get("timeout") or 300))
+        result["verdict"] = verify_mod.verdict_line(result)
+        return result
 
     async def code_grep(params: dict, ws) -> dict:
         """Literal (case-insensitive) search across the bound workspace."""
         import os
-        from backend.code import OutsideWorkspace, resolve_in_workspace
+        from backend.codemode import OutsideWorkspace, resolve_in_workspace
         wp = str(params.get("workspaceId") or "")
         needle = str(params.get("query") or "")
         if not wp:
@@ -2130,8 +2511,8 @@ def _register_default_handlers():
                 "truncated": truncated}
 
     async def code_read(params: dict, ws) -> dict:
-        from backend.code import OutsideWorkspace, resolve_in_workspace
-        from backend.code.lang_detect import detect
+        from backend.codemode import OutsideWorkspace, resolve_in_workspace
+        from backend.codemode.lang_detect import detect
         wp = params.get("workspaceId", "")
         fp = params.get("filePath", "")
         # Never join blindly: a ".." chain or an absolute path escapes the bound
@@ -2149,6 +2530,323 @@ def _register_default_handlers():
         except Exception as e:
             return {"content": f"// Error: {e}", "language": "text"}
 
+    async def code_plan(params: dict, ws) -> dict:
+        """Work out WHICH files a change touches, before editing anything.
+
+        This exists because editing without a plan means guessing at the target.
+        `code.edit` is given one file and rewrites it, so a change that really
+        spans three files was made against whichever one happened to be open.
+
+        TWO calls, on purpose, and that is the whole design:
+
+        1. FIND — with the read-only tools, free-form. The model searches and
+           reports what it found in prose.
+        2. PLAN — the same request plus that transcript, with NO tools offered,
+           so the only thing it can produce is the JSON plan.
+
+        A single call that asked for both a tool call and a strict JSON document
+        was tried first and does not work on a prompt-tools provider (which the
+        local model is — see tool_loop.NATIVE_TOOL_PROVIDERS). Measured: the
+        model made ZERO tool calls, then wrote the tool call it wished it had
+        made *as a plan step*:
+
+            {"filePath": "search_in_files", "action": "tool", ...}
+
+        and named files that do not exist ("backend/orders/create_order.py",
+        "src/order_utils.py"). Two output contracts in one turn — "call one with
+        ```tool" from the catalogue and "reply with JSON only" from the brief —
+        and the small model satisfies whichever it read last. Splitting them
+        gave one contract per call, and the same model then searched correctly
+        (`search_in_files {"query": "format_name"}`) and named the right file.
+
+        It does not write, and it cannot: `_PLAN_TOOLS` is read-only.
+        """
+        import json as _json
+        import re as _re
+
+        from backend.codemode import OutsideWorkspace, resolve_in_workspace
+
+        wp = str(params.get("workspaceId") or "")
+        instruction = str(params.get("instruction") or "").strip()
+        context_folders = [str(f) for f in (params.get("contextFolders") or [])]
+
+        if not wp:
+            return {"status": "error", "message": "Bind a workspace first.",
+                    "plan": None}
+        if not instruction:
+            return {"status": "error", "message": "Describe the change first.",
+                    "plan": None}
+        try:
+            resolve_in_workspace(wp, ".")
+        except OutsideWorkspace as e:
+            return {"status": "refused", "message": str(e), "plan": None}
+
+        # A hint from the user's right-click, so the planner looks where they
+        # pointed rather than scanning the whole tree blindly.
+        hint = ""
+        if context_folders:
+            hint = ("\n\nThe user pointed at these folders — start there:\n"
+                    + "\n".join(f"- {f}" for f in context_folders))
+
+        # ---- call 1: FIND --------------------------------------------------
+        # Free-form prose and tools. No JSON is asked for here, so the tool
+        # catalogue is the only contract in the turn.
+        #
+        find_persona = (
+            "You find code. You report which files matter for a change; you do "
+            "NOT make the change.\n\n"
+            "Search before you answer. Call `search_in_files` with the exact "
+            "symbol, string or filename the request mentions, then `read_file` a "
+            "candidate to confirm it. A filename that merely sounds related is "
+            "not evidence — the file that needs changing is named after the "
+            "concept, not after the request, and callers you have not thought of "
+            "will need updating too.\n\n"
+            "If a search finds nothing, try another term. If you still cannot "
+            "tell, say which files you ruled out and why."
+        )
+
+        # The search report is prose, so it is written in the user's own
+        # language. The pipeline pins the reply language itself from the message
+        # text (see the `reply_directive` call in _run_chat_pipeline_inner), and
+        # `instruction` is carried in that message, so nothing extra is needed
+        # here — an earlier draft of this function computed a directive locally
+        # and silently discarded it.
+        find_message = (
+            f"Request: {instruction}{hint}\n\n"
+            "Find every file that must change, and say why each one is in "
+            "scope. Report the paths exactly as the tools returned them. "
+            "Start by calling `search_in_files`."
+        )
+
+        try:
+            found = await _run_chat_pipeline_inner(
+                find_message,
+                persona=find_persona,
+                tools=list(_PLAN_TOOLS),
+                record=False,
+                force_role="reasoning",
+                # Finding the files IS the work, so this is deliberately more
+                # generous than code.edit's 5.
+                max_tool_rounds=8,
+            )
+        except Exception as e:
+            log.exception("code.plan search step failed")
+            return {"status": "error", "message": f"Planning failed: {e}",
+                    "plan": None}
+
+        transcript = (found or {}).get("response", "") or ""
+        # `_run_chat_pipeline_inner` reports tool use as COUNTS, not a list:
+        # `toolResults` is an int (how many results came back) and `toolRounds`
+        # is an int (how many model turns it took). Reading `tool_results` as a
+        # list silently reported "no search happened" on every plan, and the
+        # guard below then refused work that had in fact been done correctly.
+        tool_count = int((found or {}).get("toolResults")
+                         or (found or {}).get("tool_results") or 0)
+        rounds = int((found or {}).get("toolRounds")
+                     or (found or {}).get("tool_rounds") or 0)
+
+        if not transcript.strip() or transcript.startswith(("[Not connected:",
+                                                            "[Provider:")):
+            return {"status": "error",
+                    "message": transcript or "The search step returned nothing.",
+                    "plan": None}
+
+        # If nothing was searched, say so rather than letting call 2 invent a
+        # plan from the request alone — that is exactly the guessing this
+        # method exists to prevent.
+        #
+        # The transcript counts as evidence too: a model that quotes a path it
+        # could only have got from a tool result has plainly searched, and
+        # refusing that would lose a good plan over bookkeeping.
+        quoted_path = bool(_re.search(r"[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,6}\b",
+                                      transcript))
+        if tool_count <= 0 and not quoted_path:
+            return {
+                "status": "error",
+                "message": ("The planner did not search the project, so it "
+                            "cannot say which files to change. Try naming the "
+                            "file or the symbol you mean."),
+                "plan": None,
+                "searched": False,
+            }
+
+        # ---- call 2: PLAN --------------------------------------------------
+        # The transcript plus the request, and NO tools, so JSON is the only
+        # possible answer.
+        #
+        # `structure` says the JSON stays English on purpose. The pipeline pins
+        # the reply language from the message text, and this document is parsed
+        # and rendered by a machine — prose in another language inside a value
+        # is fine, but a translated KEY is a plan that no longer loads. Saying so
+        # beats relying on the model to guess which parts are data.
+        contract = (
+            "Reply with JSON only, no prose before or after:\n"
+            '{"summary": "one line describing the change",\n'
+            ' "steps": [{"filePath": "relative/path.py",\n'
+            '            "action": "edit" | "create",\n'
+            '            "instruction": "what to change in THIS file, specific '
+            'enough to act on alone",\n'
+            '            "reason": "why this file is in scope"}],\n'
+            ' "uncertain": [{"question": "what you could not determine"}]}\n'
+            "The keys above are fixed — keep them exactly as written, in "
+            "English. Write the VALUES in the same language as the request. "
+            "Only use file paths that appear in the search results above, "
+            'except when action is "create".'
+        )
+        plan_message = (
+            f"Request: {instruction}\n\n"
+            f"What a search of the project found:\n{transcript}\n\n"
+            f"Turn that into the plan. {contract}"
+        )
+
+        try:
+            planned = await _run_chat_pipeline_inner(
+                plan_message,
+                persona=("You turn a search report into a plan. The files are "
+                         "already known — do not invent new ones."),
+                # Deliberately EMPTY, not None: an empty list means "no tools",
+                # which is the point of this call. None would mean "every
+                # enabled skill" and reopen the two-contract problem.
+                tools=[],
+                record=False,
+                force_role="reasoning",
+                max_tool_rounds=1,
+            )
+        except Exception as e:
+            log.exception("code.plan format step failed")
+            return {"status": "error", "message": f"Planning failed: {e}",
+                    "plan": None}
+
+        text = (planned or {}).get("response", "") or ""
+        if not text or text.startswith(("[Not connected:", "[Provider:")):
+            return {"status": "error",
+                    "message": text or "The planner returned nothing.",
+                    "plan": None}
+
+        # Pull the JSON object out of whatever the model surrounded it with.
+        candidate = text.strip()
+        fence = _re.search(r"```(?:json)?\s*(.*?)```", candidate, _re.DOTALL)
+        if fence:
+            candidate = fence.group(1).strip()
+        match = _re.search(r"\{.*\}", candidate, _re.DOTALL)
+        if not match:
+            return {"status": "error",
+                    "message": "The planner did not return a plan.",
+                    "plan": None}
+
+        body = match.group(0)
+        raw = None
+        try:
+            raw = _json.loads(body)
+        except _json.JSONDecodeError as first_error:
+            # A local model's JSON is often *nearly* valid: a raw newline inside
+            # a string, a trailing comma, or a comment. Rejecting the whole plan
+            # for one of those throws away real work, so try to repair the two
+            # shapes that actually happen before giving up.
+            #
+            # Observed for real: "Expecting ',' delimiter: line 6 column 137" —
+            # a multi-line value written as a bare string. The failure was only
+            # found by driving the UI; a stubbed model always returns clean JSON.
+            repaired = body
+            # 1. Trailing commas before a closing brace/bracket.
+            repaired = _re.sub(r",(\s*[}\]])", r"\1", repaired)
+            # 2. Literal newlines/tabs inside a JSON string, which are illegal
+            #    but which a model writes whenever it puts a code block in a
+            #    value. Walk the text and escape control chars while inside a
+            #    quoted run.
+            out, in_str, escaped = [], False, False
+            for ch in repaired:
+                if in_str:
+                    if escaped:
+                        out.append(ch); escaped = False
+                    elif ch == "\\":
+                        out.append(ch); escaped = True
+                    elif ch == '"':
+                        out.append(ch); in_str = False
+                    elif ch in "\n\r\t":
+                        out.append({"\n": "\\n", "\r": "\\r",
+                                    "\t": "\\t"}[ch])
+                    else:
+                        out.append(ch)
+                else:
+                    if ch == '"':
+                        in_str = True
+                    out.append(ch)
+            repaired = "".join(out)
+            try:
+                raw = _json.loads(repaired)
+                log.info("code.plan: repaired near-valid JSON (%s)",
+                         first_error.msg)
+            except _json.JSONDecodeError as e:
+                return {"status": "error",
+                        "message": (f"The plan was not valid JSON: {e.msg}. "
+                                    f"The model's reply started with: "
+                                    f"{body[:160]}"),
+                        "plan": None}
+        if not isinstance(raw, dict):
+            return {"status": "error", "message": "The plan was not an object.",
+                    "plan": None}
+
+        steps, rejected = [], []
+        for entry in (raw.get("steps") or []):
+            if not isinstance(entry, dict):
+                continue
+            fp = str(entry.get("filePath") or "").strip().replace("\\", "/")
+            if not fp:
+                continue
+            action = str(entry.get("action") or "edit").strip().lower()
+            # A step must stay inside the workspace. Checking it here means an
+            # out-of-scope path is reported as a plan problem, rather than
+            # surfacing later as a confusing refusal from code.edit.
+            if action != "create":
+                try:
+                    resolve_in_workspace(wp, fp)
+                except OutsideWorkspace as e:
+                    rejected.append({"filePath": fp, "message": str(e)})
+                    continue
+            steps.append({
+                "filePath": fp,
+                "action": action,
+                "instruction": str(entry.get("instruction") or instruction).strip(),
+                "reason": str(entry.get("reason") or "").strip(),
+            })
+
+        if not steps:
+            return {"status": "error",
+                    "message": ("The planner named no file inside the "
+                                "workspace." + (f" Refused: {rejected[0]['message']}"
+                                                if rejected else "")),
+                    "plan": None, "rejected": rejected}
+
+        uncertain = []
+        for entry in (raw.get("uncertain") or []):
+            if isinstance(entry, dict) and entry.get("question"):
+                uncertain.append({"question": str(entry["question"])})
+            elif isinstance(entry, str) and entry.strip():
+                uncertain.append({"question": entry.strip()})
+
+        return {
+            "status": "ok",
+            "plan": {
+                "summary": str(raw.get("summary") or "").strip(),
+                "steps": steps,
+                "uncertain": uncertain,
+            },
+            "rejected": rejected,
+            # What the search actually did, so the UI can show that the plan was
+            # based on looking rather than guessing.
+            "searched": True,
+            "tool_calls": tool_count,
+            "rounds": rounds,
+            "findings": transcript[:1200],
+            # How many diffs the page may request at once. 1 means "ask for them
+            # one at a time" — the local model queues concurrent requests, so
+            # anything wider would look parallel and behave serially. Sent with
+            # the plan so the page does not have to guess or hold its own copy
+            # of the provider list.
+            "concurrency": _plan_concurrency(),
+        }
+
     async def code_edit(params: dict, ws) -> dict:
         """Propose a change to one file, for the user to review as a diff.
 
@@ -2162,7 +2860,7 @@ def _register_default_handlers():
         read-only on purpose: write_file here would quietly retire that review
         step.
         """
-        from backend.code.diff_engine import generate_diff
+        from backend.codemode.diff_engine import generate_diff
         wp = params.get("workspaceId", "")
         fp = params.get("filePath", "")
         instruction = (params.get("instruction") or "").strip()
@@ -2175,7 +2873,7 @@ def _register_default_handlers():
                     "message": "Open a file in the workspace first."}
 
         original = ""
-        from backend.code import OutsideWorkspace, resolve_in_workspace
+        from backend.codemode import OutsideWorkspace, resolve_in_workspace
         try:
             full = resolve_in_workspace(wp, fp)
         except OutsideWorkspace as e:
@@ -2198,13 +2896,13 @@ def _register_default_handlers():
         # room to think. This used to send the first 3000 characters and diff
         # the answer against the *whole* file, which meant a long file came back
         # as "everything after 3000 characters was deleted".
-        if len(original) > _CODE_EDIT_MAX_CHARS:
-            return {"diffs": [], "status": "too_large",
-                    "message": (f"{fp} is {len(original):,} characters. The editor "
-                                f"rewrites a whole file at a time and stops at "
-                                f"{_CODE_EDIT_MAX_CHARS:,} — above that a partial "
-                                f"reply would be read as a deletion. Split the "
-                                f"file, or make this change by hand.")}
+        #
+        # Anchored edits removed the reason for this ceiling: the reply carries
+        # only the change, so a 200 KB file is edited as easily as a small one.
+        # The limit stays as a guard on the *prompt* — the whole file is still
+        # sent so the model can anchor accurately — but a file above it is sent
+        # with an explicit note to use anchors only, rather than refused.
+        _oversized = len(original) > _CODE_EDIT_MAX_CHARS
 
         # Working guidelines apply to code generation too.
         guidelines_block = ""
@@ -2222,21 +2920,43 @@ def _register_default_handlers():
             "what a module exports, which convention the neighbours follow. "
             "Reading beats assuming.\n\n"
             "You cannot write files. Your answer is a proposal that the user "
-            "reviews as a diff, so never say a change has been made."
+            "reviews as a diff, so never say a change has been made.\n\n"
+            "You change the file by naming the exact text to replace, not by "
+            "reproducing the whole file. Copy the anchor from the file above "
+            "verbatim, including its indentation, and include enough "
+            "surrounding lines that it appears only once."
         )
         if guidelines_block:
             persona = f"{persona}\n\n{guidelines_block}"
 
         # Said last, in the same turn as the file, because this decides whether
-        # the reply can be parsed at all.
+        # the reply can be parsed at all. The shape is the whole contract: an
+        # anchored edit carries only the change, so a truncated reply fails
+        # loudly ("anchor not found") instead of reading as a deletion.
         contract = (
-            "Reply with the complete modified file and nothing else — no "
-            "explanation, no summary, no questions, no diff syntax, no notes "
-            "about what you changed. Every line of the file must be there, "
-            "including the lines you did not touch."
+            "Reply with JSON only, no prose before or after:\n"
+            '{"edits": [{"anchor": "the exact existing text to replace",\n'
+            '            "replacement": "what to put in its place"}],\n'
+            ' "summary": "one line describing the change"}\n'
+            "Copy each anchor from the file above exactly as it appears, "
+            "including indentation. It must be unique in the file — include "
+            "more surrounding lines until it is. To delete text, use an empty "
+            "replacement. To insert, anchor on the line the new text goes "
+            "after and repeat it in the replacement followed by the new text. "
+            "If the change touches most of the file, anchor on the entire old "
+            "body and replace it with the entire new body.\n"
+            "Keep the JSON keys in English; write the summary in the language "
+            "of the instruction."
         )
+        size_note = ""
+        if _oversized:
+            size_note = (
+                f"\n\nThis file is {len(original):,} characters, so it is too "
+                "long to return whole. Use anchored edits only — never reply "
+                "with the complete file."
+            )
         message = (f"{instruction}\n\n"
-                   f"File: {fp}\n```\n{original}\n```\n\n{contract}")
+                   f"File: {fp}\n```\n{original}\n```\n\n{contract}{size_note}")
 
         try:
             # The inner pipeline, not run_chat_pipeline: the outer function turns
@@ -2248,9 +2968,12 @@ def _register_default_handlers():
                 message,
                 persona=persona,
                 tools=list(_CODE_EDIT_TOOLS),
-                # A code edit is a task, not a conversation: it should not
-                # appear in the chat history or be written to memory.
-                record=False,
+                # A code edit is a task — its raw output should not appear in
+                # the chat history (it is a code block, not a conversation),
+                # but the instruction and outcome belong in long-term memory
+                # and the episodic journal so that all surfaces can recall
+                # what was changed and why.
+                record={"memory", "journal"},
                 # Editing code is the canonical reasoning-role task.
                 force_role="reasoning",
                 max_tool_rounds=5,
@@ -2265,7 +2988,58 @@ def _register_default_handlers():
             return {"diffs": [], "status": "error",
                     "message": text or "The model returned nothing."}
 
-        modified = _extract_code(text)
+        # Anchored edits are the expected shape. A whole-file reply (a bare
+        # fenced block) is still accepted, because a model that ignores the
+        # contract and returns the file anyway should not lose the user's edit —
+        # but it is the fallback, not the path.
+        modified = ""
+        anchors_used = 0
+        edit_report: list[dict] = []
+        payload = _extract_json_object(text)
+        if payload is not None:
+            from backend.codemode.anchored import apply_edits, parse_edit_ops
+            ops, parse_error = parse_edit_ops(payload)
+            if ops:
+                modified, edit_report = apply_edits(original, ops)
+                anchors_used = sum(1 for r in edit_report if r.get("ok"))
+                failed = [r for r in edit_report if not r.get("ok")]
+                if failed and anchors_used == 0:
+                    # Nothing could be applied — usually the anchor was copied
+                    # from memory rather than the file. Say which one, so the
+                    # next attempt can be corrected instead of guessed at.
+                    first = failed[0]
+                    return {
+                        "diffs": [], "status": "anchor_not_found",
+                        "message": (first.get("error")
+                                    or "The anchor was not found in the file."),
+                        "anchor": first.get("anchor", ""),
+                        "edits": edit_report,
+                    }
+                if failed and anchors_used > 0:
+                    # Partial: the edits that applied are real and are offered,
+                    # with a note about the one that did not. Silent partial
+                    # application is the failure mode this avoids.
+                    diff = generate_diff(original, modified, fp)
+                    _pending_edits[f"{wp}::{fp}"] = modified
+                    return {
+                        "diffs": [diff], "status": "pending",
+                        "editId": f"{wp}::{fp}",
+                        "applied": anchors_used,
+                        "edits": edit_report,
+                        "warning": (failed[0].get("error")
+                                    or "An edit could not be applied."),
+                        "toolCalls": (result or {}).get("toolResults", 0),
+                        "message": (f"{anchors_used} of {len(edit_report)} "
+                                    "edits applied — review the diff, and check "
+                                    "the note about the one that failed."),
+                    }
+            elif parse_error and _extract_code(text).strip() == "":
+                # No edits and no whole file either — report why.
+                return {"diffs": [], "status": "error", "message": parse_error}
+
+        if not modified:
+            modified = _extract_code(text)
+
         if not modified:
             return {"diffs": [], "status": "error",
                     "message": "The model returned no code to apply."}
@@ -2276,16 +3050,181 @@ def _register_default_handlers():
         diff = generate_diff(original, modified, fp)
         # Held until the user approves it with code.apply.
         _pending_edits[f"{wp}::{fp}"] = modified
-        return {"diffs": [diff], "status": "pending",
-                "editId": f"{wp}::{fp}",
-                "toolCalls": (result or {}).get("toolResults", 0),
-                "message": "Edit ready for review. Approve with code.apply."}
+        out = {"diffs": [diff], "status": "pending",
+               "editId": f"{wp}::{fp}",
+               "toolCalls": (result or {}).get("toolResults", 0),
+               "message": "Edit ready for review. Approve with code.apply."}
+        if anchors_used:
+            out["anchors"] = anchors_used
+            out["edits"] = edit_report
+        return out
+
+    async def code_apply_plan(params: dict, ws) -> dict:
+        """Apply several already-reviewed edits, one file at a time.
+
+        Why this exists: "apply all" on the page. Doing it in the browser with N
+        `code.apply` round trips means the page decides what to do when the third
+        of five fails, and a dropped socket midway leaves a half-applied plan
+        with no record of where it stopped. The backend can do better — it knows
+        which edits are still pending, and it can report exactly what happened to
+        each file.
+
+        A change is applied only if the user reviewed it: every entry must name
+        an `editId` that `code.edit` actually produced and that is still pending.
+        Passing `content` is NOT accepted here, unlike `code.apply` — a bulk call
+        carrying its own file contents would be a way to write several files
+        without the review step that makes the Code page safe.
+
+        Stops at the first failure. A plan is usually a chain (rename a function,
+        then its callers), so continuing past a failed step would apply the
+        callers against a definition that never changed. The result says which
+        files were written, which was refused, and which were never attempted.
+        """
+        from backend.codemode import OutsideWorkspace, resolve_in_workspace
+        from backend.codemode.diff_engine import apply_content
+
+        wp = str(params.get("workspaceId") or "")
+        entries = params.get("edits") or []
+        if not wp:
+            return {"applied": [], "skipped": [], "failed": None,
+                    "error": "No workspace is bound; refusing to write."}
+        if not isinstance(entries, list) or not entries:
+            return {"applied": [], "skipped": [], "failed": None,
+                    "error": "No edits to apply."}
+        # A cap, so one call cannot rewrite an unbounded number of files. The
+        # page warns well before this; reaching it means something is wrong.
+        if len(entries) > _MAX_PLAN_APPLIES:
+            return {"applied": [], "skipped": [], "failed": None,
+                    "error": (f"{len(entries)} edits at once is above the "
+                              f"{_MAX_PLAN_APPLIES} this will apply in one "
+                              f"call. Apply them in smaller groups.")}
+
+        backup = params.get("backup", True)
+        applied, skipped = [], []
+
+        def _not_attempted(from_index: int) -> list[dict]:
+            """Everything after `from_index`, reported so the page can say what
+            is still outstanding instead of implying the whole plan succeeded."""
+            rest = []
+            for i in range(from_index, len(entries)):
+                item = entries[i]
+                rest.append({
+                    "index": i,
+                    "filePath": (str(item.get("filePath") or "")
+                                 if isinstance(item, dict) else ""),
+                    "reason": "Not attempted.",
+                })
+            return rest
+
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                skipped.append({"index": index, "filePath": "",
+                                "reason": "Malformed entry."})
+                continue
+            fp = str(entry.get("filePath") or "")
+            if not fp:
+                skipped.append({"index": index, "filePath": "",
+                                "reason": "No file path."})
+                continue
+
+            # Contain the path BEFORE looking up the pending edit, so a refused
+            # call cannot consume an edit the user never approved.
+            try:
+                full = resolve_in_workspace(wp, fp)
+            except OutsideWorkspace as e:
+                return {"applied": applied,
+                        "skipped": skipped + _not_attempted(index + 1),
+                        "failed": {"index": index, "filePath": fp,
+                                   "reason": str(e)},
+                        "error": f"Refused: {e}"}
+
+            # Only a real pending edit counts. No `content` fallback here, on
+            # purpose — see the docstring.
+            edit_id = entry.get("editId") or f"{wp}::{fp}"
+            content = _pending_edits.get(edit_id)
+            if content is None:
+                return {"applied": applied,
+                        "skipped": skipped + _not_attempted(index + 1),
+                        "failed": {"index": index, "filePath": fp,
+                                   "reason": ("This change was not reviewed, or "
+                                              "its diff has already been "
+                                              "applied. Generate it again.")},
+                        "error": f"No reviewed edit pending for {fp}."}
+
+            allow_create = bool(entry.get("create"))
+            if not full.is_file() and not allow_create:
+                return {"applied": applied,
+                        "skipped": skipped + _not_attempted(index + 1),
+                        "failed": {"index": index, "filePath": fp,
+                                   "reason": "File not found."},
+                        "error": f"File not found: {fp}"}
+
+            result = apply_content(str(full), content, backup=backup)
+            if not result.get("success"):
+                return {"applied": applied,
+                        "skipped": skipped + _not_attempted(index + 1),
+                        "failed": {"index": index, "filePath": fp,
+                                   "reason": result.get("error") or "Write failed."},
+                        "error": (result.get("error")
+                                  or f"Could not write {fp}.")}
+            _pending_edits.pop(edit_id, None)
+            applied.append({
+                "index": index, "filePath": fp,
+                "created": bool(result.get("created")),
+                "backup": result.get("backup") or "",
+            })
+
+        # Git is the undo, when the workspace is a repo. The commit goes on top
+        # of the user's history and names what changed, so "undo the agent's
+        # last change" is `git revert` and the user's own log shows what Addled
+        # did and when. Best-effort throughout: a non-repo workspace still has
+        # the per-file `.bak` backups, and the result says git was not used
+        # rather than failing the apply.
+        git_info: dict = {}
+        verify_info: dict = {}
+        if applied:
+            # Verify BEFORE committing, so the commit that records the change is
+            # only made when the project's own check agrees it is a good change.
+            # A failing check still commits (the work is the user's, and losing
+            # it would be worse), but the result says plainly that it did not
+            # verify — that is the difference between "finished" and "done".
+            try:
+                from backend.codemode import verify as verify_mod
+                verify_info = await verify_mod.run_verification(
+                    wp, timeout=int(params.get("verifyTimeout") or 300))
+                verify_info["verdict"] = verify_mod.verdict_line(verify_info)
+            except Exception as e:  # noqa: BLE001
+                log.debug("verification after plan failed: %s", e)
+                verify_info = {"ran": False, "ok": False,
+                               "reason": str(e), "verdict": ""}
+
+        if applied:
+            try:
+                from backend.codemode import gitops
+                summary = str(params.get("summary") or "")
+                if verify_info.get("ran"):
+                    marker = "verified" if verify_info.get("ok") else "unverified"
+                    summary = f"{summary} [{marker}]".strip()
+                git_info = gitops.commit(
+                    wp, gitops.describe_change(applied, summary),
+                    files=[str(entry.get("filePath") or "")
+                           for entry in applied if entry.get("filePath")])
+                git_info = {"used": bool(git_info.get("ok")),
+                            "sha": git_info.get("sha") or "",
+                            "reason": git_info.get("reason") or ""}
+            except Exception as e:  # noqa: BLE001
+                log.debug("git commit after plan failed: %s", e)
+                git_info = {"used": False, "reason": str(e)}
+
+        return {"applied": applied, "skipped": skipped, "failed": None,
+                "error": "", "count": len(applied), "git": git_info,
+                "verify": verify_info}
 
     async def code_apply(params: dict, ws) -> dict:
         """Apply a reviewed code edit. Requires explicit content OR a pending
         edit id created by code.edit."""
-        from backend.code.diff_engine import apply_content
-        from backend.code import OutsideWorkspace, resolve_in_workspace
+        from backend.codemode.diff_engine import apply_content
+        from backend.codemode import OutsideWorkspace, resolve_in_workspace
         wp = params.get("workspaceId", "")
         fp = params.get("filePath", "")
 
@@ -2323,9 +3262,9 @@ def _register_default_handlers():
         edit made by hand. Creating a file is allowed here — that is what the
         page's New File button is — and the path is contained first.
         """
-        from backend.code import (MAX_EDIT_BYTES, OutsideWorkspace,
-                                  resolve_in_workspace)
-        from backend.code.diff_engine import apply_content
+        from backend.codemode import (MAX_EDIT_BYTES, OutsideWorkspace,
+                                      resolve_in_workspace)
+        from backend.codemode.diff_engine import apply_content
         wp = str(params.get("workspaceId") or "")
         fp = str(params.get("filePath") or "")
         content = params.get("content")
@@ -2450,7 +3389,9 @@ def _register_default_handlers():
             mcp_servers = len(servers)
             mcp_tools = int(view.get("tool_count") or 0)
             for server in servers:
-                if str(server.get("state")) == "connected":
+                # "ready" is the connected state; "connected" is not one the
+                # manager ever sets, so this counted zero on a working install.
+                if str(server.get("state")) in ("ready", "connected", "connecting"):
                     mcp_connected += 1
                 if not server.get("trusted"):
                     mcp_untrusted += 1
@@ -2554,6 +3495,150 @@ def _register_default_handlers():
         agent_id = params.get("agentId", "")
         ok = swarm.stop(agent_id)
         return {"success": ok}
+
+    async def swarm_flow(params: dict, ws) -> dict:
+        """Run several agents in order, each seeing what came before it.
+
+        A step may name `parallel` agents to work it at the same time, a
+        `merge` agent to reconcile their answers, an `until` gate with a
+        `retry` agent to send rejected work back, and `dependsOn` step numbers
+        to wait for.
+        """
+        from backend.swarm.orchestrator import swarm
+        steps = params.get("steps")
+        if not isinstance(steps, list) or not steps:
+            return {"success": False,
+                    "error": "steps must be a list of {agentId, task}"}
+        try:
+            from backend.providers.registry import get_provider
+            provider = get_provider()
+        except Exception:
+            provider = None
+        return await swarm.run_flow(
+            steps, provider=provider,
+            goal=str(params.get("goal") or ""))
+
+    async def swarm_memory(params: dict, ws) -> dict:
+        """Read or clear the swarm's shared memory of finished work."""
+        from backend.swarm.orchestrator import swarm
+        if params.get("clear"):
+            dropped = swarm.clear_memory()
+            return {"success": True, "cleared": dropped, "entries": []}
+        text = swarm.memory_text()
+        return {"success": True, "memory": text,
+                "entries": len(swarm._memory),
+                "chars": len(text)}
+
+    async def swarm_roster(params: dict, ws) -> dict:
+        """The saved agent desks, and the built-in types with their skills."""
+        from backend.swarm import roster
+        return {"success": True,
+                "agents": roster.definitions(),
+                "types": roster.type_catalogue()}
+
+    async def swarm_define(params: dict, ws) -> dict:
+        """Create or update an agent on the roster.
+
+        This is what makes an agent survive a restart. It also spawns it now,
+        so defining and using are one step rather than two.
+        """
+        from backend.swarm.orchestrator import swarm
+        from backend.swarm import roster
+        entry = {
+            "id": str(params.get("id") or ""),
+            "name": str(params.get("name") or ""),
+            "type": str(params.get("type") or "general"),
+            "role": str(params.get("role") or ""),
+            "does": str(params.get("does") or ""),
+            "prompt": str(params.get("prompt") or ""),
+            "brief": str(params.get("brief") or ""),
+            "tools": params.get("tools"),
+            "skills": params.get("skills"),
+            "model": str(params.get("model") or ""),
+            "provider": str(params.get("provider") or ""),
+            "isLead": bool(params.get("isLead")),
+        }
+        if not entry["id"]:
+            agent = swarm.spawn(
+                entry["name"] or "unnamed", entry["type"],
+                system_prompt=entry["prompt"], tools=entry["tools"],
+                brief=entry["brief"], skills=entry["skills"],
+                model=entry["model"], provider=entry["provider"],
+                role=entry["role"], does=entry["does"],
+                is_lead=entry["isLead"], persist=True)
+            return {"success": True, "agentId": agent.id,
+                    "agent": swarm.save_agent(agent.id).get("agent")}
+        # An existing id: update the definition and respawn it so a running
+        # session picks up a changed brief without a restart.
+        saved = roster.upsert(entry)
+        swarm.stop(saved["id"])
+        swarm.spawn_from_roster(saved["id"])
+        return {"success": True, "agentId": saved["id"], "agent": saved}
+
+    async def swarm_forget(params: dict, ws) -> dict:
+        """Remove an agent and its saved definition."""
+        from backend.swarm.orchestrator import swarm
+        agent_id = str(params.get("agentId") or params.get("id") or "")
+        if not agent_id:
+            return {"success": False, "error": "No agentId given."}
+        return {"success": swarm.forget(agent_id)}
+
+    async def swarm_restore(params: dict, ws) -> dict:
+        """Bring every saved agent back into this session."""
+        from backend.swarm.orchestrator import swarm
+        return {"success": True, "restored": swarm.load_roster()}
+
+    async def swarm_revise(params: dict, ws) -> dict:
+        """Send a deliverable back with a correction, and learn from it.
+
+        The correction is recorded against the agent so it applies next time —
+        a standing rule unless it is clearly about just this task. The revision
+        itself is a fresh run with the correction appended, so the agent reworks
+        the work rather than being told about it and doing nothing.
+        """
+        from backend.swarm.orchestrator import swarm
+        from backend.swarm import roster
+        agent_id = str(params.get("agentId") or "")
+        correction = str(params.get("correction") or "").strip()
+        previous = str(params.get("output") or "")
+        if not agent_id or not correction:
+            return {"success": False,
+                    "error": "Both agentId and correction are required."}
+        agent = swarm.get_agent(agent_id)
+        if agent is None:
+            return {"success": False, "error": f"No agent {agent_id}."}
+
+        # Record it first, so the rework already benefits from it. Default is a
+        # standing rule; a caller that knows it is task-specific says so.
+        if params.get("oneOff"):
+            roster.add_one_off(agent_id, correction)
+        else:
+            roster.add_rule(agent_id, correction)
+
+        task = ("Revise your last deliverable using this correction. Do not "
+                "start over — keep what was right and change what was wrong.\n"
+                f"Correction: {correction}\n\n"
+                + (f"Your last deliverable:\n{previous[:4000]}\n\n" if previous
+                   else ""))
+        try:
+            from backend.providers.registry import get_provider
+            provider = get_provider()
+        except Exception:  # noqa: BLE001
+            provider = None
+        result = await swarm.run_agent(agent_id, task, provider)
+        return {"success": bool(result.get("success")),
+                "response": result.get("response", ""),
+                "learned": correction,
+                "kind": "one-off" if params.get("oneOff") else "standing",
+                "error": result.get("error")}
+
+    async def swarm_notes(params: dict, ws) -> dict:
+        """Read or clear the mid-flight notes between agents."""
+        from backend.swarm.orchestrator import swarm
+        if params.get("clear"):
+            return {"success": True, "cleared": swarm.clear_notes()}
+        return {"success": True, "notes": list(swarm._notes),
+                "count": len(swarm._notes)}
 
     # ---- Phase 5: Calendar & Email integrations ------------------------------
 
@@ -2854,8 +3939,43 @@ def _register_default_handlers():
     async def browser_install_approve(params: dict, ws) -> dict:
         """Run a dashboard-approved backend install (auto_install=ask flow)."""
         from backend.browser.auto_install import approve
-        from backend.browser.auto_install import approve
         return await approve(str(params.get("backend", "")))
+
+    async def browser_install_status(params: dict, ws) -> dict:
+        """What the Settings browser page draws: installed, installing, version.
+
+        One call for both backends, so the page does not have to make two round
+        trips and reconcile them.
+        """
+        from backend.browser.auto_install import status_all
+        return status_all()
+
+    async def browser_install_now(params: dict, ws) -> dict:
+        """Install a browser backend because the user pressed the button.
+
+        Distinct from `browser.installApprove`, which answers the ask-banner.
+        This one is an explicit instruction: it clears the failure backoff so a
+        press always tries, and reports why when it cannot.
+        """
+        from backend.browser.auto_install import approve, installing, is_installed
+        backend = str(params.get("backend", "playwright") or "playwright")
+        if backend not in ("playwright", "framework"):
+            return {"success": False, "error": f"Unknown backend '{backend}'."}
+        if is_installed(backend):
+            return {"success": True, "status": "installed",
+                    "message": "Already installed."}
+        if installing(backend):
+            return {"success": True, "status": "installing",
+                    "message": "An install is already running."}
+        result = await approve(backend)
+        return {
+            "success": bool(result.get("success")),
+            "status": result.get("status", "")
+            if result else "failed",
+            "error": "" if result.get("success")
+            else ("The install did not finish. Check the network and try "
+                  "again — the reason is in the log."),
+        }
 
     # ---- Local model (llamafile) — ask-then-download flow -------------------
 
@@ -3004,11 +4124,14 @@ def _register_default_handlers():
         if not repo and not url:
             return {"success": False, "error": "Provide 'url' or 'repo'"}
         try:
-            if url:
-                meta = market.install_from_url(url)
+            if url or repo.startswith(("http://", "https://")):
+                meta = market.install_from_url(url or repo)
             else:
                 meta = market.install_from_github(
-                    repo, str(params.get("path", "")).strip())
+                    repo,
+                    str(params.get("path", "")).strip(),
+                    ref=str(params.get("ref", "")).strip(),
+                )
         except Exception as e:
             return {"success": False, "error": str(e)}
         return {"success": True, "skill": meta["name"],
@@ -3121,6 +4244,7 @@ def _register_default_handlers():
     _server.register("desktop.revoke", desktop_revoke)
     _server.register("settings.get", settings_get)
     _server.register("settings.set", settings_set)
+    _server.register("system.setAutostart", system_set_autostart)
     _server.register("workspace.status", workspace_status)
     _server.register("models.routes", models_routes)
     _server.register("models.catalog", models_catalog)
@@ -3149,10 +4273,16 @@ def _register_default_handlers():
     # Phase 5 Code engine
     _server.register("code.bind", code_bind)
     _server.register("code.read", code_read)
+    _server.register("code.plan", code_plan)
     _server.register("code.edit", code_edit)
     _server.register("code.apply", code_apply)
+    _server.register("code.applyPlan", code_apply_plan)
     _server.register("code.write", code_write)
     _server.register("code.grep", code_grep)
+    _server.register("code.git.status", code_git_status)
+    _server.register("code.git.diff", code_git_diff)
+    _server.register("code.git.revert", code_git_revert)
+    _server.register("code.verify", code_verify)
 
     # Guide page: which features are usable here (no strings, no secrets)
     _server.register("guide.status", guide_status)
@@ -3162,6 +4292,14 @@ def _register_default_handlers():
     _server.register("swarm.list", swarm_list)
     _server.register("swarm.run", swarm_run)
     _server.register("swarm.stop", swarm_stop)
+    _server.register("swarm.flow", swarm_flow)
+    _server.register("swarm.memory", swarm_memory)
+    _server.register("swarm.roster", swarm_roster)
+    _server.register("swarm.define", swarm_define)
+    _server.register("swarm.forget", swarm_forget)
+    _server.register("swarm.restore", swarm_restore)
+    _server.register("swarm.revise", swarm_revise)
+    _server.register("swarm.notes", swarm_notes)
 
     # Phase 5 Calendar & Email
     _server.register("calendar.add", calendar_add)
@@ -3205,6 +4343,8 @@ def _register_default_handlers():
     _server.register("browser.status", browser_status)
     _server.register("browser.task", browser_task)
     _server.register("browser.installApprove", browser_install_approve)
+    _server.register("browser.installStatus", browser_install_status)
+    _server.register("browser.installNow", browser_install_now)
     _server.register("localLlm.status", localllm_status)
     _server.register("localLlm.installApprove", localllm_install)
     _server.register("localLlm.installDecline", localllm_decline)
@@ -3252,6 +4392,8 @@ def _register_default_handlers():
     _server.register("memory.related", memory_related)
     _server.register("memory.files", memory_files)
     _server.register("memory.pruneLinks", memory_prune_links)
+    _server.register("memory.health", memory_health)
+    _server.register("memory.reembed", memory_reembed)
     _server.register("wiki.list", wiki_list)
     _server.register("wiki.get", wiki_get)
     _server.register("wiki.save", wiki_save)

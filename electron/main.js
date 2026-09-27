@@ -4,7 +4,7 @@
 'use strict';
 
 const { app, BrowserWindow, shell, ipcMain, dialog, screen, Tray, Menu, nativeImage } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
@@ -59,6 +59,46 @@ const BACKEND_DIR = isDev
 const DASHBOARD_DIR = isDev
   ? path.join(ROOT_DIR, 'dashboard')
   : path.join(process.resourcesPath, 'dashboard');
+
+// The bundled llamafile server that the backend starts on demand. It holds
+// several gigabytes of VRAM/RAM, so it must never outlive the app.
+const LLAMAFILE_EXE = path.join(BACKEND_DIR, 'memory', 'models', 'llamafile',
+                                'llamafile.exe');
+
+/**
+ * Kill any running bundled llamafile server.
+ *
+ * `pythonProcess.kill()` is a hard terminate on Windows: the backend is given
+ * no chance to run its own `local_llm.stop()`, so the model server it spawned
+ * survived every app exit. A leftover held ~5.8 GB of VRAM for hours with no
+ * window open to explain it, and the only cleanup was `_reap_orphans()` at the
+ * NEXT startup.
+ *
+ * Matching is by image path, so an unrelated llamafile the user runs from
+ * somewhere else is left alone. This is best-effort and synchronous on
+ * purpose: there is no time for async work in `before-quit`.
+ */
+function killLlamafile() {
+  if (process.platform !== 'win32') return;
+  try {
+    // Only processes whose image is exactly our bundled runtime are hit.
+    const find = spawnSync('powershell', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      'Get-CimInstance Win32_Process -Filter "Name=\'llamafile.exe\'" | ' +
+      'Where-Object { $_.ExecutablePath -eq $env:ADDLED_LF } | ' +
+      'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }',
+    ], {
+      timeout: 8000,
+      env: { ...process.env, ADDLED_LF: LLAMAFILE_EXE },
+      windowsHide: true,
+    });
+    if (find.error) {
+      console.log('[Addled] llamafile cleanup error:', find.error.message);
+    }
+  } catch (e) {
+    console.log('[Addled] llamafile cleanup failed:', e.message);
+  }
+}
 
 // In packaged mode, resolve Python from bundled resources or common install locations
 function resolvePython() {
@@ -518,7 +558,9 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   app.isQuitting = true;
 
-  // Cleanup child processes
+  // Cleanup child processes. NOTE: `kill()` is immediate and permits no
+  // cleanup in the child, so the backend cannot stop the model server it
+  // started — that has to happen here. See killLlamafile().
   if (pythonProcess) {
     pythonProcess.kill();
     pythonProcess = null;
@@ -527,6 +569,7 @@ app.on('before-quit', () => {
     nextProcess.kill();
     nextProcess = null;
   }
+  killLlamafile();
 });
 
 app.on('activate', () => {
