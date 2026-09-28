@@ -488,6 +488,14 @@ DEFAULT_SETTINGS: dict = {
         "meeting_auto_sleep": True,
         "gaming_auto_sleep": True,
         "away_timeout_minutes": 5,
+        # Names the user has granted standing permission to, so a skill or tool
+        # that normally asks does not ask again. Answered once from the approval
+        # card ("Always allow") or from the switch on the skill/tool card, and
+        # revoked the same way. Names the destruction gate owns are refused by
+        # `backend/approvals/policy.py` rather than listed here — a destructive
+        # shell command and `delete_file` ask every time, by design, and no
+        # amount of clicking can put them in this list.
+        "always_allow": {"skills": [], "tools": []},
     },
     "observation": {
         "light_interval_s": 5,

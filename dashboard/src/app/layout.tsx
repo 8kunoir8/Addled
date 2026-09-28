@@ -4,6 +4,11 @@ import { useWS } from '@/lib/useWS';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState, useEffect } from 'react';
+import {
+  getApprovals, addApproval, addApprovals, subscribeApprovals,
+  subscribeApprovalErrors, makeAnswers, type ApprovalRequest,
+} from '@/lib/approvalsStore';
+import ApprovalCard from '@/components/ApprovalCard';
 import "./globals.css";
 
 const NAV_ITEMS = [
@@ -45,11 +50,60 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [browserPrompt, setBrowserPrompt] = useState<string | null>(null);
   const [localPrompt, setLocalPrompt] = useState<any>(null);
   const [localProgress, setLocalProgress] = useState<any>(null);
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>(getApprovals);
+  const [approvalErrors, setApprovalErrors] =
+    useState<Record<string, string>>({});
 
   // Desktop-control permission request from the backend
   useEffect(() => onNotification('desktop.permissionRequest', () => {
     setDesktopPrompt(true);
   }), [onNotification]);
+
+  // A skill or tool is waiting on the user's permission.
+  //
+  // The layout owns this subscription because it is the only component that is
+  // always mounted, and `onNotification` keeps exactly one handler per method:
+  // a page-level subscriber would be replaced the moment another page mounted,
+  // and a request raised in that gap would be lost. Pages read the store.
+  useEffect(() => onNotification('action.approvalRequest', (p: any) => {
+    if (!p?.approval_id) return;
+    addApproval({
+      approval_id: p.approval_id,
+      action_type: p.action_type || '',
+      kind: p.kind || 'action',
+      name: p.name || p.action_type || 'a tool',
+      grantable: Boolean(p.grantable),
+      command: p.command || '',
+    });
+  }), [onNotification]);
+
+  useEffect(() => subscribeApprovals(setApprovals), []);
+  useEffect(() => subscribeApprovalErrors(setApprovalErrors), []);
+
+  // Answer a request the same way the chat card does, so the two surfaces
+  // cannot drift: `makeAnswers` in the store is the one place that decides what
+  // "Allow once" and "Always allow" send, and that the card is dropped only
+  // once the backend confirms.
+  const answer = makeAnswers(send);
+
+  // A request raised before the dashboard was open is not broadcast again, so
+  // the list is re-read on every connect. This is the same recovery the local
+  // model prompt uses, and for the same reason.
+  useEffect(() => {
+    if (wsState !== 'connected') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await send('approvals.list', {});
+        if (cancelled) return;
+        const restored = (r?.pending || []).filter((p: any) => p?.approval_id);
+        addApprovals(restored);
+      } catch {
+        /* nothing pending, or an older backend without the method */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [wsState, send]);
 
   // Browser backend auto-install request
   useEffect(() => onNotification('browser.installRequest', (p: any) => {
@@ -141,6 +195,30 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <main className="flex-1 overflow-hidden flex flex-col">
           {children}
         </main>
+
+        {/* Permission request, for pages that are not the chat.
+            The chat renders its own copy in the message stream, next to the
+            turn that asked, so showing this there as well would ask twice. */}
+        {pathname !== '/chat' && approvals.length > 0 && (
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm">
+            {approvals.slice(0, 3).map((req) => (
+              <ApprovalCard
+                key={req.approval_id}
+                request={req}
+                compact
+                error={approvalErrors[req.approval_id]}
+                onAllow={answer(req).allow}
+                onAlwaysAllow={answer(req).always}
+                onDeny={answer(req).deny}
+              />
+            ))}
+            {approvals.length > 3 && (
+              <p className="text-[10px] text-[#8b949e] text-right">
+                +{approvals.length - 3} more waiting
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Desktop-control permission prompt */}
         {desktopPrompt && (

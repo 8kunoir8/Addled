@@ -205,9 +205,42 @@ async def main():
         check("trusted schema drops confirm",
               "confirm" not in ((skill_registry.get(
                   f"mcp__{SID}__echo").parameters.get("properties")) or {}))
+        # The tool card reads these to decide whether to offer a switch. A
+        # trusted server never asks, so the switch must not be offered — an
+        # inert control reads as "you can allow this" and is a lie.
+        trusted_tools = mcp_manager.server_status(SID).get("tools") or []
+        check("a trusted server reports its tools as not grantable",
+              trusted_tools and all(t.get("grantable") is False
+                                    for t in trusted_tools),
+              str(trusted_tools)[:200])
         mcp_manager.update(SID, {"trusted": False})
         approval.revoke(SID)
         check("revoking clears approvals", approval.approved_list() == [])
+
+        # ---- 5b. a standing tool approval survives losing the session ----
+        untrusted_tools = mcp_manager.server_status(SID).get("tools") or []
+        check("an untrusted server reports its tools as grantable",
+              untrusted_tools and all(t.get("grantable") is True
+                                      for t in untrusted_tools),
+              str(untrusted_tools)[:200])
+        check("and none of them standing before a grant",
+              all(t.get("standing") is False for t in untrusted_tools),
+              str(untrusted_tools)[:200])
+
+        approval.approve_always(SID, "echo")
+        after = {t["name"]: t for t in
+                 (mcp_manager.server_status(SID).get("tools") or [])}
+        check("a standing grant shows on the tool card",
+              after.get("echo", {}).get("standing") is True,
+              str(after.get("echo"))[:200])
+        check("and is reported without the session set",
+              (approval._approved.clear() or True)
+              and approval.is_approved(SID, "echo") is True,
+              "the standing half was not consulted")
+        approval.revoke(SID, "echo")
+        check("revoking the tool clears the standing grant",
+              approval.is_standing(SID, "echo") is False,
+              "the standing grant survived")
 
         # ---- 6. timeout -------------------------------------------------
         mcp_manager.update(SID, {"timeout_s": 1})

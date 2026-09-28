@@ -10,6 +10,42 @@ const fs = require('fs');
 const WS_URL = process.env.ADDLED_WS_URL || 'ws://127.0.0.1:9876';
 const AUTH_DIR = process.env.WHATSAPP_AUTH_DIR || path.join(__dirname, 'auth', 'whatsapp');
 
+// WhatsApp has no interactive buttons — Baileys cannot send the tappable
+// replies Telegram and Discord have. So the answer is a *word*: the request is
+// sent as text, and the next message in that chat is read as the decision.
+//
+// Only these exact words count. "yes but also delete the other one" must not
+// be mistaken for consent, and anything unrecognised falls through to being a
+// normal message to Addled.
+const YES = new Set(['yes', 'y', 'allow', 'ok', 'okay', 'sure', 'approve']);
+const ALWAYS = new Set(['always', 'always allow', 'always-allow', 'allow always']);
+const NO = new Set(['no', 'n', 'deny', 'denied', 'cancel', 'stop', 'reject']);
+
+// What a chat was last asked to decide, so the reply finds the request it
+// belongs to. Keyed by chat, because the answer belongs to the conversation
+// that asked — never to whichever request happens to be first in the queue.
+const waiting = new Map();
+
+function classifyReply(text) {
+  const clean = String(text || '').trim().toLowerCase().replace(/[.!]+$/, '');
+  if (ALWAYS.has(clean)) return 'always';
+  if (YES.has(clean)) return 'allow';
+  if (NO.has(clean)) return 'deny';
+  return null;
+}
+
+function approvalPrompt(req) {
+  const what = req?.kind === 'tool' ? 'tool' : req?.kind === 'skill' ? 'skill' : 'action';
+  const lines = ['🔐 Permission needed',
+                 `The ${what} "${req?.name || req?.action_type || 'action'}" needs your approval.`];
+  if (req?.command) lines.push('', String(req.command).slice(0, 300));
+  const answers = req?.grantable
+    ? 'Reply "yes" to allow once, "always" to stop it asking, or "no" to deny.'
+    : 'Reply "yes" to allow once, or "no" to deny.';
+  lines.push('', answers);
+  return lines.join('\n');
+}
+
 async function main() {
   // Connect to Addled backend
   const ws = new AddledWSClient(WS_URL);
@@ -71,8 +107,55 @@ async function main() {
           if (!mentioned.includes(botId)) return;
         }
         await sock.sendPresenceUpdate('composing', sender);
+        // A decision on something this chat was asked about takes priority
+        // over starting a new turn — otherwise the word "yes" becomes a fresh
+        // question to the model and the request it was answering is abandoned.
+        const held = waiting.get(sender);
+        if (held) {
+          const verdict = classifyReply(text);
+          if (verdict) {
+            waiting.delete(sender);
+            try {
+              let outcome;
+              if (verdict === 'always') {
+                // The name is not sent; the backend resolves it from its own
+                // record of this approval, so it cannot be altered in transit.
+                const r = await ws.send('approvals.alwaysAllow',
+                  { approvalId: held.approval_id });
+                outcome = r?.success
+                  ? '♾️ Always allowed — it will not ask again.'
+                  : `⚠️ ${r?.error || 'Could not save that.'}`;
+              } else if (verdict === 'allow') {
+                const r = await ws.send('action.approve',
+                  { approvalId: held.approval_id });
+                outcome = r?.success
+                  ? '✅ Allowed — running it now.'
+                  : `⚠️ ${r?.error || 'It is no longer waiting.'}`;
+              } else {
+                const r = await ws.send('action.deny',
+                  { approvalId: held.approval_id });
+                outcome = r?.success
+                  ? '⛔ Denied — it was not run.'
+                  : `⚠️ ${r?.error || 'It is no longer waiting.'}`;
+              }
+              await sock.sendMessage(sender, { text: outcome }, { quoted: msg });
+            } catch (e) {
+              await sock.sendMessage(sender,
+                { text: '⚠️ Failed: ' + e.message }, { quoted: msg });
+            }
+            return;
+          }
+          // Anything else is a new question. Drop the held request so a stale
+          // one cannot be answered by a word typed minutes later.
+          waiting.delete(sender);
+        }
         try {
-          const r = await ws.send('chat.send', { message: text });
+          // `source` labels the turn on the chat page, and `conversation` is
+          // what lets an approval be answered from this chat — by this word or
+          // by another.
+          const r = await ws.send('chat.send', {
+            message: text, source: 'whatsapp', conversation: String(sender),
+          });
           const response = r?.response || 'No response';
           const max = 4000;
           if (response.length <= max) {
@@ -80,6 +163,12 @@ async function main() {
           } else {
             for (let i = 0; i < response.length; i += max)
               await sock.sendMessage(sender, { text: response.slice(i, i + max) });
+          }
+          const pending = Array.isArray(r?.pendingApprovals) ? r.pendingApprovals : [];
+          if (pending[0]?.approval_id) {
+            waiting.set(sender, pending[0]);
+            await sock.sendMessage(sender,
+              { text: approvalPrompt(pending[0]) }, { quoted: msg });
           }
         } catch (e) {
           await sock.sendMessage(sender, { text: '\u2757 Addled: ' + e.message }, { quoted: msg });

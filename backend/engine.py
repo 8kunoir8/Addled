@@ -15,6 +15,7 @@ from enum import Enum, auto
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from backend import chat_sources
 from backend.config import config
 
 log = logging.getLogger("addled.engine")
@@ -343,6 +344,7 @@ class Engine(QObject):
                 "role": "assistant",
                 "content": f"💡 {text}",
                 "insight": True,
+                **chat_sources.describe("character"),
             })
         except Exception as e:
             log.warning("Insight chat.push failed: %s", e)

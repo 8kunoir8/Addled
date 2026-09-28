@@ -77,6 +77,34 @@ class SwarmAgent:
             log.debug("could not compose the persona for %s: %s", self.name, e)
             return self.system_prompt
 
+    def _note_progress(self, task: str, output: str, flow: str = "") -> None:
+        """Save what this agent just did to its own notebook. Never raises.
+
+        The notebook is durable and per-agent, so it is what lets a desk
+        remember its own work across a restart rather than being a stranger to
+        its own plan.
+        """
+        try:
+            from backend.swarm import notebook
+            notebook.record(self.id, name=self.name, task=task, output=output,
+                            flow=flow)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not write the notebook for %s: %s", self.name, e)
+
+    def remember(self) -> str:
+        """What this agent has done before, for its next task.
+
+        Its own history only. An agent being handed every other agent's work is
+        what made the old shared blackboard hard to reason about; a desk that
+        knows its own record is the thing that was missing.
+        """
+        try:
+            from backend.swarm import notebook
+            return notebook.digest(self.id, self.name)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read the notebook for %s: %s", self.name, e)
+            return ""
+
     def _resolve_provider(self, handed):
         """The provider this agent should run on.
 
@@ -165,6 +193,12 @@ class SwarmAgent:
                     "tools": (result or {}).get("toolResults", 0),
                     "timestamp": time.time(),
                 })
+                # Write to this agent's own notebook the moment the work is
+                # done, not at the end of the flow. A run that is killed
+                # mid-way is exactly the case the notebook exists for, and one
+                # that only saved on completion would lose the very steps that
+                # had already succeeded.
+                self._note_progress(task, text)
                 self.status = "ready"
                 self.current_task = None
                 return {"success": True, "response": text, "agent": self.name,
@@ -424,6 +458,108 @@ class SwarmOrchestrator:
         self._memory.clear()
         return count
 
+    # -- flow checkpoints ----------------------------------------------------
+    #
+    # A flow is the longest-running thing in the app and had no durability: an
+    # interrupted one lost every finished step, because progress lived in local
+    # variables. These three write it down instead, and `resume_flow` picks it
+    # up. Each is best-effort — a checkpoint that cannot be written must not
+    # stop the flow it is describing.
+
+    @staticmethod
+    def _checkpoint_start(flow_id: str, goal: str, steps: list[dict]) -> None:
+        try:
+            from backend.swarm import checkpoints
+            checkpoints.start(flow_id, goal, steps)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not open a checkpoint for %s: %s", flow_id, e)
+
+    @staticmethod
+    def _checkpoint_save(flow_id: str, finished, skipped, done) -> None:
+        try:
+            from backend.swarm import checkpoints
+            checkpoints.progress(flow_id,
+                                 finished=list(finished),
+                                 skipped=list(skipped),
+                                 done=list(done))
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not update the checkpoint for %s: %s", flow_id, e)
+
+    @staticmethod
+    def _checkpoint_done(flow_id: str) -> None:
+        try:
+            from backend.swarm import checkpoints
+            checkpoints.complete(flow_id)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not close the checkpoint for %s: %s", flow_id, e)
+
+    def resumable_flows(self) -> list[dict]:
+        """Flows that were interrupted and still have steps to run."""
+        try:
+            from backend.swarm import checkpoints
+            return checkpoints.resumable()
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not list resumable flows: %s", e)
+            return []
+
+    async def resume_flow(self, flow_id: str, provider=None) -> dict:
+        """Carry on an interrupted flow from where it stopped.
+
+        The finished steps are replayed from the checkpoint rather than rerun —
+        that work cost model calls and its results are recorded — and only the
+        unfinished ones execute. A flow with nothing left to do is reported as
+        already complete rather than started again.
+        """
+        try:
+            from backend.swarm import checkpoints
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": f"checkpoints unavailable: {e}"}
+
+        data = checkpoints.load(flow_id)
+        if data is None:
+            return {"success": False,
+                    "error": f"No checkpoint for {flow_id}."}
+
+        steps = data.get("steps") or []
+        finished = sorted(int(s) for s in data.get("finished") or [])
+        skipped = sorted(int(s) for s in data.get("skipped") or [])
+        prior_done = data.get("done") or []
+        goal = str(data.get("goal") or "")
+
+        remaining = [p for p in range(1, len(steps) + 1)
+                     if p not in finished and p not in skipped]
+        if not remaining:
+            checkpoints.complete(flow_id)
+            return {"success": True, "flowId": flow_id, "resumed": False,
+                    "steps": prior_done,
+                    "message": "That flow had already finished."}
+
+        # The agents a step names have to exist before it can run. A resumed
+        # flow whose desks were removed is reported plainly rather than failing
+        # on the first step with an unclear error.
+        missing = [s.get("agentId") for s in steps
+                   if str(s.get("agentId") or "") not in self._agents]
+        if missing:
+            return {"success": False, "flowId": flow_id,
+                    "error": ("These agents no longer exist, so the flow "
+                              "cannot continue: "
+                              + ", ".join(sorted({str(m) for m in missing})))}
+
+        log.info("Resuming flow %s: %d of %d step(s) already done",
+                 flow_id, len(finished), len(steps))
+        result = await self.run_flow(steps, provider=provider, goal=goal)
+        if isinstance(result, dict):
+            # `run_flow` opens a fresh checkpoint under a new id, so the old one
+            # is closed here or it would be offered to resume forever.
+            checkpoints.complete(flow_id)
+            result["resumed"] = True
+            result["resumedFrom"] = flow_id
+            # The replayed steps belong in the answer: a caller reading it
+            # should see the whole flow, not only the part that just ran.
+            if prior_done:
+                result["steps"] = prior_done + list(result.get("steps") or [])
+        return result
+
     # -- mid-flight notes ----------------------------------------------------
     #
     # The transcript above only carries FINISHED steps. Two agents working the
@@ -514,6 +650,17 @@ class SwarmOrchestrator:
         if goal:
             parts.append(f"Overall goal: {goal}")
         parts.append(f"Your step ({index} of {total}): {step['task']}")
+        # This desk's own history first. It is what the agent was missing when
+        # every agent shared one blackboard: an agent would be told what the
+        # others did and nothing about what it had done itself.
+        try:
+            own = self._agents[step["agentId"]].remember()
+        except Exception:  # noqa: BLE001
+            own = ""
+        if own:
+            parts.append("Your own record from previous work. This is what you "
+                         "did, not what the others did — carry it forward:\n\n"
+                         + own)
         if extra_context:
             # Another agent is working this same step in parallel. Saying so is
             # what stops two agents writing the same thing twice.
@@ -843,6 +990,11 @@ class SwarmOrchestrator:
         goal = str(goal or "").strip()
         total = len(normalised)
         concurrent = not self._single_generation_provider(provider)
+        # A flow is the longest-running thing in the app — minutes of model
+        # calls across several agents — and its progress lived only in these
+        # local variables. Opening a checkpoint means an interrupted run leaves
+        # something behind to carry on from.
+        self._checkpoint_start(flow_id, goal, normalised)
         # Notes are for coordination inside one flow. Starting clean means a
         # note from a previous run cannot arrive as if it were about this one.
         self.clear_notes()
@@ -926,6 +1078,10 @@ class SwarmOrchestrator:
             done.extend(outcome["entries"])
             finished.update(outcome["finished"])
             skipped.extend(outcome["skipped"])
+            # After the wave, not during it: a wave is the unit of progress a
+            # resume can act on, and writing mid-wave would record steps whose
+            # peers had not finished.
+            self._checkpoint_save(flow_id, finished, skipped, done)
             jump_to = None
 
             if outcome.get("failure"):
@@ -1012,6 +1168,8 @@ class SwarmOrchestrator:
                 jump_to = target
                 break
 
+        # Reached the end, so there is nothing left to resume.
+        self._checkpoint_done(flow_id)
         return {
             "success": True,
             "flowId": flow_id,

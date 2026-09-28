@@ -8,6 +8,62 @@ const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const WS_URL = process.env.ADDLED_WS_URL || 'ws://127.0.0.1:9876';
 const ALLOWED_CHANNELS = (process.env.DISCORD_ALLOWED_CHANNELS || '').split(',').filter(Boolean);
 
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+
+// How a pending approval reads in the channel. Mirrors the dashboard card.
+function approvalPrompt(req) {
+  const what = req?.kind === 'tool' ? 'tool' : req?.kind === 'skill' ? 'skill' : 'action';
+  const lines = [`🔐 **Permission needed**`,
+                 `The ${what} \`${req?.name || req?.action_type || 'action'}\` needs your approval.`];
+  if (req?.command) lines.push('', `\`\`\`\n${String(req.command).slice(0, 300)}\n\`\`\``);
+  if (!req?.grantable) {
+    lines.push('', '_This one always asks first, so it cannot be remembered._');
+  }
+  return lines.join('\n');
+}
+
+// One row of buttons for the first pending request. A second request waits for
+// the next turn: two rows in one channel invites approving the wrong thing.
+function approvalRow(pending) {
+  const first = Array.isArray(pending) ? pending[0] : null;
+  if (!first?.approval_id) return null;
+  const id = String(first.approval_id).slice(0, 90);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`ap:${id}`).setLabel('Allow once')
+      .setStyle(ButtonStyle.Primary),
+  );
+  if (first.grantable) {
+    row.addComponents(
+      new ButtonBuilder().setCustomId(`al:${id}`).setLabel('Always allow')
+        .setStyle(ButtonStyle.Secondary));
+  }
+  row.addComponents(
+    new ButtonBuilder().setCustomId(`dn:${id}`).setLabel('Deny')
+      .setStyle(ButtonStyle.Danger));
+  return row;
+}
+
+// The shared answer path, used by the button handler. Kept in one function so
+// the three verbs cannot drift apart.
+async function answerApproval(ws, verb, approvalId) {
+  if (verb === 'al') {
+    // The name is not in the button; the backend resolves it from its record
+    // of this approval, so it cannot be altered in transit.
+    const r = await ws.send('approvals.alwaysAllow', { approvalId });
+    return r?.success
+      ? '♾️ Always allowed — it will not ask again.'
+      : `⚠️ ${r?.error || 'Could not save that.'}`;
+  }
+  if (verb === 'ap') {
+    const r = await ws.send('action.approve', { approvalId });
+    return r?.success ? '✅ Allowed — running it now.'
+      : `⚠️ ${r?.error || 'It is no longer waiting.'}`;
+  }
+  const r = await ws.send('action.deny', { approvalId });
+  return r?.success ? '⛔ Denied — it was not run.'
+    : `⚠️ ${r?.error || 'It is no longer waiting.'}`;
+}
+
 async function main() {
   if (!DISCORD_TOKEN) {
     console.error('[Discord] DISCORD_BOT_TOKEN environment variable is required.');
@@ -59,6 +115,24 @@ async function main() {
 
   // Handle slash commands
   client.on('interactionCreate', async (interaction) => {
+    // A button before anything else. This handler used to return immediately
+    // for anything that was not a chat-input command, which would have made an
+    // approval button do nothing at all.
+    if (interaction.isButton()) {
+      const [verb, approvalId] = String(interaction.customId || '').split(':');
+      if (!approvalId || !['ap', 'al', 'dn'].includes(verb)) return;
+      // Reply inside Discord's 3-second window, then edit with the outcome.
+      await interaction.deferUpdate().catch(() => {});
+      try {
+        const outcome = await answerApproval(ws, verb, approvalId);
+        await interaction.editReply({ content: outcome, components: [] });
+      } catch (e) {
+        await interaction.editReply({
+          content: `⚠️ Failed: ${e.message}`, components: [],
+        }).catch(() => {});
+      }
+      return;
+    }
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
@@ -75,17 +149,34 @@ async function main() {
           interaction.editReply(`\uD83E\uDD14 Thinking... (${elapsed}s)`).catch(() => {});
         }, 15000);
         try {
-          const r = await ws.send('chat.send', { message });
+          // `source` is what the chat page labels the bubble with, and
+          // `conversation` is what lets an approval be answered from *this*
+          // channel rather than any other. The backend announces the turn to
+          // every other surface, so a message asked here appears in the app.
+          const r = await ws.send('chat.send', {
+            message,
+            source: 'discord',
+            conversation: String(interaction.channelId || ''),
+          });
           const response = r?.response || 'No response';
           clearInterval(ticker);
+          const pending = Array.isArray(r?.pendingApprovals) ? r.pendingApprovals : [];
+          const row = approvalRow(pending);
           if (response.length <= 2000) {
-            await interaction.editReply(response);
+            await interaction.editReply(row
+              ? { content: response, components: [row] }
+              : { content: response });
           } else {
             await interaction.editReply(response.slice(0, 1997) + '...');
             // Send rest as follow-up
             for (let i = 1997; i < response.length; i += 2000) {
               await interaction.followUp(response.slice(i, i + 2000));
             }
+          }
+          if (row) {
+            await interaction.followUp({
+              content: approvalPrompt(pending[0]), components: [row],
+            });
           }
         } catch (e) {
           clearInterval(ticker);
@@ -153,16 +244,29 @@ async function main() {
 
     await msg.channel.sendTyping();
     try {
-      const r = await ws.send('chat.send', { message: text });
+      const r = await ws.send('chat.send', {
+        message: text,
+        source: 'discord',
+        conversation: String(msg.channelId || ''),
+      });
       const response = r?.response || 'No response';
+      const pending = Array.isArray(r?.pendingApprovals) ? r.pendingApprovals : [];
+      const row = approvalRow(pending);
       if (response.length <= 2000) {
-        await msg.reply(response);
+        await msg.reply(row
+          ? { content: response, components: [row] }
+          : { content: response });
       } else {
         await msg.reply(response.slice(0, 1997) + '...');
         const channel = msg.channel;
         for (let i = 1997; i < response.length; i += 2000) {
           await channel.send(response.slice(i, i + 2000));
         }
+      }
+      if (row) {
+        await msg.channel.send({
+          content: approvalPrompt(pending[0]), components: [row],
+        });
       }
     } catch (e) {
       await msg.reply(`\u2757 Addled: ${e.message}`);

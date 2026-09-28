@@ -15,9 +15,18 @@ from dataclasses import dataclass, field
 log = logging.getLogger("addled.executor")
 
 # How long an in-band approval stays queued while a chat turn waits on it.
-# Short on purpose: past this the turn is told it is still pending rather than
-# leaving the conversation looking hung.
-APPROVAL_WAIT_S = 60.0
+#
+# This is a wait the *turn* is willing to do, not a deadline for the user. When
+# it elapses the turn is told the request is still pending rather than being
+# left to look hung, and the request stays in `_pending_approvals` so it can
+# still be answered from the dashboard — `approve()` runs it directly when no
+# waiter is active.
+#
+# Raised from 60s because a local model routinely takes longer than that to
+# produce the turn that follows a tool call, so the approval card could be
+# raised and expire before it was ever rendered. The user is not slow; the
+# turn they are answering is.
+APPROVAL_WAIT_S = 180.0
 
 
 @dataclass
@@ -95,6 +104,7 @@ class ActionExecutor:
         request = self._pending_approvals.pop(approval_id, None)
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
+        self._forget_origin(approval_id)
         # A chat turn may be blocked on this decision. Wake it so the command
         # runs on that turn rather than being executed a second time here.
         waiter = self._resolve_waiter(approval_id, "approved")
@@ -116,6 +126,7 @@ class ActionExecutor:
         request = self._pending_approvals.pop(approval_id, None)
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
+        self._forget_origin(approval_id)
         self._resolve_waiter(approval_id, None)
         return ActionResult(True, request.action_type, summary="Action denied by user",
                             data={"approval_id": approval_id})
@@ -158,6 +169,7 @@ class ActionExecutor:
         self._approval_counter += 1
         approval_id = f"appr_{self._approval_counter}"
         self._pending_approvals[approval_id] = request
+        self._note_origin(approval_id, request)
         try:
             self._broadcast_approval_request(approval_id, request)
         except Exception as e:  # noqa: BLE001
@@ -184,7 +196,7 @@ class ActionExecutor:
             # is still queued.  Previously this `finally` deleted it on
             # every exit, including timeout, which made the dashboard's
             # Approve button return "No pending approval" for anything the
-            # agent asked about more than 60 seconds ago.
+            # agent asked about longer ago than the wait window.
             return ActionResult(False, action_type,
                 error=f"'{params.get('command', action_type)}' needs your "
                       f"approval before it can run. Approve it in the "
@@ -216,9 +228,43 @@ class ActionExecutor:
         if not self._gate:
             return False
         try:
-            return bool(self._gate.requires_approval(action_type, params))
+            if not self._gate.requires_approval(action_type, params):
+                return False
         except Exception as e:  # noqa: BLE001
             log.debug("gate classification failed: %s", e)
+            return False
+        # The gate says this would ask. The user may have already said yes for
+        # good — a granted name skips the prompt, which is the whole point of
+        # "Always allow". The policy refuses the names the gate owns, so this
+        # can only ever short-circuit the ones that are safe to remember.
+        if self._is_granted(action_type, params):
+            return False
+        return True
+
+    @staticmethod
+    def _is_granted(action_type: str, params: dict) -> bool:
+        """Has the user granted this action standing permission?
+
+        Never raises: a policy that cannot be read must mean "ask", not
+        "proceed" — the same direction the skill registry takes.
+        """
+        try:
+            from backend.approvals import policy
+        except Exception as e:  # noqa: BLE001
+            log.debug("approval policy unavailable: %s", e)
+            return False
+        try:
+            if policy.is_always_allowed(policy.SKILL, action_type):
+                return True
+            # A destructive command carried on a non-destructive action type
+            # still has to be recognised, so the gate's content check is
+            # repeated here rather than trusted to the caller's action name.
+            name = str(params.get("command", "")).strip() if params else ""
+            if name and policy.is_always_allowed(policy.TOOL, name):
+                return True
+            return False
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read the approval policy: %s", e)
             return False
 
     async def request_approval(self, action_type: str, params: dict):
@@ -238,12 +284,18 @@ class ActionExecutor:
         action itself. The `_gate` is bypassed deliberately — the caller has
         already decided this needs approval, and re-asking the gate could
         disagree with the `requires_approval` flag that got us here.
+
+        A name the user has granted standing permission is answered `True`
+        before anything is queued, which is what makes "Always allow" stick.
         """
         self._lazy_init()
+        if self._is_granted(action_type, params or {}):
+            return True
         request = ActionRequest(action_type=action_type, params=params or {})
         self._approval_counter += 1
         approval_id = f"appr_{self._approval_counter}"
         self._pending_approvals[approval_id] = request
+        self._note_origin(approval_id, request)
         try:
             self._broadcast_approval_request(approval_id, request)
         except Exception as e:  # noqa: BLE001
@@ -273,13 +325,92 @@ class ActionExecutor:
                                 "can run. Approve it in the dashboard and ask "
                                 "again.")}
         self._pending_approvals.pop(approval_id, None)
+        try:
+            from backend.approvals import pending as _pending_origins
+            _pending_origins.forget(approval_id)
+        except Exception:  # noqa: BLE001
+            pass
         return verdict == "approved"
+
+    async def resolve_by_conversation(self, source: object, conversation: object):
+        """The approval a chat conversation is waiting on, oldest first.
+
+        A bot answers with a typed "yes", which has no id in it. This is how
+        that answer finds the request *its own chat* raised, rather than
+        whichever request happened to be queued first.
+        """
+        try:
+            from backend.approvals import pending as _pending_origins
+            found = _pending_origins.for_conversation(source, conversation)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not look up approvals for a conversation: %s", e)
+            return None
+        for entry in found:
+            ident = entry.get("approval_id")
+            # Only one that is still genuinely queued, so a stale record
+            # cannot be answered into nothing.
+            if ident and ident in self._pending_approvals:
+                return entry
+        return None
 
     @staticmethod
     def _broadcast_approval_request(approval_id: str, request: ActionRequest) -> None:
         """Tell the dashboard a decision is waiting, so it can be answered."""
         from backend.actions import approval_notice
         approval_notice.publish(approval_id, request.action_type, request.params)
+
+    @staticmethod
+    def _note_origin(approval_id: str, request: ActionRequest) -> None:
+        """Record which conversation asked, so only it can answer.
+
+        Never raises. An approval with no recorded origin is still answerable
+        from the dashboard by id — the id is what a card carries — but it
+        cannot be answered by a chat message, which is the safe direction: a
+        missing record means "not answerable from a chat", not "anyone may".
+        """
+        try:
+            from backend.approvals import pending
+            from backend import chat_context
+            params = request.params or {}
+            # The tool's own arguments do not name the chat that asked, so the
+            # turn's origin is read from the context it was set in. The params
+            # are still checked first: a caller that supplies an explicit
+            # conversation is more specific than the ambient one.
+            ambient = chat_context.origin()
+            kind = "action"
+            try:
+                from backend.actions import approval_notice
+                kind = approval_notice._classify(request.action_type)
+            except Exception:  # noqa: BLE001
+                pass
+            grantable = False
+            try:
+                from backend.actions import approval_notice
+                grantable = approval_notice._grantable(request.action_type)
+            except Exception:  # noqa: BLE001
+                pass
+            pending.record(
+                approval_id,
+                source=params.get("source") or ambient.get("source"),
+                conversation=(params.get("conversation")
+                              or params.get("conversationId")
+                              or ambient.get("conversation")),
+                action_type=request.action_type,
+                kind=kind,
+                grantable=grantable,
+                command=str(params.get("command") or ""),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not note the origin of %s: %s", approval_id, e)
+
+    @staticmethod
+    def _forget_origin(approval_id: str) -> None:
+        """Drop the origin once an approval is answered or denied."""
+        try:
+            from backend.approvals import pending
+            pending.forget(approval_id)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not forget the origin of %s: %s", approval_id, e)
 
     async def execute(self, request: ActionRequest) -> ActionResult:
         """Main entry point. All actions go through this pipeline."""

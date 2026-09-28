@@ -23,6 +23,9 @@ log = logging.getLogger("addled.mcp")
 
 CONFIRM_PARAM = "confirm"
 
+# Names approved this session. Kept as a set because it is the fast path read on
+# every tool call, and because a session approval is deliberately cheaper than a
+# standing one: it costs nothing to read and disappears on restart.
 _approved: set[str] = set()
 
 
@@ -30,26 +33,111 @@ def _key(server_id: str, tool: str) -> str:
     return f"{server_id}::{tool}"
 
 
+def key(server_id: str, tool: str) -> str:
+    """The stored spelling of one tool's approval, for callers that need it.
+
+    Public because the dashboard hands the key back when revoking, and the
+    value has to match what `is_approved` looks up or the revoke silently does
+    nothing.
+    """
+    return _key(server_id, tool)
+
+
 def is_approved(server_id: str, tool: str) -> bool:
-    return _key(server_id, tool) in _approved
+    """Approved this session, or granted standing permission.
+
+    The persistent half is what makes "Always allow" on a tool card mean
+    something after a restart. It is read second because the in-memory set is
+    the common case and this runs on every forwarded call.
+    """
+    key = _key(server_id, tool)
+    if key in _approved:
+        return True
+    try:
+        from backend.approvals import policy
+        return policy.is_always_allowed(policy.TOOL, key)
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read standing MCP approval for %s: %s", key, e)
+        return False
 
 
 def approve(server_id: str, tool: str) -> None:
+    """Approve for this session."""
     _approved.add(_key(server_id, tool))
 
 
+def is_standing(server_id: str, tool: str) -> bool:
+    """Granted for good, rather than approved for this session."""
+    try:
+        from backend.approvals import policy
+        return policy.is_always_allowed(policy.TOOL, _key(server_id, tool))
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read standing approval for %s::%s: %s",
+                  server_id, tool, e)
+        return False
+
+
+def approve_always(server_id: str, tool: str) -> dict:
+    """Approve for good, so the prompt does not return after a restart."""
+    key = _key(server_id, tool)
+    try:
+        from backend.approvals import policy
+        result = policy.always_allow(policy.TOOL, key)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not save standing MCP approval for %s: %s", key, e)
+        return {"success": False, "error": str(e)}
+    if result.get("success"):
+        _approved.add(key)
+    return result
+
+
 def revoke(server_id: str, tool: str | None = None) -> None:
-    """Forget approvals for one tool, or every tool on a server."""
+    """Forget approvals for one tool, or every tool on a server.
+
+    Both halves are cleared. Dropping only the session set would leave a
+    standing grant in place and the tool would keep running without a prompt —
+    which is the opposite of what revoking is for.
+    """
+    try:
+        from backend.approvals import policy
+    except Exception as e:  # noqa: BLE001
+        log.debug("approval policy unavailable while revoking: %s", e)
+        policy = None
+
     if tool is None:
         prefix = f"{server_id}::"
         for key in [k for k in _approved if k.startswith(prefix)]:
             _approved.discard(key)
+        if policy is not None:
+            for key in policy.list_allowed()["tools"]:
+                if key.startswith(prefix):
+                    policy.revoke(policy.TOOL, key)
     else:
-        _approved.discard(_key(server_id, tool))
+        key = _key(server_id, tool)
+        _approved.discard(key)
+        if policy is not None:
+            policy.revoke(policy.TOOL, key)
 
 
 def approved_list() -> list[str]:
-    return sorted(_approved)
+    """Every approved tool, session and standing, without duplicates."""
+    standing: list[str] = []
+    try:
+        from backend.approvals import policy
+        standing = policy.list_allowed()["tools"]
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read standing approvals: %s", e)
+    return sorted(_approved | set(standing))
+
+
+def standing_list() -> list[str]:
+    """Only the approvals that survive a restart, for the MCP cards."""
+    try:
+        from backend.approvals import policy
+        return list(policy.list_allowed()["tools"])
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read standing approvals: %s", e)
+        return []
 
 
 def decorate_schema(schema: dict) -> dict:

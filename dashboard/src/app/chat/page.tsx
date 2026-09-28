@@ -3,6 +3,11 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWS } from '@/lib/useWS';
 import { getChatMessages, setChatMessages, subscribeChatMessages } from '@/lib/chatStore';
+import {
+  subscribeApprovals, subscribeApprovalErrors, makeAnswers,
+  type ApprovalRequest,
+} from '@/lib/approvalsStore';
+import ApprovalCard from '@/components/ApprovalCard';
 
 interface Attachment { name: string; kind: 'image' | 'text' | 'file'; data?: string; preview?: string; size?: number; }
 
@@ -12,6 +17,11 @@ interface Message {
   timestamp: number;
   streaming?: boolean;
   attachments?: { name: string; kind: string; preview?: string }[];
+  /** Where the turn came from, for a message this page did not send itself.
+   *  Absent on everything the user typed here, which needs no badge. */
+  source?: string;
+  sourceLabel?: string;
+  sourceIcon?: string;
 }
 
 const TEXT_EXTS = /\.(txt|md|json|csv|log|py|js|ts|tsx|jsx|html|css|xml|yaml|yml|ini|cfg|sh|bat|ps1|toml|sql)$/i;
@@ -94,6 +104,11 @@ export default function ChatPage() {
   // after answering. Not cleared on a timer like the anchors: this describes
   // capability, so it stays until the next turn replaces it.
   const [usage, setUsage] = useState<any>(null);
+  // Requests waiting on the user's permission, newest last.
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  // Why an answer did not take, so a card can say so rather than vanish.
+  const [approvalErrors, setApprovalErrors] =
+    useState<Record<string, string>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
@@ -184,15 +199,25 @@ export default function ChatPage() {
     return () => { cancelled = true; };
   }, [wsState, send]);
 
-  // Messages pushed by the floating character / voice listener
+  // A message from another surface: the floating character, the voice
+  // listener, a bot bridge (Telegram / Discord / WhatsApp) or a scheduled
+  // task. It carries `source` so the bubble can say where it came from — a
+  // message typed on a phone is otherwise indistinguishable from one typed
+  // here, and the user needs to know which conversation they are reading.
+  //
+  // A turn sent from this page is never pushed back: it is declared
+  // `source: 'dashboard'`, which the backend does not announce, because this
+  // page has already drawn both bubbles itself.
   useEffect(() => onNotification('chat.push', (params: any) => {
-    if (params?.role && params?.content) {
-      setMessages(prev => [...prev, {
-        role: params.role,
-        content: params.content,
-        timestamp: Date.now(),
-      }]);
-    }
+    if (!params?.role || !params?.content) return;
+    setMessages(prev => [...prev, {
+      role: params.role,
+      content: params.content,
+      timestamp: params.timestamp ? params.timestamp * 1000 : Date.now(),
+      source: params.source,
+      sourceLabel: params.source_label,
+      sourceIcon: params.source_icon,
+    }]);
   }), [onNotification]);
 
   useEffect(() => {
@@ -213,6 +238,19 @@ export default function ChatPage() {
   useEffect(() => onNotification('chat.tools', (params: any) => {
     if (params) setUsage(params);
   }), [onNotification]);
+
+  // Permission requests are owned by the layout (it is always mounted, and
+  // `onNotification` only keeps one handler per method) and published through
+  // a store, so this page reads them rather than subscribing itself.
+  useEffect(() => subscribeApprovals((reqs) => {
+    setApprovals((prev) => (prev === reqs ? prev : reqs));
+  }), []);
+
+  useEffect(() => subscribeApprovalErrors((errs) => {
+    setApprovalErrors((prev) => (prev === errs ? prev : errs));
+  }), []);
+
+  const answer = makeAnswers(send);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -311,7 +349,12 @@ export default function ChatPage() {
     };
 
     try {
-      const result = await send('chat.send', { message: text, attachments: sentAtts });
+      // `source` marks the turn as this page's own, so the backend does not
+      // announce it back to us — we have already drawn both bubbles, and the
+      // push would show the whole exchange a second time.
+      const result = await send('chat.send', {
+        message: text, attachments: sentAtts, source: 'dashboard',
+      });
       applyReply(result?.response || 'No response');
     } catch (err: any) {
       applyReply(`Error: ${err.message}`);
@@ -365,6 +408,18 @@ export default function ChatPage() {
             <div className={`max-w-[75%] rounded-2xl px-4 py-3 text-sm ${
               msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-assistant'
             }`}>
+              {/* Where this came from, when it was not typed here. A message
+                  sent from Telegram looks otherwise identical to one typed in
+                  the app, and the user needs to know which thread it belongs
+                  to before replying. */}
+              {msg.sourceLabel && (
+                <div className={`mb-1.5 -mt-0.5 text-[10px] flex items-center gap-1 ${
+                  msg.role === 'user' ? 'text-blue-200' : 'text-[#8b949e]'
+                }`}>
+                  <span aria-hidden="true">{msg.sourceIcon}</span>
+                  <span className="opacity-90">via {msg.sourceLabel}</span>
+                </div>
+              )}
               {msg.attachments && msg.attachments.length > 0 && (
                 <div className="mb-2 space-y-1.5">
                   {msg.attachments.map((a, ai) => a.kind === 'image' && a.preview ? (
@@ -387,6 +442,22 @@ export default function ChatPage() {
                   new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </div>
             </div>
+          </div>
+        ))}
+
+        {/* Permission requests sit after the turn that raised them. They are
+            not messages: the backend owns them and they disappear when
+            answered, whether that answer came from here or from the card on
+            another page. */}
+        {approvals.map((req) => (
+          <div key={req.approval_id} className="flex justify-start">
+            <ApprovalCard
+              request={req}
+              error={approvalErrors[req.approval_id]}
+              onAllow={answer(req).allow}
+              onAlwaysAllow={answer(req).always}
+              onDeny={answer(req).deny}
+            />
           </div>
         ))}
         <div ref={messagesEndRef} />

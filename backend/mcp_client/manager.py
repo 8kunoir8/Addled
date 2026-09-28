@@ -433,6 +433,10 @@ class McpManager:
         spec = self._spec(server_id) or {}
         state = self._servers.get(server_id)
         tools = state.tools if state else []
+        # A trusted server never asks for anything, so the per-tool switch has
+        # nothing to do and is reported as not grantable — the card shows
+        # "trusted" instead of an inert control.
+        trusted = bool(spec.get("trusted"))
         return {
             "id": server_id,
             "name": spec.get("name") or server_id,
@@ -458,7 +462,15 @@ class McpManager:
             "protocol_version": state.protocol_version if state else "",
             "tool_count": len(tools),
             "tools": [{"name": t.get("name"),
-                       "description": str(t.get("description") or "")[:200]}
+                       "description": str(t.get("description") or "")[:200],
+                       # `approved` is true for a session grant or a standing
+                       # one; `standing` is only the half that survives a
+                       # restart, which is what the tool card's switch shows.
+                       "approved": approval.is_approved(server_id,
+                                                        str(t.get("name"))),
+                       "standing": approval.is_standing(server_id,
+                                                        str(t.get("name"))),
+                       "grantable": not trusted}
                       for t in tools],
             "approved": [t.get("name") for t in tools
                          if approval.is_approved(server_id, str(t.get("name")))],

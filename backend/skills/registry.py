@@ -509,6 +509,25 @@ class SkillRegistry:
             disabled = []
         return name not in disabled
 
+    @staticmethod
+    def is_always_allowed(name: str) -> bool:
+        """Has the user granted this skill standing permission?
+
+        Never raises, and answers False when it cannot tell: the fallback for
+        an unreadable policy has to be the prompt, not the permission.
+        """
+        try:
+            from backend.approvals import policy
+            return policy.is_always_allowed(policy.SKILL, name)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read the approval policy for %s: %s", name, e)
+            return False
+
+    # Kept as an alias because `_execute_gated` reads better naming the thing
+    # it is asking about, and because a caller should not have to know which
+    # of the two spellings the registry grew first.
+    _is_granted = is_always_allowed
+
     def enabled_list_all(self) -> list[SkillDefinition]:
         return [s for s in self._skills.values() if self.is_enabled(s.name)]
 
@@ -743,7 +762,14 @@ class SkillRegistry:
 
         Never raises: a failure to reach the approval path must not silently
         grant permission, so it falls back to refusing.
+
+        A skill the user granted standing permission proceeds without asking.
+        The check is here as well as inside `request_approval` so a build whose
+        executor predates the policy still honours the grant — and so the
+        reason a skill did not prompt is visible at the seam that decided it.
         """
+        if self._is_granted(name):
+            return None
         try:
             from backend.actions.executor import executor as _exec
         except Exception as e:  # noqa: BLE001

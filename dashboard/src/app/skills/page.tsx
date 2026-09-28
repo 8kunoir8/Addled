@@ -8,6 +8,12 @@ interface SkillInfo {
   category: string;
   description: string;
   requires_approval: boolean;
+  /** Granted standing permission, so it does not ask any more. */
+  always_allowed: boolean;
+  /** False for the names the destruction gate owns — the switch is disabled. */
+  grantable: boolean;
+  /** Was allowed, but its files changed since, so it asks again. */
+  code_changed?: boolean;
   enabled: boolean;
   deletable: boolean;
   source: string;
@@ -62,6 +68,22 @@ export default function SkillsPage() {
     setMsg(r?.success
       ? { ok: true, text: `Deleted "${name}"` }
       : { ok: false, text: r?.error || 'Delete failed' });
+    load();
+  };
+
+  // Standing permission: on means the skill never asks again, off puts the
+  // prompt back. Written to the same place the approval card writes, so the
+  // switch and the card cannot disagree.
+  const setAlwaysAllowed = async (name: string, allowed: boolean) => {
+    setMsg(null);
+    const r = allowed
+      ? await send('approvals.alwaysAllow', { kind: 'skill', name })
+      : await send('approvals.revoke', { kind: 'skill', name });
+    setMsg(r?.success
+      ? { ok: true, text: allowed
+          ? `"${name}" will not ask again until you turn this off`
+          : `"${name}" will ask before it runs` }
+      : { ok: false, text: r?.error || 'Could not change the permission' });
     load();
   };
 
@@ -200,14 +222,52 @@ export default function SkillsPage() {
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#1f2937] text-[#58a6ff]">
                         {SOURCE_LABELS[s.source] || s.source}
                       </span>
-                      {s.requires_approval && (
+                      {s.requires_approval && !s.always_allowed && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#2d1f1f] text-[#f0883e]">⚠ approval</span>
+                      )}
+                      {s.always_allowed && s.requires_approval && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#12261e] text-[#3fb950]">✓ always allowed</span>
+                      )}
+                      {s.code_changed && (
+                        <span
+                          title="You allowed this skill, but its files are not the ones you allowed — reinstalling or editing a skill clears its permission on purpose."
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-[#2d2416] text-[#d29922] cursor-help">
+                          ⚠ code changed
+                        </span>
                       )}
                       {!s.enabled && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#30363d] text-[#8b949e]">off</span>}
                     </div>
                     {s.description && <p className="text-xs text-[#8b949e] mt-1 break-words">{s.description}</p>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
+                    {/* Only shown for a skill that actually asks. A switch on
+                        every row would read as "allow this skill to run",
+                        which is the enable toggle beside it. */}
+                    {s.requires_approval && (
+                      s.grantable ? (
+                        <button
+                          onClick={() => setAlwaysAllowed(s.name, !s.always_allowed)}
+                          title={s.always_allowed
+                            ? 'Stop asking — click to make it ask again'
+                            : 'Never ask for this skill again'}
+                          aria-label={s.always_allowed
+                            ? `Make ${s.name} ask again`
+                            : `Always allow ${s.name}`}
+                          className={`text-[10px] px-2 py-1 rounded border transition-colors ${
+                            s.always_allowed
+                              ? 'border-[#3fb95055] bg-[#12261e] text-[#3fb950]'
+                              : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58]'
+                          }`}>
+                          {s.always_allowed ? '✓ Always' : 'Always allow'}
+                        </button>
+                      ) : (
+                        <span
+                          title="This skill guards something destructive, so it always asks first"
+                          className="text-[10px] px-2 py-1 rounded border border-[#21262d] text-[#484f58] cursor-help">
+                          always asks
+                        </span>
+                      )
+                    )}
                     <button onClick={() => toggle(s.name, !s.enabled)}
                       title={s.enabled ? 'Turn off' : 'Turn on'}
                       className={`w-9 h-5 rounded-full transition-colors ${s.enabled ? 'bg-[#3380FF]' : 'bg-[#30363d]'}`}>

@@ -514,9 +514,43 @@ function McpSection({settings,update,saving,status}: any){
           disabled={!!busy||wsState!=='connected'}
           className={`${btn} text-[#f85149]`}>Remove</button>
       </div>
-      {s.tools?.length?<div className="mt-2 text-[10px] text-[#8b949e]">
-        {s.tools.slice(0,14).map((t:any)=><span key={t.name} className="mr-2 font-mono">{t.name}</span>)}
-        {s.tools.length>14?<span>+{s.tools.length-14} more</span>:null}
+      {s.tools?.length?<div className="mt-2 space-y-1">
+        {s.tools.map((t:any)=>{
+          // A trusted server never asks, so there is nothing to allow per tool;
+          // saying so beats an empty row of switches that would do nothing.
+          const grantable = t.grantable !== false && !s.trusted;
+          return (
+            <div key={t.name} className="flex items-center justify-between gap-2">
+              <span className="font-mono text-[10px] text-[#8b949e] truncate" title={t.description||t.name}>
+                {t.name}
+              </span>
+              {s.trusted ? (
+                <span className="shrink-0 text-[10px] text-[#3fb950]"
+                  title="The whole server is trusted, so this tool never asks">
+                  ✓ trusted
+                </span>
+              ) : grantable ? (
+                <button
+                  onClick={()=>act('mcp.setToolApproval',
+                    {id:s.id,tool:t.name,allowed:!t.standing}, 'approve')}
+                  disabled={!!busy||wsState!=='connected'}
+                  title={t.standing
+                    ? 'Stop asking for this tool — click to make it ask again'
+                    : 'Never ask for this tool again'}
+                  className={`shrink-0 text-[10px] px-2 py-0.5 rounded border transition-colors ${
+                    t.standing
+                      ? 'border-[#3fb95055] bg-[#12261e] text-[#3fb950]'
+                      : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58]'
+                  }`}>
+                  {t.standing ? '✓ Always' : 'Always allow'}
+                </button>
+              ) : (
+                <span className="shrink-0 text-[10px] text-[#484f58]"
+                  title="This tool always asks first">asks</span>
+              )}
+            </div>
+          );
+        })}
       </div>:null}
     </div>)}
 
@@ -1359,6 +1393,7 @@ function RemoteSection({ settings, update, saving, status }: any) {
 }
 
 function SafetySection({ settings, update, saving, status }: any) {
+  const { send, state: wsState } = useWS();
   const s=settings?.safety||{};
   const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('safety',skey,!s[skey])} className={`w-10 h-5 rounded-full transition-colors ${s[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${s[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   return <div className="space-y-1">
@@ -1368,7 +1403,72 @@ function SafetySection({ settings, update, saving, status }: any) {
     <SettingRow label="Quiet Hours"><div className="flex items-center gap-2 text-sm text-[#e8eaed]"><input type="time" value={s.quiet_hours_start||'22:00'} onChange={e=>update('safety','quiet_hours_start',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed]"/><span className="text-[#8b949e]">to</span><input type="time" value={s.quiet_hours_end||'07:00'} onChange={e=>update('safety','quiet_hours_end',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed]"/></div></SettingRow>
     <Toggle label="Meeting Auto-Sleep" skey="meeting_auto_sleep"/>
     <Toggle label="Gaming Auto-Sleep" skey="gaming_auto_sleep"/>
+    <StandingPermissions send={send} connected={wsState==='connected'}/>
   </div>;
+}
+
+/**
+ * What has standing permission right now, and the way to take it back.
+ *
+ * Read-only by design: the grant and revoke controls live on the skill and
+ * tool cards, next to the thing they are about. This exists so every grant is
+ * visible in one place without having to remember which card gave it — and so
+ * an accidental "Always allow" can be found and undone without hunting.
+ */
+function StandingPermissions({ send, connected }: any) {
+  const [allowed, setAllowed] = useState<any>({ skills: [], tools: [] });
+  const [err, setErr] = useState('');
+
+  const load = useCallback(() => {
+    if (!connected) return;
+    send('approvals.list', {}).then((r: any) => {
+      if (r?.success) setAllowed({ skills: r.skills || [], tools: r.tools || [] });
+    }).catch(() => {});
+  }, [connected, send]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const revoke = async (kind: string, name: string) => {
+    setErr('');
+    const r = await send('approvals.revoke', { kind, name });
+    if (!r?.success) setErr(r?.error || 'Could not revoke it');
+    load();
+  };
+
+  const rows: { kind: string; name: string }[] = [
+    ...allowed.skills.map((n: string) => ({ kind: 'skill', name: n })),
+    ...allowed.tools.map((n: string) => ({ kind: 'tool', name: n })),
+  ];
+
+  return (
+    <>
+      <div className="border-t border-[#30363d] my-3"/>
+      <p className="text-xs text-[#8b949e] mb-2">
+        Skills and tools that no longer ask before they run. Anything you allowed with
+        &ldquo;Always allow&rdquo; is listed here; destructive commands and file deletion are not,
+        because those always ask.
+      </p>
+      {rows.length === 0
+        ? <p className="px-1 text-xs text-[#484f58]">Nothing has standing permission.</p>
+        : <div className="space-y-1">
+            {rows.map(({ kind, name }) => (
+              <div key={`${kind}:${name}`}
+                className="flex items-center justify-between gap-2 rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5">
+                <span className="min-w-0 truncate text-xs">
+                  <span className="mr-1.5 rounded bg-[#1f2937] px-1.5 py-0.5 text-[10px] text-[#58a6ff]">{kind}</span>
+                  <span className="font-mono text-[#e8eaed]">{name}</span>
+                </span>
+                <button onClick={() => revoke(kind, name)} disabled={!connected}
+                  title="Make it ask again"
+                  className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-[#30363d] text-[#8b949e] hover:text-[#f85149] hover:border-[#f8514955] disabled:opacity-50">
+                  Revoke
+                </button>
+              </div>
+            ))}
+          </div>}
+      {err && <p className="mt-1 text-xs text-[#f85149]">{err}</p>}
+    </>
+  );
 }
 
 function NotificationsSection({ settings, update, saving, status }: any) {

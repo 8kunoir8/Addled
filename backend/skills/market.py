@@ -18,6 +18,7 @@ Two skill flavors:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -38,6 +39,53 @@ MARKET_DIR = Path(__file__).parent.parent / "memory" / "market_skills"
 MAX_SKILL_MD = 1024 * 1024
 MAX_SCRIPT = 1024 * 1024
 MAX_FILES = 20
+
+def installed_dir(name: str) -> Path | None:
+    """Where an installed skill lives, or None if it is not one.
+
+    Public because the approval policy needs it: "Always allow" is granted to a
+    skill's *code*, not merely to its name, so the policy has to be able to find
+    the files it is binding the grant to.
+    """
+    clean = str(name or "").strip()
+    if not clean or clean in (".", "..") or "/" in clean or "\\" in clean:
+        return None
+    folder = MARKET_DIR / clean
+    try:
+        return folder if folder.is_dir() else None
+    except OSError:
+        return None
+
+def folder_digest(folder: Path) -> str:
+    """A digest of every file in an installed skill, by name and content.
+
+    The point is to notice that the skill is not the one that was allowed. File
+    names and bytes both go in, so a swapped script, an added file or an edited
+    SKILL.md all change the answer. Order is fixed by sorting, so the digest
+    does not depend on how the filesystem happens to enumerate a directory.
+    """
+    try:
+        digest = hashlib.sha256()
+        files = sorted(p for p in folder.rglob("*") if p.is_file())
+        for path in files:
+            try:
+                relative = path.relative_to(folder).as_posix()
+                digest.update(relative.encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(path.read_bytes())
+                digest.update(b"\0")
+            except OSError as e:
+                # A file that cannot be read makes the digest untrustworthy
+                # rather than merely incomplete, so the whole thing fails and
+                # the caller treats the skill as un-fingerprinted.
+                log.debug("could not read %s: %s", path, e)
+                return ""
+        if not files:
+            return ""
+        return digest.hexdigest()[:32]
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not digest %s: %s", folder, e)
+        return ""
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.S)
 UA = {"User-Agent": "Addled/1.0 (skill market)"}

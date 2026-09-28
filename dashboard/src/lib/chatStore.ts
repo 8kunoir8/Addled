@@ -7,6 +7,11 @@ export type ChatMessage = {
   timestamp: number;
   streaming?: boolean;
   attachments?: { name: string; kind: string; preview?: string }[];
+  /** Where a message from another surface came from (a bot, a task, the
+   *  character). Absent on anything typed in this app. */
+  source?: string;
+  sourceLabel?: string;
+  sourceIcon?: string;
 };
 
 let messages: ChatMessage[] = [];

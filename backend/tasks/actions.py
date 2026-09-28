@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 
+from backend import chat_sources
+
 log = logging.getLogger("addled.tasks.actions")
 
 ACTION_REGISTRY: dict[str, object] = {}
@@ -63,6 +65,10 @@ async def _run_notify(task) -> dict:
                 "role": "assistant",
                 "content": message,
                 "insight": True,
+                # A reminder was not typed on the chat page, so it says where
+                # it came from. Without this the bubble looks like the user
+                # said it, or like Addled spoke unprompted for no reason.
+                **chat_sources.describe("task"),
             })
     except Exception as e:
         log.warning("notify broadcast failed: %s", e)
@@ -95,6 +101,7 @@ async def _run_chat(task) -> dict:
                 "role": "assistant",
                 "content": f"⏰ {task.title}: {reply}",
                 "insight": True,
+                **chat_sources.describe("task"),
             })
         return {"ok": True, "reply": reply[:200]}
     except Exception as e:

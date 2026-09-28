@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Callable, Awaitable
 
 import websockets
@@ -58,6 +59,11 @@ class WSServer:
         self._server = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._nav_intent: str | None = None
+        # Broadcasts scheduled from inside the loop. Held here because a bare
+        # `create_task` is only weakly referenced — the runtime may collect it
+        # before it runs, which is the other half of how an announcement could
+        # be dropped without an error.
+        self._background: set[asyncio.Task] = set()
 
     def set_nav_intent(self, path: str):
         """Queue a GUI navigation request (consumed by the Electron shell)."""
@@ -109,12 +115,37 @@ class WSServer:
         self._connections -= dead
 
     def broadcast_nowait(self, method: str, params: dict | None = None):
-        """Thread-safe fire-and-forget broadcast. Callable from any thread
-        (e.g. the engine loop, which runs on its own event loop)."""
+        """Fire-and-forget broadcast, callable from any thread.
+
+        Two callers, and they need different scheduling. The engine loop and
+        background jobs run on their *own* thread and must hop to this one with
+        `run_coroutine_threadsafe`. An RPC handler — `chat_send` announcing a
+        bot's turn — is already on this loop, and using that same call there
+        silently dropped the notification: the coroutine was handed to the
+        loop's thread-safe queue and, because the handler's own reply was
+        awaited and sent immediately after, the announcement was never reached
+        before the task was collected. The symptom was a broadcast that
+        reported a live connection and delivered nothing.
+
+        Detecting which side we are on is what makes both work.
+        """
         if self._loop is None or self._loop.is_closed():
             return
-        asyncio.run_coroutine_threadsafe(
-            self.broadcast(method, params), self._loop)
+        coro = self.broadcast(method, params)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self._loop:
+            # Already here: schedule a real task so it cannot be dropped.
+            self._background.add(task := self._loop.create_task(coro))
+            task.add_done_callback(self._background.discard)
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not schedule the %s broadcast: %s", method, e)
+            coro.close()
 
     def _note_remote(self, ws: WebSocketServerProtocol) -> dict:
         """Attach the remote context to a connection, if the gateway set one.
@@ -145,7 +176,18 @@ class WSServer:
         return context
 
     async def _handle_connection(self, ws: WebSocketServerProtocol):
-        """Handle a single WebSocket connection."""
+        """Handle a single WebSocket connection.
+
+        Each request is dispatched as its own task rather than awaited in the
+        read loop. Awaiting in the loop meant one slow handler blocked every
+        later message on the same socket — and the case that matters most is
+        exactly the wrong one: `chat.send` runs for a long time while it waits
+        for the model, so an `action.approve` sent during that turn sat unread
+        in the socket buffer until the turn finished. The approval card was
+        built to be clicked *while* a turn is waiting, so sequential dispatch
+        made the whole approval path look broken: the button disabled itself,
+        no reply ever came, and the tool never ran.
+        """
         self._connections.add(ws)
         context = self._note_remote(ws)
         peer = ws.remote_address
@@ -156,30 +198,61 @@ class WSServer:
         else:
             log.info("Client connected: %s", peer)
 
+        in_flight: set[asyncio.Task] = set()
         try:
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
-                    response = await self._dispatch(msg, ws)
-                    if response is not None:
-                        await ws.send(json.dumps(response))
                 except json.JSONDecodeError:
                     await ws.send(json.dumps({
                         "jsonrpc": "2.0",
                         "id": None,
                         "error": {"code": -32700, "message": "Parse error"},
                     }))
-                except Exception:
-                    log.exception("Error handling message from %s", peer)
-                    await ws.send(json.dumps({
-                        "jsonrpc": "2.0",
-                        "id": msg.get("id") if isinstance(msg, dict) else None,
-                        "error": {"code": -32603, "message": "Internal error"},
-                    }))
+                    continue
+                task = asyncio.create_task(self._serve(msg, ws, peer))
+                in_flight.add(task)
+                task.add_done_callback(in_flight.discard)
         except websockets.ConnectionClosed:
             log.info("Client disconnected: %s", peer)
         finally:
+            # The socket's life ends here, so this is where it leaves the
+            # broadcast set. Doing this in `_serve` — which is where it was —
+            # removed the connection as soon as its *first* request completed:
+            # each request is its own task now, so the quickest one to finish
+            # unsubscribed a client that was still connected. Its reply still
+            # arrived, because that goes to the socket directly, while every
+            # later broadcast went nowhere — an announcement that reported a
+            # live connection and delivered nothing to it.
             self._connections.discard(ws)
+            # The socket is gone, so a reply can no longer be delivered.
+            # Cancelling stops a handler waiting on a decision nobody can send
+            # — `action.approve` waiting on a decision is the one that matters
+            # — from holding the task until its own timeout.
+            for task in list(in_flight):
+                if not task.done():
+                    task.cancel()
+
+    async def _serve(self, msg: dict, ws: WebSocketServerProtocol,
+                     peer) -> None:
+        """Run one request and send its reply. Never raises."""
+        try:
+            response = await self._dispatch(msg, ws)
+            if response is not None:
+                await ws.send(json.dumps(response))
+        except websockets.ConnectionClosed:
+            log.debug("Client went away before the reply to %s",
+                      msg.get("method") if isinstance(msg, dict) else "?")
+        except Exception:
+            log.exception("Error handling message from %s", peer)
+            try:
+                await ws.send(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": msg.get("id") if isinstance(msg, dict) else None,
+                    "error": {"code": -32603, "message": "Internal error"},
+                }))
+            except Exception:  # noqa: BLE001
+                log.debug("could not report the failure to %s", peer)
 
     async def _dispatch(self, msg: dict, ws: WebSocketServerProtocol) -> dict | None:
         """Route a JSON-RPC message to the appropriate handler."""
@@ -495,6 +568,86 @@ def _tool_usage_snapshot(used: list | None = None) -> dict:
             "mcpTools": mcp_tools, "used": calls}
 
 
+def _announce_turn(params: dict, message: str, reply: str) -> None:
+    """Tell the other surfaces about a chat turn. Never raises.
+
+    Two pushes, because they are two bubbles: what the user said and what came
+    back. The reply is skipped when it is a provider error, since that is a
+    failure to report to the caller rather than something to post into the
+    conversation.
+
+    `source` decides both the badge and whether to announce at all. A turn the
+    chat page sent is declared `dashboard`, and is not announced, because that
+    page has already drawn both bubbles itself — announcing it would show the
+    whole exchange twice.
+    """
+    try:
+        from backend import chat_sources
+    except Exception as e:  # noqa: BLE001
+        log.debug("chat source registry unavailable: %s", e)
+        return
+    try:
+        source = chat_sources.normalise(params.get("source"))
+        if not chat_sources.should_announce(source):
+            return
+        server = get_server()
+        if server is None:
+            return
+        stamp = time.time()
+        base = {**chat_sources.describe(source), "timestamp": stamp}
+        server.broadcast_nowait("chat.push", {
+            **base, "role": "user", "content": message,
+        })
+        text = (reply or "").strip()
+        if text and not text.startswith(("[Not connected:", "[Provider")):
+            server.broadcast_nowait("chat.push", {
+                **base, "role": "assistant", "content": text,
+            })
+    except Exception as e:  # noqa: BLE001
+        # An announcement is a courtesy to the other surfaces; a failure here
+        # must not turn a working turn into an error for its caller.
+        log.debug("could not announce the chat turn: %s", e)
+
+
+def _pending_for(params: dict) -> list[dict]:
+    """Approvals this turn left waiting, described for a caller to render.
+
+    Only the ones raised by *this* conversation, so a bot is never handed
+    another chat's decision to answer — and, more to the point, is never shown
+    a button that would let it.
+
+    The shape matches what an `action.approvalRequest` broadcast carries, so a
+    bridge that builds its buttons from one can build them from the other.
+    """
+    try:
+        from backend.approvals import pending
+        from backend import chat_sources, chat_context
+        ambient = chat_context.origin()
+        source = chat_sources.normalise(params.get("source")
+                                        or ambient.get("source"))
+        conversation = str(params.get("conversation")
+                           or params.get("conversationId")
+                           or ambient.get("conversation") or "")
+        if not conversation:
+            # No conversation means nothing scoped to answer, so report none
+            # rather than every queued request on the machine.
+            return []
+        out = []
+        for entry in pending.for_conversation(source, conversation):
+            out.append({
+                "approval_id": entry["approval_id"],
+                "action_type": entry["action_type"],
+                "kind": entry["kind"],
+                "name": entry["action_type"],
+                "grantable": entry["grantable"],
+                "command": entry["command"],
+            })
+        return out
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not gather pending approvals: %s", e)
+        return []
+
+
 async def run_chat_pipeline(
     message: str,
     params: dict | None = None,
@@ -531,6 +684,18 @@ async def run_chat_pipeline(
     """
     params = params or {}
     from backend.config import config
+
+    # Who is asking travels beside the call, not inside it. A tool call reaches
+    # the approval gate with only its own arguments, and an approval has to be
+    # answerable by the chat that raised it — so the origin is set once here,
+    # for the whole turn, and read where the decision is made.
+    try:
+        from backend import chat_context
+        chat_context.set_origin(params.get("source"),
+                                params.get("conversation")
+                                or params.get("conversationId"))
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not set the turn origin: %s", e)
 
     # Compaction shares the provider with chat. Mark the turn so that
     # background summarization yields instead of making the user's next message
@@ -702,7 +867,8 @@ async def _run_chat_pipeline_inner(
                 "- Browser: Navigate web pages, click, type, extract content (`browser_open`, `browser_click`, `browser_extract`).\n"
                 "- Files & Workspace: Read, write, and search workspace files (`read_file`, `write_file`, `search_files`).\n"
                 "- Memory: Remember facts (`remember`), recall past notes (`recall`).\n"
-                "When asked about abilities or asked to check/manage calendar, schedule, tasks, reminders, desktop, files, or to run a command, acknowledge these capabilities and call the appropriate tool."
+                "When asked about abilities or asked to check/manage calendar, schedule, tasks, reminders, desktop, files, or to run a command, acknowledge these capabilities and call the appropriate tool.\n"
+                "- Permission: a tool that guards something destructive will not run the first time. The result comes back marked `requires_approval` with a message. When that happens, say plainly what you want to do and ask the user to allow it — name the tool and what it will touch, in one or two sentences, and stop there. Do not claim you are unable to do it and do not silently try another route. How they answer depends on where they are: in this app they click Allow on the card above the composer or on a button in your message, and on a bot (Telegram, Discord, WhatsApp) they get a button or reply \"yes\". Ask, then wait. If the request is not answered in time it stays queued, so do not repeat it forever — say it is still waiting once and let them come back to it.\n"
             )
             sys_prompt = sys_prompt + "\n\n" + capabilities_ctx
         # Context window sizing: local models get a lean 6-message (3-turn) window
@@ -1331,6 +1497,32 @@ def _register_default_handlers():
         except Exception as e:
             return {"success": False, "tools": [], "error": str(e)}
 
+    async def mcp_set_tool_approval(params: dict, ws) -> dict:
+        """Grant or revoke standing permission for one tool on one server.
+
+        The name is stored as the MCP approval key (`server::tool`), which is
+        what `is_approved` reads, so the switch and the prompt agree about
+        which tool is being allowed.
+        """
+        from backend.mcp_client import approval as mcp_approval
+        from backend.approvals import policy
+        server_id = str(params.get("id") or "").strip()
+        tool = str(params.get("tool") or "").strip()
+        allowed = bool(params.get("allowed", True))
+        if not server_id or not tool:
+            return {"success": False, "error": "id and tool are required"}
+        if allowed:
+            result = mcp_approval.approve_always(server_id, tool)
+        else:
+            mcp_approval.revoke(server_id, tool)
+            result = {"success": True, "kind": policy.TOOL,
+                      "name": mcp_approval.key(server_id, tool),
+                      "allowed": False}
+        if result.get("success"):
+            from backend.mcp_client.manager import mcp_manager
+            result["status"] = mcp_manager.status()
+        return result
+
     async def mcp_search_market(params: dict, ws) -> dict:
         """Search the official MCP registry for servers to add."""
         from backend.mcp_client import market
@@ -1554,10 +1746,26 @@ def _register_default_handlers():
         if not message:
             return {"response": "I didn't catch that.", "tokens": 0, "conversationId": None}
         result = await run_chat_pipeline(message, params)
+        reply = result.get("response", "") if isinstance(result, dict) else ""
+        # Show the turn in every other surface that is watching the
+        # conversation. A message typed on Telegram reached Addled and got an
+        # answer the chat page never saw, because this function used to return
+        # to its caller and tell nobody — so the two conversations drifted and
+        # the app looked like it had ignored the phone. Announcing here rather
+        # than in each bot bridge means voice, tasks and the character are
+        # covered by the same line of code.
+        _announce_turn(params, message, reply)
+        # Hand the caller any decision this turn left waiting. The reply used
+        # to carry only a count, so a bot was told "approval needed" with no id
+        # to answer with — it could not build a button even if it wanted to.
+        if isinstance(result, dict):
+            try:
+                result["pendingApprovals"] = _pending_for(params)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not list pending approvals: %s", e)
         # Rolling compaction: summarize the oldest turns in the background
         # once the conversation outgrows the context window.
         try:
-            reply = result.get("response", "") if isinstance(result, dict) else ""
             if reply and not reply.startswith(("[Not connected:", "[Provider")):
                 from backend.memory.compaction import maybe_compact
                 _spawn(maybe_compact())
@@ -1567,7 +1775,6 @@ def _register_default_handlers():
         try:
             from backend.config import config
             if config.get("voice", "auto_tts", default=True):
-                reply = result.get("response", "")
                 if reply and not reply.startswith(("[Not connected:", "[Provider")):
                     _spawn(_speak_reply(reply))
                     log.info("Auto-TTS: speaking chat reply (%d chars)", len(reply))
@@ -1598,34 +1805,139 @@ def _register_default_handlers():
                 "summary": result.summary, "duration_ms": result.duration_ms,
                 "error": result.error, "data": result.data}
 
+    async def _resolve_approval_target(params: dict) -> tuple[str, dict | None]:
+        """Find the approval an answer refers to.
+
+        Two ways to name it. The dashboard sends `approvalId`, because it is
+        looking at one card. A bot sends the conversation it is answering in,
+        because the user typed "yes" and that word carries no id — so the
+        request has to be found by *who asked*, which is what stops a message
+        in one chat from releasing a command another chat asked for.
+        """
+        from backend.actions.executor import executor
+        approval_id = str(params.get("approvalId") or "").strip()
+        if approval_id:
+            return approval_id, None
+        source = params.get("source")
+        conversation = params.get("conversation") or params.get("conversationId")
+        if not conversation:
+            return "", None
+        entry = await executor.resolve_by_conversation(source, conversation)
+        if not entry:
+            return "", None
+        return str(entry.get("approval_id") or ""), entry
+
     async def action_approve(params: dict, ws) -> dict:
-        """Approve a pending destructive action by its approval_id."""
+        """Approve a pending destructive action, by id or by conversation."""
         from backend.actions.executor import executor
         from backend.actions import approval_notice
-        approval_id = params.get("approvalId", "")
+        approval_id, entry = await _resolve_approval_target(params)
         if not approval_id:
-            return {"success": False, "error": "approvalId is required"}
+            return {"success": False,
+                    "error": ("approvalId is required, or a source and "
+                              "conversation to find the request this chat "
+                              "raised")}
         result = await executor.approve(approval_id)
         approval_notice.remember(approval_id)
         return {"success": result.success, "action_type": result.action_type,
-                "summary": result.summary, "error": result.error, "data": result.data}
+                "summary": result.summary, "error": result.error,
+                "data": result.data, "approvalId": approval_id,
+                "resolved": entry or {}}
 
     async def action_deny(params: dict, ws) -> dict:
-        """Deny a pending destructive action."""
+        """Deny a pending destructive action, by id or by conversation."""
         from backend.actions.executor import executor
         from backend.actions import approval_notice
-        approval_id = params.get("approvalId", "")
+        approval_id, entry = await _resolve_approval_target(params)
         if not approval_id:
-            return {"success": False, "error": "approvalId is required"}
+            return {"success": False,
+                    "error": ("approvalId is required, or a source and "
+                              "conversation to find the request this chat "
+                              "raised")}
         result = executor.deny(approval_id)
         approval_notice.remember(approval_id)
-        return {"success": result.success, "summary": result.summary, "error": result.error}
+        return {"success": result.success, "summary": result.summary,
+                "error": result.error, "approvalId": approval_id,
+                "resolved": entry or {}}
 
     async def action_pending(params: dict, ws) -> dict:
         """Approvals still waiting, for a dashboard that connected late."""
         from backend.actions.executor import executor
         pending = executor.pending_approvals()
         return {"success": True, "pending": pending, "count": len(pending)}
+
+    async def approvals_list(params: dict, ws) -> dict:
+        """Everything granted standing permission, plus what is still queued.
+
+        The queued half comes from the notice module rather than the executor
+        because it is the one that knows a request's kind and whether it may be
+        granted — the executor only holds the action type and its parameters.
+        """
+        from backend.approvals import policy
+        from backend.actions import approval_notice
+        allowed = policy.list_allowed()
+        return {"success": True, **allowed,
+                "pending": approval_notice.pending(),
+                "protected": sorted(policy.protected_names())}
+
+    async def approvals_always_allow(params: dict, ws) -> dict:
+        """Grant standing permission for one skill or tool.
+
+        Named two ways. The dashboard sends `kind` and `name` because its card
+        is about a specific thing. A bot sends only `approvalId`, because the
+        button that carried it had 64 bytes and the name would not fit — so the
+        kind and name are resolved from the record of that approval. Resolving
+        it here rather than trusting the caller also means the name cannot be
+        altered in transit to grant something the user was never asked about.
+        """
+        from backend.approvals import policy
+        from backend.approvals import pending as pending_origins
+        from backend.actions import approval_notice
+
+        kind = str(params.get("kind") or "").strip()
+        name = str(params.get("name") or "").strip()
+        approval_id = str(params.get("approvalId") or "").strip()
+
+        if not name and approval_id:
+            entry = pending_origins.get(approval_id)
+            if entry:
+                kind = kind or entry.get("kind") or ""
+                name = str(entry.get("action_type") or "")
+
+        if not name:
+            return {"success": False,
+                    "error": ("name is required, or an approvalId whose "
+                              "request is still known")}
+
+        result = policy.always_allow(kind, name)
+        if not result.get("success"):
+            result.setdefault("success", False)
+            return result
+
+        if approval_id:
+            from backend.actions.executor import executor
+            await executor.approve(approval_id)
+            approval_notice.remember(approval_id)
+        return {**result, "allowed": True}
+
+    async def approvals_revoke(params: dict, ws) -> dict:
+        """Take standing permission back, so the prompt returns."""
+        from backend.approvals import policy
+        from backend.mcp_client import approval as mcp_approval
+        kind = str(params.get("kind") or "").strip()
+        name = str(params.get("name") or "").strip()
+        if not name:
+            return {"success": False, "error": "name is required"}
+        result = policy.revoke(kind, name)
+        # An MCP tool is spelled `server::tool`; drop the session grant too so
+        # revoking from the card cannot leave the fast path still saying yes.
+        if result.get("success") and kind == policy.TOOL and "::" in name:
+            server_id, _, tool = name.partition("::")
+            try:
+                mcp_approval.revoke(server_id, tool)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not clear the session MCP grant: %s", e)
+        return result
 
     # ---- Excel operations -----------------------------------------------------
 
@@ -2297,11 +2609,64 @@ def _register_default_handlers():
         goal_executor.set_executor(action_exec)
         goal_executor.set_store(goal_store)
 
+        # The provider is resolved here and handed in, so a run in progress
+        # keeps using the model it started with even if the user switches
+        # providers mid-goal.
+        provider = None
+        try:
+            from backend.providers.registry import get_provider
+            provider = get_provider()
+        except Exception as e:  # noqa: BLE001
+            log.debug("no provider for goal %s: %s", goal_id, e)
+
         # Fire and forget — run in background. Through `_spawn` so the task
         # keeps a strong reference: a goal half-run and then collected would
         # look like it simply stopped, with nothing in the log to say why.
-        _spawn(goal_executor.run_goal(goal_id))
+        _spawn(goal_executor.run_goal(goal_id, provider=provider))
         return {"success": True, "goalId": goal_id, "status": "started"}
+
+    async def goal_replan(params: dict, ws) -> dict:
+        """Re-plan a goal from scratch, optionally with feedback.
+
+        Separate from `goal.start` because a plan that was wrong should be
+        fixable without the goal having to fail first — and because the loop in
+        the executor re-plans *informed* by what happened, which an explicit
+        call lets the user trigger by hand.
+        """
+        from backend.goals.store import goal_store
+        from backend.goals.planner import plan_goal
+        goal_id = str(params.get("goalId") or "").strip()
+        if not goal_id:
+            return {"success": False, "error": "No goalId provided"}
+        goal = goal_store.load(goal_id)
+        if not goal:
+            return {"success": False, "error": f"No goal {goal_id}"}
+
+        provider = None
+        try:
+            from backend.providers.registry import get_provider
+            provider = get_provider()
+        except Exception:  # noqa: BLE001
+            pass
+
+        # What the user says went wrong takes precedence over the step report;
+        # they know more than the plan does about why it did not fit.
+        feedback = str(params.get("feedback") or "").strip()
+        if not feedback:
+            from backend.goals.executor import goal_executor
+            feedback = goal_executor._feedback(
+                (goal.get("plan") or {}).get("steps") or [])
+
+        plan = await plan_goal(goal.get("title", ""),
+                               goal.get("description", ""), provider,
+                               feedback=feedback)
+        goal["plan"] = plan
+        # A re-plan replaces the steps, so any status from the previous attempt
+        # would be carried onto steps that no longer describe the same work.
+        goal["status"] = "pending"
+        goal_store.save(goal)
+        return {"success": True, "goalId": goal_id, "plan": plan,
+                "count": plan.get("count", 0)}
 
     async def goal_cancel(params: dict, ws) -> dict:
         from backend.goals.executor import goal_executor
@@ -3640,6 +4005,81 @@ def _register_default_handlers():
         return {"success": True, "notes": list(swarm._notes),
                 "count": len(swarm._notes)}
 
+    async def swarm_notebook(params: dict, ws) -> dict:
+        """One agent's own history, or a list of every notebook.
+
+        With no `agentId` this lists them, so the page can show which desks
+        have a record without loading each one — the contents can be large and
+        most of the time nobody wants them.
+        """
+        from backend.swarm import notebook
+        agent_id = str(params.get("agentId") or "").strip()
+        if not agent_id:
+            return {"success": True, "notebooks": notebook.listing()}
+        data = notebook.load(agent_id)
+        return {
+            "success": True,
+            "agentId": agent_id,
+            "name": data.get("name", ""),
+            "summary": data.get("summary", "")[:notebook.MAX_SUMMARY_CHARS],
+            "entries": data.get("entries", []),
+            "flows": data.get("flows", []),
+            "updated": data.get("updated", 0.0),
+            "digest": notebook.digest(agent_id),
+        }
+
+    async def swarm_notebook_search(params: dict, ws) -> dict:
+        """Ask one agent's notebook for something it did earlier.
+
+        This is the half a summary cannot give: entries the digest has moved
+        past are still on disk, so work from forty steps ago is answerable.
+        """
+        from backend.swarm import notebook
+        agent_id = str(params.get("agentId") or "").strip()
+        query = str(params.get("query") or "").strip()
+        if not agent_id:
+            return {"success": False, "error": "agentId is required"}
+        if not query:
+            return {"success": False, "error": "query is required"}
+        hits = notebook.search(agent_id, query)
+        return {"success": True, "agentId": agent_id, "query": query,
+                "results": hits, "count": len(hits)}
+
+    async def swarm_checkpoints(params: dict, ws) -> dict:
+        """Flows that were interrupted and can still be carried on."""
+        from backend.swarm.orchestrator import swarm
+        return {"success": True, "flows": swarm.resumable_flows()}
+
+    async def swarm_resume(params: dict, ws) -> dict:
+        """Carry on an interrupted flow from where it stopped."""
+        from backend.swarm.orchestrator import swarm
+        flow_id = str(params.get("flowId") or "").strip()
+        if not flow_id:
+            return {"success": False, "error": "flowId is required"}
+        try:
+            from backend.providers.registry import get_provider
+            provider = get_provider()
+        except Exception:  # noqa: BLE001
+            provider = None
+        result = await swarm.resume_flow(flow_id, provider=provider)
+        # A resumed flow is a real run, so the page should show it happening.
+        try:
+            get_server().broadcast_nowait("swarm.updated",
+                                          {"agents": swarm.list_agents()})
+        except Exception:  # noqa: BLE001
+            pass
+        return result
+
+    async def swarm_discard_checkpoint(params: dict, ws) -> dict:
+        """Throw an interrupted flow away instead of resuming it."""
+        from backend.swarm import checkpoints
+        flow_id = str(params.get("flowId") or "").strip()
+        if not flow_id:
+            return {"success": False, "error": "flowId is required"}
+        removed = checkpoints.discard(flow_id)
+        return {"success": removed, "flowId": flow_id,
+                "error": None if removed else "No such checkpoint."}
+
     # ---- Phase 5: Calendar & Email integrations ------------------------------
 
     async def calendar_add(params: dict, ws) -> dict:
@@ -4072,9 +4512,29 @@ def _register_default_handlers():
                 "description": s.description[:300],
                 "requires_approval": bool(s.requires_approval),
                 "enabled": skill_registry.is_enabled(s.name),
+                # What the card's switch shows. `grantable` is False for the
+                # skills the destruction gate owns, so the card can disable the
+                # control instead of offering a button that would only fail.
+                "always_allowed": skill_registry.is_always_allowed(s.name),
                 "deletable": s.category in ("forged", "market"),
                 "source": s.category,
             })
+        try:
+            from backend.approvals import policy
+            granted = set(policy.list_allowed()["skills"])
+            grantable = {s["name"]: not policy.is_protected(s["name"])
+                         for s in out}
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read the approval policy: %s", e)
+            granted, grantable = set(), {}
+        for s in out:
+            s["grantable"] = grantable.get(s["name"], False)
+            # A granted skill whose code no longer matches the grant asks
+            # again. Saying so beats a switch that looks on and behaves off.
+            s["code_changed"] = bool(
+                s["category"] == "market"
+                and s["name"] in granted
+                and not s["always_allowed"])
         return {"skills": out, "count": len(out)}
 
     async def skills_set_state(params: dict, ws) -> dict:
@@ -4229,6 +4689,9 @@ def _register_default_handlers():
     _server.register("action.approve", action_approve)
     _server.register("action.deny", action_deny)
     _server.register("action.pending", action_pending)
+    _server.register("approvals.list", approvals_list)
+    _server.register("approvals.alwaysAllow", approvals_always_allow)
+    _server.register("approvals.revoke", approvals_revoke)
     _server.register("voice.speak", voice_speak)
     _server.register("voice.voices", voice_voices)
     _server.register("character.setState", character_set_state)
@@ -4263,10 +4726,12 @@ def _register_default_handlers():
     _server.register("mcp.install", mcp_install)
     _server.register("mcp.credentials", mcp_credentials)
     _server.register("mcp.sweep", mcp_sweep)
+    _server.register("mcp.setToolApproval", mcp_set_tool_approval)
 
     # Phase 5 Goals engine
     _server.register("goal.create", goal_create)
     _server.register("goal.list", goal_list)
+    _server.register("goal.replan", goal_replan)
     _server.register("goal.start", goal_start)
     _server.register("goal.cancel", goal_cancel)
 
@@ -4300,6 +4765,11 @@ def _register_default_handlers():
     _server.register("swarm.restore", swarm_restore)
     _server.register("swarm.revise", swarm_revise)
     _server.register("swarm.notes", swarm_notes)
+    _server.register("swarm.notebook", swarm_notebook)
+    _server.register("swarm.notebookSearch", swarm_notebook_search)
+    _server.register("swarm.checkpoints", swarm_checkpoints)
+    _server.register("swarm.resume", swarm_resume)
+    _server.register("swarm.discardCheckpoint", swarm_discard_checkpoint)
 
     # Phase 5 Calendar & Email
     _server.register("calendar.add", calendar_add)

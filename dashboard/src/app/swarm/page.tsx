@@ -5,6 +5,13 @@ import { useWS } from '@/lib/useWS';
 
 interface Agent { id:string; name:string; emoji:string; type:string; status:'offline'|'ready'|'running'|'error'; currentTask?:string; tools:string[]|null; allTools?:boolean; }
 
+/** A flow that was interrupted and still has steps left to run. */
+interface Checkpoint { flowId:string; goal:string; steps:number; finished:number; updated:number; }
+
+/** One agent's own notebook — what it did, kept between runs. */
+interface NotebookEntry { task?:string; output?:string; kind?:string; flow?:string; timestamp?:number; }
+interface Notebook { agentId:string; name:string; summary:string; entries:NotebookEntry[]; flows:string[]; updated:number; digest:string; }
+
 interface FlowStep { id:string; agentId:string; task:string; parallel:string[]; merge:string; until:string; notContains:boolean; retry:string; maxAttempts:number; dependsOn:number[]; optional:boolean; judgeMode:boolean; onPass:string; onFail:string; }
 interface FlowResult { agent:string; task:string; success:boolean; output:string; error?:string; parallel?:boolean; merged?:boolean; gate?:boolean; attempt?:number; skipped?:boolean; }
 interface FlowJump { from:number; to:number|string; reason:string; }
@@ -35,6 +42,18 @@ export default function SwarmPage() {
   const [flowRunning,setFlowRunning]=useState(false);
   const [flowResult,setFlowResult]=useState<{ok:boolean;text:string;steps:FlowResult[];jumps?:FlowJump[]}|null>(null);
   const [memoryInfo,setMemoryInfo]=useState<{entries:number;chars:number}|null>(null);
+
+  // Flows that were interrupted. A flow is the longest-running thing in the
+  // app, so it is the thing most likely to outlive a session — and until it
+  // could be resumed, closing the app threw away every finished step.
+  const [checkpoints,setCheckpoints]=useState<Checkpoint[]>([]);
+  const [resuming,setResuming]=useState<string|null>(null);
+
+  // One agent's own notebook, opened on request. Not fetched for every agent
+  // on load: the entries can be long and usually nobody is looking.
+  const [notebook,setNotebook]=useState<Notebook|null>(null);
+  const [notebookQuery,setNotebookQuery]=useState('');
+  const [notebookHits,setNotebookHits]=useState<NotebookEntry[]|null>(null);
 
   // Fetch agents from backend
   const fetchAgents = useCallback(async () => {
@@ -75,6 +94,64 @@ export default function SwarmPage() {
     if (wsState !== 'connected') return;
     try { await send('swarm.memory', { clear: true }); } catch { /* ignore */ }
     await fetchMemory();
+  };
+
+  const fetchCheckpoints = useCallback(async () => {
+    if (wsState !== 'connected') return;
+    try {
+      const r = await send('swarm.checkpoints', {});
+      setCheckpoints(r?.flows || []);
+    } catch { /* the panel just stays as it was */ }
+  }, [wsState, send]);
+
+  useEffect(() => { fetchCheckpoints(); }, [fetchCheckpoints]);
+
+  const resumeFlow = async (flowId:string) => {
+    if (wsState !== 'connected') return;
+    setResuming(flowId);
+    try {
+      const r = await send('swarm.resume', { flowId });
+      setFlowResult({
+        ok: Boolean(r?.success),
+        text: r?.success
+          ? (r?.message || `Resumed — ${(r?.steps||[]).length} step(s) recorded.`)
+          : (r?.error || 'Could not resume that flow.'),
+        steps: (r?.steps || []) as FlowResult[],
+        jumps: r?.jumps as FlowJump[] | undefined,
+      });
+      setError(r?.success ? '' : (r?.error || ''));
+    } catch (e:any) {
+      setError(e?.message || 'Could not resume that flow.');
+    }
+    setResuming(null);
+    // It is no longer interrupted once it has been picked up.
+    await fetchCheckpoints();
+  };
+
+  const discardCheckpoint = async (flowId:string) => {
+    if (wsState !== 'connected') return;
+    try { await send('swarm.discardCheckpoint', { flowId }); } catch { /* ignore */ }
+    await fetchCheckpoints();
+  };
+
+  const openNotebook = async (agentId:string) => {
+    if (wsState !== 'connected') return;
+    try {
+      const r = await send('swarm.notebook', { agentId });
+      setNotebook(r?.success === false ? null : (r as Notebook));
+      setNotebookHits(null);
+      setNotebookQuery('');
+      setError(r?.success === false ? (r?.error || 'Could not read it') : '');
+    } catch (e:any) { setError(e?.message || 'Could not read that notebook'); }
+  };
+
+  const searchNotebook = async () => {
+    if (!notebook?.agentId || !notebookQuery.trim()) return;
+    try {
+      const r = await send('swarm.notebookSearch',
+        { agentId: notebook.agentId, query: notebookQuery.trim() });
+      setNotebookHits(r?.results || []);
+    } catch { setNotebookHits([]); }
   };
 
   // Agents exist only in this process and there are no stored templates, so
@@ -202,6 +279,37 @@ export default function SwarmPage() {
         {error&&<p className="text-xs text-[#f85149] mb-3">{error}</p>}
         {agents.length===0&&(
           <p className="text-sm text-[#8b949e] mb-3">No agents yet. Agents live only for this session, so add one above — it appears here until the backend restarts.</p>
+        )}
+
+        {/* ---------------- interrupted flows ---------------- */}
+        {/* Shown above the builder because it is the thing that needs an
+            answer: work already paid for, waiting to be finished. */}
+        {checkpoints.length>0&&(
+          <div className="mb-5 bg-[#1c1a12] border border-[#d2992244] rounded-lg p-3">
+            <h2 className="text-sm font-medium text-[#e8eaed] mb-1">Interrupted flows</h2>
+            <p className="text-[11px] text-[#8b949e] mb-2">
+              These stopped part-way. The finished steps are kept, so resuming continues from where it stopped rather than running everything again.
+            </p>
+            <div className="space-y-1.5">
+              {checkpoints.map(cp=>(
+                <div key={cp.flowId} className="flex items-center gap-2 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5">
+                  <span className="text-xs text-[#e8eaed] min-w-0 flex-1 truncate" title={cp.goal||cp.flowId}>
+                    {cp.goal || cp.flowId}
+                  </span>
+                  <span className="text-[10px] text-[#d29922] shrink-0">
+                    {cp.finished} of {cp.steps} done
+                  </span>
+                  <button onClick={()=>resumeFlow(cp.flowId)} disabled={resuming!==null||wsState!=='connected'}
+                    className="text-[10px] px-2 py-0.5 rounded bg-[#21262d] hover:bg-[#30363d] text-[#58a6ff] disabled:opacity-50 shrink-0">
+                    {resuming===cp.flowId?'Resuming…':'Resume'}
+                  </button>
+                  <button onClick={()=>discardCheckpoint(cp.flowId)} disabled={resuming!==null||wsState!=='connected'}
+                    className="text-[10px] text-[#8b949e] hover:text-[#f85149] disabled:opacity-50 shrink-0"
+                    title="Throw it away without resuming">✕</button>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
 
         {/* ---------------- flow builder ---------------- */}
@@ -410,10 +518,18 @@ export default function SwarmPage() {
               {results[agent.id]&&(
                 <p className={`text-xs mb-2 whitespace-pre-wrap break-words max-h-32 overflow-y-auto ${results[agent.id].ok?'text-[#e8eaed]':'text-[#f85149]'}`}>{results[agent.id].text.slice(0,800)}</p>
               )}
-              {agent.status!=='running'?(
+              {(agent.status!=='running')?(
                 <div className="flex gap-2">
                   <input value={taskInputs[agent.id]||''} onChange={e=>setTaskInputs(prev=>({...prev,[agent.id]:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')handleRun(agent);}} placeholder="Assign a task..." className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] placeholder-[#484f58]"/>
                   <button onClick={()=>handleRun(agent)} disabled={!taskInputs[agent.id]?.trim()||busy===agent.id||wsState!=='connected'} className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1 text-xs font-medium">{busy===agent.id?'…':'Run'}</button>
+                  {/* Each desk keeps its own record of what it has done, on
+                      disk, so it survives a restart — and only its own, which
+                      is the difference from the shared memory above. */}
+                  <button onClick={()=>openNotebook(agent.id)} disabled={wsState!=='connected'}
+                    title="What this agent has done before — kept across restarts"
+                    className="text-[10px] px-2 py-1 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58] disabled:opacity-50 shrink-0">
+                    📓 Record
+                  </button>
                 </div>
               ):(
                 <button onClick={()=>handleStop(agent)} className="text-xs px-3 py-1 bg-[#f85149] text-white rounded hover:bg-[#ff6a63]">Stop &amp; remove</button>
@@ -421,6 +537,69 @@ export default function SwarmPage() {
             </div>
           ))}
         </div>
+
+        {/* ---------------- one agent's notebook ---------------- */}
+        {notebook&&(
+          <div className="mt-4 bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <h2 className="text-sm font-medium text-[#e8eaed]">
+                📓 {notebook.name || notebook.agentId}
+              </h2>
+              <span className="text-[11px] text-[#8b949e]">
+                its own record — {notebook.entries.length} entr{notebook.entries.length===1?'y':'ies'}
+                {notebook.flows.length?` across ${notebook.flows.length} flow(s)`:''}
+              </span>
+              <button onClick={()=>{setNotebook(null);setNotebookHits(null);}}
+                className="ml-auto text-[#8b949e] hover:text-[#e8eaed] text-sm" title="Close">✕</button>
+            </div>
+            {notebook.summary&&(
+              <div className="mb-2">
+                <p className="text-[10px] uppercase tracking-wide text-[#484f58] mb-1">Folded summary</p>
+                <p className="text-xs text-[#8b949e] whitespace-pre-wrap break-words max-h-32 overflow-y-auto bg-[#0d1117] border border-[#21262d] rounded p-2">{notebook.summary}</p>
+              </div>
+            )}
+            {/* The digest is what actually rides into the agent's next task, so
+                showing it explains how much of this the agent really carries. */}
+            {notebook.digest&&(
+              <div className="mb-2">
+                <p className="text-[10px] uppercase tracking-wide text-[#484f58] mb-1">
+                  Carried into its next task
+                </p>
+                <p className="text-xs text-[#8b949e] whitespace-pre-wrap break-words max-h-40 overflow-y-auto bg-[#0d1117] border border-[#21262d] rounded p-2">{notebook.digest}</p>
+              </div>
+            )}
+            <div className="flex gap-2 mb-2">
+              <input value={notebookQuery} onChange={e=>setNotebookQuery(e.target.value)}
+                onKeyDown={e=>{if(e.key==='Enter')searchNotebook();}}
+                placeholder="Ask this agent's record for something earlier…"
+                className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] placeholder-[#484f58]"/>
+              <button onClick={searchNotebook} disabled={!notebookQuery.trim()}
+                className="text-xs px-3 py-1 rounded bg-[#21262d] hover:bg-[#30363d] text-[#58a6ff] disabled:opacity-50">Search</button>
+            </div>
+            {notebookHits!==null&&(
+              notebookHits.length===0
+                ? <p className="text-xs text-[#8b949e]">Nothing in this agent&rsquo;s record matches that.</p>
+                : <div className="space-y-1.5 max-h-52 overflow-y-auto">
+                    {notebookHits.map((h,i)=>(
+                      <div key={i} className="bg-[#0d1117] border border-[#21262d] rounded p-2">
+                        <p className="text-[10px] text-[#484f58] mb-0.5">{h.task||'earlier work'}</p>
+                        <p className="text-xs text-[#e8eaed] whitespace-pre-wrap break-words">{(h.output||'').slice(0,600)}</p>
+                      </div>
+                    ))}
+                  </div>
+            )}
+            {notebookHits===null&&notebook.entries.length>0&&(
+              <div className="space-y-1.5 max-h-52 overflow-y-auto">
+                {notebook.entries.slice().reverse().map((e,i)=>(
+                  <div key={i} className="bg-[#0d1117] border border-[#21262d] rounded p-2">
+                    <p className="text-[10px] text-[#484f58] mb-0.5">{e.task||'work'}</p>
+                    <p className="text-xs text-[#8b949e] whitespace-pre-wrap break-words">{(e.output||'').slice(0,400)}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

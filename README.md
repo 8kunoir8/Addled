@@ -1,7 +1,7 @@
 # Addled
 
 > An AI desktop companion with a floating animated character, full web dashboard,  
-> voice interaction (wake word + speech), 60 built-in skills, self-extending  
+> voice interaction (wake word + speech), 61 built-in skills, self-extending  
 > capability forge, 10 AI provider backends, live screen awareness, long-term  
 > memory, and a full safety suite.  
 > Built with Python 3.14 + PyQt6 + Electron 28 + Next.js 16.
@@ -65,8 +65,8 @@ launch.bat
 │          ▼                   ▼           │
 │  ┌────────────────────────────────────┐  │
 │  │      Python Backend Service        │  │
-│  │  Engine • 161 WS Handlers          │  │
-│  │  60 Skills • Skill Forge           │  │
+│  │  Engine • 193 WS Handlers          │  │
+│  │  61 Skills • Skill Forge           │  │
 │  │  10 AI Providers • Goals • Code    │  │
 │  │  Swarm • Calendar • Email • Browser│  │
 │  │  Character • Safety • Memory •     │  │
@@ -301,12 +301,15 @@ A **Karpathy-pattern wiki** instead of another chat transcript: markdown pages u
 **Voice input**: wake word → command → chat → spoken reply. **Silero VAD** segments real speech for turn detection (RMS fallback). STT: **faster-whisper** (local, offline; tiny/small selectable) with **SenseVoice** auto-activating when funasr is available. **TTS**: **Kokoro** neural voices fully offline (local 82M ONNX) with **edge-tts** online fallback — engine selectable in Settings → Voice, with an **Auto TTS toggle** so dashboard chat and character prompts speak replies out loud. **Voice pickers** list what is actually available rather than asking you to type a voice name: the installed Kokoro pack is read straight out of `voices-v1.0.bin` (54 voices, offline, without loading the model) and the Edge voices come from the service, cached for a day with a curated offline fallback. Both are grouped by language and follow the **Language** setting, and where an engine simply cannot speak the chosen language — Kokoro has no Indonesian voice — Addled says so and routes to one that can. Speech input is local & offline; Edge TTS is the only network-dependent part. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
 
 ### � Skills & Market
-77 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
+61 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
 
 Two things worth calling out:
 
 - **Destructive skills ask first.** `requires_approval` is enforced at the single registry seam, so `delete_file`, `write_file`, the desktop-control skills, `self_apply` and market script skills all stop for approval on the turn that asked. Previously the flag was declared and displayed but never read, and the file skills bypassed the destruction gate entirely.
 - **Interactive sessions.** For work a one-shot command cannot do — a `cd` that sticks, an env var the next command reads, a REPL, an open ssh — `session_open` starts a real shell that keeps its state, and `session_send` types into it. Market script arguments are passed as an **argv list, never folded into a shell string**, so an argument containing PowerShell metacharacters is data rather than code.
+- **Standing permission, granted from whichever surface asked.** An approval prompt carries its own **Always allow** button, so a skill or tool you trust stops asking from that point on without you going to Settings. Grants are per *kind* (skill vs tool), so allowing `read_file` never silently allows a forged skill by the same name. **Destructive names are refused inside the grant call itself** — not by a caller that remembers to check — so `delete_file` cannot be made standing no matter which surface offers the button. Installed market skills are bound to a **digest fingerprint**: if the script behind a granted skill later changes, the grant stops matching and Addled asks again.
+- **The answer belongs to the chat that asked.** Telegram, Discord, WhatsApp and the dashboard all share one approval queue, so a bare "yes" is ambiguous. Every queued approval records its **origin** (source + conversation), and an answer must name a request raised *in that same chat* — otherwise a reply in one bot cannot release an action requested by another. Resolving an approval clears its origin, so the map tracks only what is genuinely outstanding.
+- **Swarm agents keep their own notebooks.** Each agent in a swarm writes a per-agent **notebook** after every step rather than at the end of a flow, because a run killed mid-way is exactly the case it exists for. Entries are capped; the overflow is **folded into a standing summary** rather than dropped, so detail degrades from verbatim to compressed instead of vanishing. Agents hand each other a **digest**, not the raw log, and can search their own history with `swarm.notebookSearch` — a long-running role keeps its memory across restarts without flooding its peers.
 
 ### 🌐 Browser & Desktop
 Four browser backends with **task-based routing**: your running Chrome/Edge via CDP (read-only by default, opt-in), Playwright's own Chromium, the **browser-use** AI framework for open-ended tasks (used only when installed AND an LLM is available), and an always-on HTTP fallback. Backends are installed from the Settings page with a manual button (or on demand, `ask` / `off` / `auto` policy with a dashboard approval banner). **Desktop control** (mouse/keyboard) is first-class but off by default: session grants via dashboard prompt, screen-bounds checks, typing caps, hotkey whitelist, pyautogui FAILSAFE, and egress logging.
@@ -316,10 +319,10 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 
 ---
 
-## WebSocket API (183 handlers)
+## WebSocket API (193 handlers)
 
 ### Core
-`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `guide.status` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
+`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `approvals.list` `approvals.alwaysAllow` `approvals.revoke` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `guide.status` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
 
 ### Goals
 `goal.create` `goal.list` `goal.start` `goal.cancel`
@@ -331,7 +334,7 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 `excel.read` `excel.write`
 
 ### Swarm
-`swarm.spawn` `swarm.list` `swarm.run` `swarm.stop` `swarm.flow` `swarm.memory` `swarm.roster` `swarm.define` `swarm.forget` `swarm.restore` `swarm.revise` `swarm.notes`
+`swarm.spawn` `swarm.list` `swarm.run` `swarm.stop` `swarm.flow` `swarm.memory` `swarm.roster` `swarm.define` `swarm.forget` `swarm.restore` `swarm.revise` `swarm.notes` `swarm.notebook` `swarm.notebookSearch`
 
 ### Calendar & Email
 `calendar.add` `calendar.list` `calendar.delete` `calendar.update` `tasks.schedule` `tasks.list` `tasks.update` `tasks.pause` `tasks.resume` `tasks.cancel` `tasks.month` `email.fetch` `email.send` `email.search`
