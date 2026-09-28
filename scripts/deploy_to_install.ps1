@@ -19,6 +19,13 @@
 #   .\scripts\deploy_to_install.ps1 -BackendOnly
 #   .\scripts\deploy_to_install.ps1 -DryRun      # list what would move
 #   .\scripts\deploy_to_install.ps1 -ListExclusions   # print the exclude set
+#   .\scripts\deploy_to_install.ps1 -WithSkills  # also copy installed market skills
+#
+# `-WithSkills` exists because market skills are user data (gitignored), so the
+# backend sync leaves them behind by design. Installing a skill for the dev tree
+# therefore does NOT put it in the running app, which looks like the install
+# silently failed. Passing the flag copies them across; it is opt-in so a normal
+# deploy can never overwrite the skills someone else installed.
 #
 # What is excluded is DERIVED from .gitignore, not maintained here. A hand
 # written list drifts: this one shipped without `*.db`, `*.log`, `*.jsonl` and
@@ -36,6 +43,13 @@ param(
     [switch]$BackendOnly,
     [switch]$DryRun,
     [switch]$ListExclusions,
+    # Copy installed market skills across too. Off by default and deliberately
+    # so: `market_skills/` is user data (gitignored), and a deploy that moved
+    # skills into someone's install without being asked would be overwriting
+    # their choices with the developer's. This exists because installing a
+    # skill for the dev tree otherwise leaves the running app without it, and
+    # the fix must be something the caller asks for.
+    [switch]$WithSkills,
     [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\Addled"
 )
 
@@ -120,6 +134,24 @@ if (-not $BackendOnly) {
     $dash = Join-Path $resources 'dashboard'
     if (-not $DryRun -and (Test-Path $dash)) { Remove-Item "$dash\*" -Recurse -Force }
     Invoke-Sync -From $out -To $dash -ExtraArgs @()
+}
+
+if ($WithSkills) {
+    # Market skills are gitignored user data, so the backend sync above leaves
+    # them behind by design. That is right for a normal deploy and wrong when
+    # you have just installed skills and want the running app to have them.
+    # Copied WITHOUT /MIR: a skill the user installed in their own app must not
+    # be deleted by a developer's deploy.
+    $skillsFrom = Join-Path $repo 'backend\memory\market_skills'
+    $skillsTo = Join-Path $resources 'backend\memory\market_skills'
+    if (Test-Path $skillsFrom) {
+        $count = (Get-ChildItem $skillsFrom -Directory -ErrorAction SilentlyContinue).Count
+        Write-Host ("Deploying market skills ({0})..." -f $count) -ForegroundColor Cyan
+        if (-not $DryRun) { New-Item -ItemType Directory -Force -Path $skillsTo | Out-Null }
+        Invoke-Sync -From $skillsFrom -To $skillsTo -ExtraArgs @()
+    } else {
+        Write-Host "No market skills to deploy." -ForegroundColor Yellow
+    }
 }
 
 if ($DryRun) {

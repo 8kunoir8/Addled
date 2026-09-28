@@ -846,6 +846,7 @@ class SkillRegistry:
         self._register_browser_skills()
         self._register_code_skills()
         self._register_calendar_skills()
+        self._register_email_skills()
         self._register_web_skills()
         self._register_meta_skills()
         self._register_guideline_skills()
@@ -1915,6 +1916,159 @@ class SkillRegistry:
                 "title": {"type": "string", "description": "Event title to delete"},
             }},
             calendar_delete, "integrations",
+        ))
+
+    # ── Email ────────────────────────────────────────────────────────────
+    #
+    # These existed as WebSocket RPCs and nothing else, so the dashboard could
+    # read and send mail while the agent could not — the model had no way to
+    # reach any of it. The integration itself was already written; this is what
+    # makes it something the agent can decide to use.
+
+    def _register_email_skills(self):
+        def _not_configured() -> bool:
+            """Whether email has been set up at all.
+
+            Worth the call: "nothing unread" and "no account configured" are
+            very different answers, and an agent told "no mail" on an
+            unconfigured account reports a false all-clear.
+            """
+            try:
+                from backend.integrations.email_integration import email_client
+                cfg = email_client._load_config()
+                return not (cfg.get("imap_server") and cfg.get("email"))
+            except Exception:  # noqa: BLE001
+                return True
+
+        _NO_ACCOUNT = ("Email is not set up. Add the address and the IMAP/SMTP "
+                       "server in Settings first.")
+
+        async def email_list(params: dict) -> dict:
+            """Read unread mail, newest first."""
+            from backend.integrations.email_integration import email_client
+            try:
+                limit = int(params.get("limit") or 10)
+            except (TypeError, ValueError):
+                limit = 10
+            limit = max(1, min(limit, 50))
+            if _not_configured():
+                return {"success": False, "emails": [], "count": 0,
+                        "error": _NO_ACCOUNT}
+            mails = email_client.fetch_unread(limit=limit)
+            if not mails:
+                return {"success": True, "emails": [], "count": 0,
+                        "message": "No unread mail."}
+            return {"success": True, "emails": mails, "count": len(mails)}
+        self.register(SkillDefinition(
+            "email_list",
+            "Read the unread email in the inbox, newest first. Use this when "
+            "the user asks what is in their inbox, whether anything needs a "
+            "reply, or wants their mail summarised. Returns sender, subject "
+            "and a body preview rather than the whole message — use "
+            "email_search to find a specific one.",
+            {"type": "object", "properties": {
+                "limit": {"type": "integer",
+                          "description": "How many to fetch (default 10, max 50)."},
+            }},
+            email_list, "integrations",
+        ))
+
+        async def email_search(params: dict) -> dict:
+            """Search the mailbox for a sender, subject or body text."""
+            from backend.integrations.email_integration import email_client
+            query = str(params.get("query") or "").strip()
+            if not query:
+                return {"success": False, "emails": [], "count": 0,
+                        "error": "What should I search for? Pass it as 'query'."}
+            try:
+                limit = int(params.get("limit") or 20)
+            except (TypeError, ValueError):
+                limit = 20
+            limit = max(1, min(limit, 50))
+            if _not_configured():
+                return {"success": False, "emails": [], "count": 0,
+                        "error": _NO_ACCOUNT}
+            hits = email_client.search(query, limit=limit)
+            return {"success": True, "emails": hits, "count": len(hits)}
+        self.register(SkillDefinition(
+            "email_search",
+            "Search the user's mailbox for a sender, subject or body text. Use "
+            "this to find a specific message or thread instead of listing the "
+            "whole inbox.",
+            {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Text to look for."},
+                "limit": {"type": "integer", "description": "Max results."},
+            }, "required": ["query"]},
+            email_search, "integrations",
+        ))
+
+        async def email_send(params: dict) -> dict:
+            """Send mail. Gated: it leaves the machine and cannot be recalled."""
+            from backend.integrations.email_integration import email_client
+            to = str(params.get("to") or "").strip()
+            subject = str(params.get("subject") or "").strip()
+            body = str(params.get("body") or "")
+            if not to:
+                return {"success": False, "error": "'to' is required."}
+            if "@" not in to:
+                return {"success": False,
+                        "error": f"'{to}' does not look like an email address."}
+            if not subject and not body:
+                return {"success": False,
+                        "error": "An email needs a subject or a body."}
+            if _not_configured():
+                return {"success": False, "error": _NO_ACCOUNT}
+            result = email_client.send(to=to, subject=subject, body=body,
+                                       html=bool(params.get("html")))
+            if not result.get("success"):
+                return {"success": False,
+                        "error": result.get("error") or "sending failed"}
+            return {"success": True, "message": f"Sent to {to}."}
+        self.register(SkillDefinition(
+            "email_send",
+            "Send an email. The message is gone once sent and cannot be "
+            "recalled, so state the recipient, subject and body in the "
+            "conversation before calling this — never send on an assumption "
+            "about who the user meant.",
+            {"type": "object", "properties": {
+                "to": {"type": "string", "description": "Recipient address."},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+                "html": {"type": "boolean",
+                         "description": "Send the body as HTML (default false)."},
+            }, "required": ["to"]},
+            email_send, "integrations",
+            requires_approval=True,
+        ))
+
+        async def transcribe_audio(params: dict) -> dict:
+            """Transcribe a recording locally, for notes or summaries."""
+            path = str(params.get("path") or "").strip()
+            if not path:
+                return {"success": False,
+                        "error": "Which file? Pass its path as 'path'."}
+            from backend.voice.stt import transcribe_file
+            result = await asyncio.to_thread(transcribe_file, path)
+            if not result.get("success"):
+                return result
+            text = result.get("text") or ""
+            if not text:
+                return {"success": True, "text": "",
+                        "message": ("The file transcribed to nothing — it may "
+                                    "contain no speech, or be silent.")}
+            return result
+        self.register(SkillDefinition(
+            "transcribe_audio",
+            "Transcribe an audio or video recording of speech into text, "
+            "using the local model (nothing is uploaded). Use this for a "
+            "meeting or voice-note recording the user points you at, then "
+            "summarise it or pull out the action items yourself. It returns "
+            "the raw transcript, so the reading is still yours to do.",
+            {"type": "object", "properties": {
+                "path": {"type": "string",
+                         "description": "Path to the audio/video file."},
+            }, "required": ["path"]},
+            transcribe_audio, "integrations",
         ))
 
     # ── Web Search ───────────────────────────────────────────────────────

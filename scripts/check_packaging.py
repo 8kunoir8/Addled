@@ -81,10 +81,18 @@ DELIBERATE_SOURCES = {
 FORBIDDEN_SOURCES = {"tools", "tools/rtk", "backend/memory", "dist"}
 
 # Nothing that looks like these may ship at all, whatever the filters say.
+# Nothing that looks like these may ship at all, whatever the filters say.
+#
+# The trailing group covers the save-time artifacts as well as the files
+# themselves: a `.json.bak` or `.json.tmp` is still the user's settings, and
+# `!memory/*.json` in electron-builder does not match either (a single `*` does
+# not cross the extra extension). That gap is why this pattern, not the YAML,
+# is what has to be complete — the check is what catches the next such file.
 FORBIDDEN_NAMES = re.compile(
     r"(^|/)(settings\.json|chat_history\.json|user_profile\.json|"
     r"models_catalog\.json|maintenance_state\.json|session_context\.json|"
-    r"[^/]*\.db|[^/]*\.db-(wal|shm)|[^/]*\.log|[^/]*\.jsonl)$")
+    r"[^/]*\.db|[^/]*\.db-(wal|shm)|[^/]*\.log|[^/]*\.jsonl)"
+    r"(\.(tmp|bak|old|orig|swp))?$")
 
 
 def extra_resource_sources(yaml_text: str) -> list[str]:
@@ -108,6 +116,82 @@ def git_ignored(path: str) -> bool:
     proc = subprocess.run(["git", "-C", ROOT, "check-ignore", "-q", "--", path],
                           capture_output=True, text=True)
     return proc.returncode == 0
+
+# Content under `memory/` that is bundled ON PURPOSE rather than being user
+# state. Fetched or authored once and shipped so the app works offline; an
+# upgrade replacing these is the intent, not a fault.
+BUNDLED_ON_PURPOSE = {
+    "backend/voice/models",
+    "backend/character/default_skins",
+}
+
+# Paths the discovery finds that hold CODE, not state. `backend/memory` is the
+# folder the stores live in and the folder the memory modules are imported from;
+# it must ship. A path landng here means the pattern matched a constant that
+# names a container rather than a store.
+CODE_DIRECTORIES = {
+    "backend/memory",
+}
+
+# What a store's path looks like in this codebase. Every state module follows
+# one of these shapes, so matching them keeps the check honest as files are
+# added — the alternative is a hand-written list, which is the very thing that
+# drifts, and the failure it drifts into is shipping a user's data over their
+# own.
+_STATE_EXPR = re.compile(
+    r'^[A-Z_]+\s*=\s*'
+    r'(?P<base>Path\(__file__\)(?:\.resolve\(\))?'
+    r'(?:\.parent)+|SETTINGS_PATH\.parent)'
+    r'(?P<tail>(?:\s*/\s*"[^"]+")+)')
+
+def written_state_paths() -> set[str]:
+    """Repository-relative paths the backend WRITES user data to.
+
+    Read out of the source rather than listed by hand, so a new store is
+    covered the moment it exists instead of when someone remembers.
+
+    The expression is reconstructed rather than pattern-matched piecemeal:
+    `__file__.parent.parent / "memory" / "x"` is a *path*, and counting `parent`
+    is the only way to resolve it. Guessing from the file's own directory put
+    `memory/mood.json` under `backend/character/`, which is not where it is
+    written and would have had the check guarding a path nothing uses.
+    """
+    backend = os.path.join(ROOT, "backend")
+    found: set[str] = set()
+    for dirpath, _dirnames, filenames in os.walk(backend):
+        if "__pycache__" in dirpath:
+            continue
+        rel_dir = os.path.relpath(dirpath, ROOT).replace(os.sep, "/")
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            try:
+                with open(os.path.join(dirpath, filename), "r",
+                          encoding="utf-8", errors="replace") as fh:
+                    lines = fh.readlines()
+            except OSError:
+                continue
+            for line in lines:
+                m = _STATE_EXPR.match(line.strip())
+                if not m:
+                    continue
+                base = m.group("base")
+                # Every `__file__` here is backend/<pkg>/<mod>.py, so start at
+                # that file and walk up once per `.parent`.
+                if base.startswith("Path(__file__)"):
+                    here = f"{rel_dir}/{filename}"
+                    ups = base.count(".parent")
+                    node = here
+                    for _ in range(ups):
+                        node = os.path.dirname(node)
+                    anchor = node.replace(os.sep, "/")
+                else:
+                    # SETTINGS_PATH lives at backend/memory/settings.json.
+                    anchor = "backend/memory"
+                parts = re.findall(r'"([^"]+)"', m.group("tail"))
+                if parts:
+                    found.add(anchor.rstrip("/") + "/" + "/".join(parts))
+    return found
 
 
 def extra_resource_filters(yaml_text: str, source: str) -> list[str]:
@@ -330,6 +414,62 @@ def main() -> int:
         check(f"git ignores {name}", git_ignored(name),
               "the deploy derives its excludes from git, so this is the rule "
               "that has to hold")
+
+    # ---- everything the app WRITES must be excluded from packaging --------
+    #
+    # Everything above proves the installer does not LEAK the developer's data.
+    # This proves the other half, which nothing checked: that the data a user
+    # ACCUMULATES is never shipped, so an upgrade cannot overwrite it.
+    #
+    # Why it matters. All user state lives inside the install directory
+    # (`resources/backend/memory/`), so an upgrade preserves it only because the
+    # installer carries no copy to replace it with. An NSIS upgrade adds and
+    # replaces files; it does not wipe the folder. That means a state path which
+    # is NOT excluded ships the developer's copy and overwrites the user's —
+    # silently, and it looks like nothing happened.
+    #
+    # The gap this closes: the exclude list is hand-maintained, and it is only
+    # compared against `.gitignore`. A new `memory/thing/` added without a
+    # matching `.gitignore` line broke BOTH guarantees at once, and neither
+    # check noticed. Here the paths are taken from the code that writes them,
+    # so a new store is covered the moment it exists.
+    state_paths = written_state_paths()
+    check("state paths were found in the code", len(state_paths) >= 10,
+          f"only found {len(state_paths)} — has the pattern changed?")
+
+    for rel in sorted(state_paths):
+        # Seed content deliberately bundled (voice models, default skins) is
+        # not user state; it is named here so the exception is visible.
+        if any(rel == s or rel.startswith(s + "/")
+               for s in BUNDLED_ON_PURPOSE):
+            continue
+        # `backend/memory` is the folder the stores live IN, not a store: it
+        # holds the memory modules, which are code and must ship. The module
+        # that defines MEMORY_DIR means "the parent of settings.json", and
+        # treating that as user state would demand we stop shipping the code.
+        if rel in CODE_DIRECTORIES:
+            continue
+        check(f"git ignores the writable path {rel}", git_ignored(rel),
+              "a new store was added without a .gitignore rule, so the "
+              "installer will ship the developer's copy and an upgrade will "
+              "overwrite the user's")
+
+    # And the packaged filter must actually exclude it. git being right is not
+    # enough on its own: the installer reads this list, not .gitignore.
+    for rel in sorted(state_paths):
+        if any(rel == s or rel.startswith(s + "/")
+               for s in BUNDLED_ON_PURPOSE):
+            continue
+        if rel in CODE_DIRECTORIES:
+            continue
+        if not rel.startswith("backend/"):
+            continue
+        inner = rel[len("backend/"):]
+        leaked = sorted(p for p in shipped
+                        if p == inner or p.startswith(inner + "/"))
+        check(f"the installer does not ship the writable path {inner}",
+              not leaked,
+              f"would ship {len(leaked)} file(s), e.g. {leaked[:3]}")
 
     if fails:
         print(f"FAIL: {len(fails)} packaging check(s) failed")

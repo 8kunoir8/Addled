@@ -82,6 +82,90 @@ class GoalExecutor:
         except Exception as e:  # noqa: BLE001
             return "", f"could not create a '{wanted}' desk: {e}"
 
+    def _assign_agent(self, step: dict) -> None:
+        """Stamp the resolved desk onto an agent step, before it runs.
+
+        The plan names a role ("researcher"); which desk answers that role is
+        only decided here. Recording it on the step lets the progress event —
+        and the goal on disk — say which agent did the work, instead of leaving
+        the UI to show a role that may map to several desks.
+        """
+        if str(step.get("kind") or "agent").strip().lower() == "action":
+            return
+        try:
+            agent_id, _problem = self._resolve(str(step.get("role") or "general"))
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not resolve a desk for %s: %s",
+                      step.get("role"), e)
+            return
+        if agent_id:
+            step["agentId"] = agent_id
+            step["agent"] = self._agent_name(agent_id)
+
+    def _agent_name(self, agent_id: str) -> str:
+        """The desk's display name, or "" when it cannot be read.
+
+        Never raises: this feeds a broadcast, and a goal that cannot name its
+        desk is still worth running.
+        """
+        try:
+            from backend.swarm.orchestrator import swarm
+            agent = swarm.get_agent(str(agent_id or ""))
+            if agent is not None:
+                return str(getattr(agent, "name", "") or "")
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not name agent %s: %s", agent_id, e)
+        return ""
+
+    def _usable_steps(self, raw) -> list[dict]:
+        """The step dicts in a stored plan, dropping anything else.
+
+        A plan is read back from disk, where a partial write or a hand-edit can
+        leave `steps` as a string, a number, or a list with non-dict entries.
+        Only dicts are steps; everything else is discarded here so no later
+        `step.get(...)` has to defend itself.
+        """
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return [s for s in raw if isinstance(s, dict)]
+
+    def _plan_snapshot(self, steps) -> list[dict]:
+        """A renderable view of the plan, for the Goals page.
+
+        A re-plan replaces the step list wholesale, so the page is sent the
+        whole thing rather than being left to assume the old list is still
+        right. Kept deliberately narrow: what the detail view draws, nothing
+        more.
+
+        `steps` is treated as untrusted. It comes from a JSON file on disk,
+        which an interrupted write or a hand-edit can leave as a string or a
+        list of strings rather than the shape the planner writes. Anything
+        unusable is skipped rather than raised over: a plan that cannot be
+        drawn is worth reporting, but not worth failing the goal for.
+        """
+        if not isinstance(steps, (list, tuple)):
+            return []
+        out = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            try:
+                index = int(step.get("index") or 0)
+            except (TypeError, ValueError):
+                index = 0
+            out.append({
+                "index": index,
+                "kind": str(step.get("kind") or "agent"),
+                "role": str(step.get("role") or ""),
+                "agentId": str(step.get("agentId") or ""),
+                "agent": str(step.get("agent") or ""),
+                "description": str(step.get("description")
+                                   or step.get("task") or "")[:300],
+                "status": str(step.get("status") or "pending"),
+                "error": str(step.get("error") or "")[:200],
+            })
+        return out
+
     def _progress(self, goal_id: str, status: str, extra: dict | None = None):
         """Announce progress to the Goals page. Never raises."""
         try:
@@ -127,9 +211,17 @@ class GoalExecutor:
         """Run one agent step through the swarm. Returns (ok, output, error)."""
         from backend.swarm.orchestrator import swarm
         role = str(step.get("role") or "general")
-        agent_id, problem = self._resolve(role)
+        # Reuse the desk already resolved when the step was announced, so the
+        # agent named in the progress event is the one that actually runs it.
+        agent_id = str(step.get("agentId") or "")
+        problem = ""
+        if not agent_id:
+            agent_id, problem = self._resolve(role)
         if not agent_id:
             return False, "", problem
+
+        step["agentId"] = agent_id
+        step["agent"] = step.get("agent") or self._agent_name(agent_id)
 
         task = str(step.get("task") or step.get("description") or "").strip()
         expects = str(step.get("expects") or "").strip()
@@ -218,8 +310,20 @@ class GoalExecutor:
             return {"status": "failed", "error": f"Goal not found: {goal_id}"}
 
         self._cancel_flags[goal_id] = False
-        plan = goal.get("plan", {}) or {}
-        steps = plan.get("steps", []) or []
+        # The plan comes out of a JSON file, so it is treated as untrusted: a
+        # truncated write or a hand-edit can leave `plan` as a string, or
+        # `steps` as anything at all. Reading it defensively here means the
+        # rest of run_goal can assume the shape it expects, instead of raising
+        # an AttributeError that kills the goal with nothing shown to the user.
+        plan = goal.get("plan")
+        if not isinstance(plan, dict):
+            plan = {}
+            goal["plan"] = plan
+        steps = self._usable_steps(plan.get("steps"))
+        if plan.get("steps") != steps:
+            # Record the repair, so the goal does not keep re-reading a shape
+            # that cannot run and the user can see what happened.
+            plan["steps"] = steps
         rounds = 0
         findings: list[dict] = list(goal.get("findings") or [])
 
@@ -239,7 +343,8 @@ class GoalExecutor:
             self._save(goal)
 
             self._progress(goal_id, "running",
-                           {"round": rounds, "step": 0, "total": len(steps)})
+                           {"round": rounds, "step": 0, "total": len(steps),
+                            "steps": self._plan_snapshot(steps)})
 
             completed: set[int] = set()
             attempts = 0
@@ -275,10 +380,20 @@ class GoalExecutor:
                     break
 
                 step["status"] = "in_progress"
+                # Resolve the desk BEFORE announcing, so the event can name the
+                # agent that is about to do the work. Resolving inside the run
+                # meant `step_started` went out with an empty agent and the UI
+                # could only ever show the planned role.
+                self._assign_agent(step)
                 self._save(goal)
                 self._progress(goal_id, "step_started",
                                {"round": rounds, "step": index,
                                 "total": len(steps),
+                                "kind": str(step.get("kind") or "agent"),
+                                "role": str(step.get("role") or ""),
+                                "agentId": str(step.get("agentId") or ""),
+                                "agent": str(step.get("agent") or ""),
+                                "steps": self._plan_snapshot(steps),
                                 "description": str(step.get("description")
                                                    or step.get("task")
                                                    or "")[:160]})
@@ -306,13 +421,19 @@ class GoalExecutor:
                         })
                     self._progress(goal_id, "step_completed",
                                    {"round": rounds, "step": index,
-                                    "total": len(steps)})
+                                    "total": len(steps),
+                                    "steps": self._plan_snapshot(steps),
+                                    "agentId": str(step.get("agentId") or ""),
+                                    "agent": str(step.get("agent") or "")})
                 else:
                     step["status"] = "failed"
                     step["error"] = error
                     self._progress(goal_id, "step_failed",
                                    {"round": rounds, "step": index,
                                     "total": len(steps),
+                                    "steps": self._plan_snapshot(steps),
+                                    "agentId": str(step.get("agentId") or ""),
+                                    "agent": str(step.get("agent") or ""),
                                     "error": str(error)[:160]})
                     stopped = error or "the step failed"
                     # Deliberately NOT a `break`. The remaining steps are still

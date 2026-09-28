@@ -10,10 +10,14 @@ Default provider: DeepSeek (https://api.deepseek.com).
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger("addled.config")
 
 # ---- root resolution ---------------------------------------------------------
 
@@ -241,6 +245,21 @@ DEFAULT_SETTINGS: dict = {
         "asked": False,
         "download_approved": False,
         "declined": False,
+    },
+    # An OpenAI-compatible endpoint in front of the local model, so agent tools
+    # (Copilot, Codex, ...) can use it as their model. Off by default: it serves
+    # the machine's GPU to whatever can reach the port, so it is a choice, not
+    # something an update should switch on.
+    #
+    # `token` is generated on first start and kept, because a token that changed
+    # every launch would mean re-configuring every tool each time.
+    "model_api": {
+        "enabled": False,
+        "port": 8099,
+        # Reserved for exposing the endpoint beyond this machine. Not honoured
+        # yet: the server always binds loopback until this is implemented.
+        "expose_lan": False,
+        "token": "",
     },
     "chat": {
         "max_tokens": 4096,
@@ -610,10 +629,42 @@ class _Config:
                          value={**stored, "params": params})
 
     def save(self):
-        """Persist settings to disk."""
+        """Persist settings to disk, atomically.
+
+        Written to a temporary file and then moved into place, because the
+        previous version opened the real path and wrote into it. A write that
+        is interrupted — the process killed, the machine losing power, or the
+        NSIS updater replacing files as the app closes — left `settings.json`
+        truncated. The next launch then read a partial file and fell back to
+        defaults, which is experienced as "my provider changed, my API keys are
+        gone", with nothing in the logs to say why because the file that would
+        have explained it is the one that was lost.
+
+        `os.replace` is atomic on Windows and POSIX: a reader sees either the
+        old file or the new one, never half of either.
+        """
         _MEMORY.mkdir(parents=True, exist_ok=True)
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2, ensure_ascii=False)
+        tmp = SETTINGS_PATH.with_suffix(".json.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, SETTINGS_PATH)
+        except OSError as e:
+            log.warning("could not write settings: %s", e)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        # A copy of the settings that were replaced, so a bad save is
+        # recoverable by hand rather than being simply gone.
+        try:
+            if SETTINGS_PATH.exists():
+                shutil.copy2(SETTINGS_PATH, SETTINGS_PATH.with_suffix(".json.bak"))
+        except OSError:
+            pass
         self._dirty = False
 
     def get(self, *keys: str, default=None):

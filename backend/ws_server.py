@@ -2598,6 +2598,26 @@ def _register_default_handlers():
         goals = goal_store.list_all(status)
         return {"goals": goals, "count": len(goals)}
 
+    async def goal_get(params: dict, ws) -> dict:
+        """One goal in full: plan, per-step status, findings and rounds.
+
+        `goal.list` returns every goal, which is wasteful for a detail view and
+        makes the page scan for what it already has an id for. An unknown id is
+        reported as an explicit error rather than an empty object, so the page
+        can say the goal is gone instead of rendering a blank card.
+        """
+        from backend.goals.store import goal_store
+        goal_id = str(params.get("goalId") or "").strip()
+        if not goal_id:
+            return {"success": False, "error": "No goalId provided"}
+        try:
+            goal = goal_store.load(goal_id)
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": f"could not read {goal_id}: {e}"}
+        if not goal:
+            return {"success": False, "error": f"Goal not found: {goal_id}"}
+        return {"success": True, "goal": goal}
+
     async def goal_start(params: dict, ws) -> dict:
         from backend.goals.store import goal_store
         from backend.goals.executor import goal_executor
@@ -4428,6 +4448,38 @@ def _register_default_handlers():
             data["hf"] = {"deps_ready": False, "error": str(exc)}
         return data
 
+    # ---- the OpenAI-compatible endpoint for outside agent tools --------------
+
+    async def modelapi_status(params: dict, ws) -> dict:
+        """Everything Settings needs to show and copy the endpoint.
+
+        `status()` reads config and the local-model manager, both of which can
+        block, so it runs off the event loop.
+        """
+        from backend.model_api import model_api
+        try:
+            return await asyncio.to_thread(model_api.status)
+        except Exception as e:  # noqa: BLE001
+            return {"enabled": False, "running": False, "error": str(e)}
+
+    async def modelapi_start(params: dict, ws) -> dict:
+        from backend.model_api import model_api
+        try:
+            ok, detail = await asyncio.to_thread(model_api.start)
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": str(e)}
+        return {"success": ok, "detail": detail,
+                "status": await asyncio.to_thread(model_api.status)}
+
+    async def modelapi_stop(params: dict, ws) -> dict:
+        from backend.model_api import model_api
+        try:
+            await asyncio.to_thread(model_api.stop)
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": str(e)}
+        return {"success": True, "status": await asyncio.to_thread(
+            model_api.status)}
+
     async def localllm_install(params: dict, ws) -> dict:
         """User approved the download — start it (resumable)."""
         from backend.local_llm.manager import local_llm
@@ -4731,6 +4783,7 @@ def _register_default_handlers():
     # Phase 5 Goals engine
     _server.register("goal.create", goal_create)
     _server.register("goal.list", goal_list)
+    _server.register("goal.get", goal_get)
     _server.register("goal.replan", goal_replan)
     _server.register("goal.start", goal_start)
     _server.register("goal.cancel", goal_cancel)
@@ -4824,6 +4877,9 @@ def _register_default_handlers():
     _server.register("localLlm.setOption", localllm_set_option)
     _server.register("localLlm.installHfDeps", localllm_hf_install)
     _server.register("hf.unload", hf_unload)
+    _server.register("modelApi.status", modelapi_status)
+    _server.register("modelApi.start", modelapi_start)
+    _server.register("modelApi.stop", modelapi_stop)
 
     # Skill Forge
     _server.register("forge.create", forge_create)

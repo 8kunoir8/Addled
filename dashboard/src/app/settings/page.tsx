@@ -1017,6 +1017,8 @@ function ProvidersSection({ settings, update, saving, status }: any) {
       <p className="mt-2 text-[10px] text-[#484f58] break-all">{llmStatus?.dir||''}</p>
     </div>
 
+    <ModelEndpointPanel/>
+
     <div className="mt-3 rounded-lg border border-[#30363d] p-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-[#e8eaed]">🤗 Hugging Face (Local)</p>
@@ -1037,7 +1039,6 @@ function ProvidersSection({ settings, update, saving, status }: any) {
     </div>
 
     <CustomProvidersPanel custom={p.custom||[]} update={update} btn={btn} btnPrimary={btnPrimary}/>
-
     {Object.entries(builtin).filter(([,cfg]:[string,any])=>!cfg.local).map(([id,cfg]:[string,any])=>
       <SettingRow key={id} label={`${cfg.name} API Key`}>
         <div className="flex items-center gap-2">
@@ -1047,6 +1048,110 @@ function ProvidersSection({ settings, update, saving, status }: any) {
         </div>
       </SettingRow>)}
   </div>;
+}
+
+function ModelEndpointPanel() {
+  const { send, state: wsState } = useWS();
+  const [st, setSt] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState('');
+  const btn = 'text-xs px-3 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:bg-[#21262d] disabled:opacity-50';
+  const btnPrimary = 'text-xs px-3 py-1 rounded bg-[#3380FF] text-white hover:bg-[#4d94ff] disabled:opacity-50';
+
+  const refresh = useCallback(async () => {
+    if (wsState !== 'connected') return;
+    try { setSt(await send('modelApi.status', {})); } catch {}
+  }, [send, wsState]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      // Enabling writes the setting first, because start() refuses while the
+      // setting is off — the two must not be able to disagree.
+      await send('settings.set', { section: 'model_api', key: 'enabled', value: !st?.running });
+      await send(st?.running ? 'modelApi.stop' : 'modelApi.start', {});
+      await refresh();
+    } catch {}
+    setBusy(false);
+  };
+
+  const copy = async (label: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(label);
+      window.setTimeout(() => setCopied(''), 1500);
+    } catch {}
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium text-[#e8eaed]">🔌 Use Addled as a model</p>
+        <span className="text-[10px] text-[#8b949e]">
+          {st?.running ? '● listening' : '— off'}
+        </span>
+      </div>
+      <p className="mt-1 text-[11px] text-[#8b949e]">
+        An OpenAI-compatible endpoint for agent tools — GitHub Copilot, Codex and
+        anything else that takes a base URL. Point them at this instead of the
+        model's own port: the address here stays put, and asking starts the
+        model if it is asleep.
+      </p>
+      <p className="mt-1 text-[10px] text-[#484f58]">
+        Reachable on this machine only{st?.loopback_only ? ' (127.0.0.1)' : ''}. Claude Code
+        speaks a different protocol and is not supported yet.
+      </p>
+
+      {st?.running && (
+        <div className="mt-3 space-y-2">
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] uppercase tracking-wide text-[#8b949e]">Base URL</span>
+              <button onClick={() => copy('url', st.base_url)} className="text-[10px] text-[#3380FF] hover:underline">
+                {copied === 'url' ? 'copied' : 'copy'}
+              </button>
+            </div>
+            <p className="font-mono text-[11px] text-[#e8eaed] break-all">{st.base_url}</p>
+          </div>
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] uppercase tracking-wide text-[#8b949e]">API key</span>
+              <button onClick={() => copy('key', st.token || '')} className="text-[10px] text-[#3380FF] hover:underline">
+                {copied === 'key' ? 'copied' : 'copy'}
+              </button>
+            </div>
+            <p className="font-mono text-[11px] text-[#e8eaed] break-all">{st.token}</p>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] uppercase tracking-wide text-[#8b949e]">Model name</span>
+            <span className="font-mono text-[11px] text-[#e8eaed]">{st.model_id}</span>
+          </div>
+          {/* Worth saying plainly: a tool that reaches a sleeping model gets a
+              helpful error rather than a hang, but it still cannot answer. */}
+          {!st.model_running && (
+            <p className="text-[10px] text-[#d29922]">
+              The local model is not running. It will start on the first request,
+              which takes a moment.
+            </p>
+          )}
+          {!st.model_installed && !st.model_running && (
+            <p className="text-[10px] text-[#d29922]">
+              No local model is installed yet — download it above first.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button disabled={busy || wsState !== 'connected'} onClick={toggle} className={st?.running ? btn : btnPrimary}>
+          {busy ? '⏳ working…' : (st?.running ? '■ Turn off' : '▶ Turn on')}
+        </button>
+        <button disabled={busy} onClick={refresh} className={btn}>↻ Refresh</button>
+      </div>
+    </div>
+  );
 }
 
 function CustomProvidersPanel({ custom, update, btn, btnPrimary }: any) {

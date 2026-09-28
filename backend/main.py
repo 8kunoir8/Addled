@@ -151,6 +151,20 @@ def main():
     from backend.http_api import start_http_api
     start_http_api(port=9877)
 
+    # ---- OpenAI-compatible endpoint in front of the local model --------------
+    # Off unless the user turned it on. Started here rather than lazily so the
+    # Address a tool was configured with is live from launch; if it cannot
+    # bind, that is logged and the app carries on.
+    try:
+        from backend.model_api import model_api
+        _ok, _detail = model_api.start()
+        if _ok:
+            log.info("Model API ready at %s", _detail)
+        else:
+            log.info("Model API not started: %s", _detail)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Model API unavailable: %s", e)
+
     # ---- character widget ----------------------------------------------------
     from backend.character.states import CharacterState, StateMachine, AGENT_TO_CHARACTER
     from backend.character.avatar import CharacterWidget

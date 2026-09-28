@@ -49,6 +49,13 @@ extraResources:
       - '!**/*.pyc'
       # The instance's own memory, profile, config, logs and audit trail.
       - '!memory/*.json'
+      # The settings save writes a temp file then renames it, and keeps a .bak
+      # of what it replaced. `!memory/*.json` does not match either — the `*`
+      # does not cross the extra extension — so without these two lines the
+      # installer would ship a developer's backup and an upgrade would restore
+      # it over the user's live settings.
+      - '!memory/*.json.tmp'
+      - '!memory/*.json.bak'
       - '!memory/*.db'
       - '!memory/*.db-shm'
       - '!memory/*.db-wal'

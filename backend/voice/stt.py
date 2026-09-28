@@ -24,6 +24,57 @@ log = logging.getLogger("addled.stt")
 SAMPLE_RATE = 16000
 FRAME = 512  # VAD frame size @16 kHz
 
+# One model, shared by the listener and by file transcription. Loading a
+# second copy would double the RAM for no benefit, and the model is large
+# enough that doing so is worth avoiding.
+_FILE_MODEL = None
+_FILE_MODEL_LOCK = threading.Lock()
+
+def transcribe_file(path: str) -> dict:
+    """Transcribe an audio or video file with the local whisper model.
+
+    Separate from the live listener: that one is built around a microphone
+    stream and a wake word, and has no way to take a file off disk. This
+    loads the same model once and reuses it.
+
+    Returns ``{"success", "text", "language"}``, or an ``error`` explaining
+    what to install when the model is missing — a stack trace here would just
+    read as "transcription is broken".
+    """
+    global _FILE_MODEL
+    from pathlib import Path
+
+    target = Path(str(path or "")).expanduser()
+    if not target.is_file():
+        return {"success": False, "error": f"No such file: {target}"}
+    try:
+        from backend.config import config
+        size = config.get("voice", "stt_model", default="tiny") or "tiny"
+    except Exception:  # noqa: BLE001
+        size = "tiny"
+
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        return {"success": False,
+                "error": ("Local transcription needs faster-whisper. Install "
+                          "it from Settings, then try again.")}
+
+    try:
+        with _FILE_MODEL_LOCK:
+            if _FILE_MODEL is None:
+                _FILE_MODEL = WhisperModel(size, device="cpu",
+                                           compute_type="int8")
+            model = _FILE_MODEL
+        segments, info = model.transcribe(
+            str(target), beam_size=1, vad_filter=True)
+        text = " ".join(s.text for s in segments).strip()
+        return {"success": True, "text": text,
+                "language": getattr(info, "language", "") or ""}
+    except Exception as e:  # noqa: BLE001
+        log.warning("file transcription failed for %s: %s", target, e)
+        return {"success": False, "error": f"could not transcribe: {e}"}
+
 
 def _contains_wake_word(text: str, wake_word: str) -> bool:
     words = {w.strip(",.!?") for w in (text or "").lower().split()}

@@ -1,7 +1,7 @@
 # Addled
 
 > An AI desktop companion with a floating animated character, full web dashboard,  
-> voice interaction (wake word + speech), 61 built-in skills, self-extending  
+> voice interaction (wake word + speech), 81 built-in skills, self-extending  
 > capability forge, 10 AI provider backends, live screen awareness, long-term  
 > memory, and a full safety suite.  
 > Built with Python 3.14 + PyQt6 + Electron 28 + Next.js 16.
@@ -65,8 +65,8 @@ launch.bat
 │          ▼                   ▼           │
 │  ┌────────────────────────────────────┐  │
 │  │      Python Backend Service        │  │
-│  │  Engine • 193 WS Handlers          │  │
-│  │  61 Skills • Skill Forge           │  │
+│  │  Engine • 197 WS Handlers          │  │
+│  │  81 Skills • Skill Forge           │  │
 │  │  10 AI Providers • Goals • Code    │  │
 │  │  Swarm • Calendar • Email • Browser│  │
 │  │  Character • Safety • Memory •     │  │
@@ -88,7 +88,7 @@ launch.bat
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
 | Desktop Shell | Electron 28, system tray, auto-updater, backend auto-respawn | ✅ Built |
 | Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
-| Communication | WebSocket JSON-RPC 2.0 (183 handlers) | ✅ Built |
+| Communication | WebSocket JSON-RPC 2.0 (197 handlers) | ✅ Built |
 
 ---
 
@@ -132,6 +132,34 @@ automatically when selected provider*) or when *Keep local AI running* is switch
 on — and any message routed to it starts it on demand (~3 s). While it is not
 selected or kept, it stays stopped and frees its RAM after `local_llm.idle_unload_min`
 (15 min) of inactivity.
+
+### 🔌 Use Addled as a model (OpenAI-compatible endpoint)
+Settings → Providers → **Use Addled as a model** serves the local model at a
+fixed OpenAI-compatible address, so an agent tool can use Addled as *its* model:
+
+```
+Base URL    http://127.0.0.1:8099/v1
+API key     sk-addled-…      (generated once, kept across restarts)
+Model       addled-local
+```
+
+Point GitHub Copilot, Codex, or anything else that accepts a base URL at those
+three values. Works with tool calling and streaming, both verified against the
+running model.
+
+Why a separate address rather than the model's own port: the runner takes the
+next free port when 8090 is busy, so a tool configured once would break on the
+next launch; it reports the **GGUF file path** as the model id and ignores the
+`model` you send, echoing that path back; it has no auth; and it is stopped
+until Addled itself wakes it, so an outside tool's first request would meet a
+closed port. The endpoint keeps one stable address, answers with a real model
+name, requires the key, and **starts the model on the first request** — so a
+tool works without you opening Addled first.
+
+*Honest limits:* it binds **loopback only**, so a tool on another machine cannot
+reach it. **Claude Code is not supported** — it speaks the Anthropic protocol
+(`/v1/messages`), not the OpenAI one. And the local model is an 8B on one
+machine: expect seconds per turn, not the latency of a hosted API.
 
 ### 🎯 Task-Aware Model Routing
 Addled picks the model by what the task needs instead of sending one model
@@ -270,10 +298,10 @@ Telegram (grammY with 6 commands), WhatsApp (Baileys multi-device with QR pairin
 ### 💗 Lifelike companion (mood, timeline, presence)
 A persistent **mood & emotion engine** (valence + energy, decays over time) drives the character's visual tint, movement energy and **voice emotion** (Kokoro speech speed follows the mood). **Barge-in**: start talking while Addled speaks and it stops mid-sentence. **Initiative cadence**: return greetings + a daily check-in. An **episodic timeline** journals every day (nightly summaries) and a learned **user model** (preferences, rituals, hours) is injected into every chat — the agent references its own past naturally. **Project awareness**: index your code workspace (semantic search, chat injection). **Predictive proactivity**: weekly rhythms mined from tasks/calendar → gentle suggestions. **Reflection loop**: per-skill telemetry + weekly self-review.
 
-### � Remote access (Tailscale)
+### 📡 Remote access (Tailscale)
 Reach Addled from your phone or another machine, in a browser, over Tailscale — status, sign-in and `tailscale serve` sharing are all managed from the **Remote** page, which can also run the official Tailscale installer when you ask it to (nothing installs on its own).
 
-The WebSocket API has **no authentication of its own**, and several of its 183 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
+The WebSocket API has **no authentication of its own**, and several of its 197 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
 
 - It serves the login page and the dashboard, and only bridges a WebSocket to `127.0.0.1:9876` **after** validating a session. It binds loopback only; Tailscale terminates TLS and proxies to it, so the browser gets a real `https://<machine>.<tailnet>.ts.net` URL and `wss://` works without Addled handling a certificate.
 - The **password is scrypt-hashed** (`settings.json`), sessions are **in-memory only** (a restart logs everyone out), login attempts are **rate-limited per address**, and the session cookie is `HttpOnly` + `SameSite=Lax` (+ `Secure` over HTTPS).
@@ -285,7 +313,7 @@ The WebSocket API has **no authentication of its own**, and several of its 183 m
 
 Run it: **Remote** page → generate a password → sign in to Tailscale → share to your tailnet. Defaults the whole feature off.
 
-### �🛡️ Safety
+### 🛡️ Safety
 Prompt guard (15 injection + 5 exfiltration patterns), presence guard (meeting/gaming/away auto-sleep), rate limiter, destruction gate with approval workflow (`action.approve` / `action.deny`), **global kill-switch hotkey** (Ctrl+Shift+Alt+K, configurable), **clipboard secret filter** (API keys, tokens, passwords, private keys redacted before the agent sees them), **egress monitor** (logs + scrubs every outbound payload), and **privacy zones** (screen blackout regions + excluded apps actually applied to screenshots).
 
 ### 🧠 Memory
@@ -300,8 +328,8 @@ A **Karpathy-pattern wiki** instead of another chat transcript: markdown pages u
 ### 🎤 Voice & Perception
 **Voice input**: wake word → command → chat → spoken reply. **Silero VAD** segments real speech for turn detection (RMS fallback). STT: **faster-whisper** (local, offline; tiny/small selectable) with **SenseVoice** auto-activating when funasr is available. **TTS**: **Kokoro** neural voices fully offline (local 82M ONNX) with **edge-tts** online fallback — engine selectable in Settings → Voice, with an **Auto TTS toggle** so dashboard chat and character prompts speak replies out loud. **Voice pickers** list what is actually available rather than asking you to type a voice name: the installed Kokoro pack is read straight out of `voices-v1.0.bin` (54 voices, offline, without loading the model) and the Edge voices come from the service, cached for a day with a curated offline fallback. Both are grouped by language and follow the **Language** setting, and where an engine simply cannot speak the chosen language — Kokoro has no Indonesian voice — Addled says so and routes to one that can. Speech input is local & offline; Edge TTS is the only network-dependent part. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
 
-### � Skills & Market
-61 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
+### 🧩 Skills & Market
+81 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
 
 Two things worth calling out:
 
@@ -310,19 +338,29 @@ Two things worth calling out:
 - **Standing permission, granted from whichever surface asked.** An approval prompt carries its own **Always allow** button, so a skill or tool you trust stops asking from that point on without you going to Settings. Grants are per *kind* (skill vs tool), so allowing `read_file` never silently allows a forged skill by the same name. **Destructive names are refused inside the grant call itself** — not by a caller that remembers to check — so `delete_file` cannot be made standing no matter which surface offers the button. Installed market skills are bound to a **digest fingerprint**: if the script behind a granted skill later changes, the grant stops matching and Addled asks again.
 - **The answer belongs to the chat that asked.** Telegram, Discord, WhatsApp and the dashboard all share one approval queue, so a bare "yes" is ambiguous. Every queued approval records its **origin** (source + conversation), and an answer must name a request raised *in that same chat* — otherwise a reply in one bot cannot release an action requested by another. Resolving an approval clears its origin, so the map tracks only what is genuinely outstanding.
 - **Swarm agents keep their own notebooks.** Each agent in a swarm writes a per-agent **notebook** after every step rather than at the end of a flow, because a run killed mid-way is exactly the case it exists for. Entries are capped; the overflow is **folded into a standing summary** rather than dropped, so detail degrades from verbatim to compressed instead of vanishing. Agents hand each other a **digest**, not the raw log, and can search their own history with `swarm.notebookSearch` — a long-running role keeps its memory across restarts without flooding its peers.
+- **Method skills, not just tools.** The desks that write code and check it carry a *method*, not only a toolset: the coder desk gets test-driven development and systematic debugging, the reviewer gets the code-review pair, and QA gets verification-before-completion plus the webapp-testing toolkit. These were installed as market skills and mapped onto each role, so an agent is told **how** to work rather than only what it may call.
+
+### 📧 Email & transcription
+Both are things the agent does itself, not just things the dashboard can do.
+
+- **Email** — `email_list`, `email_search` and `email_send`. Reading is ungated; **sending requires approval**, because mail cannot be recalled. A mailbox that is not configured says so rather than returning an empty list, so "no mail" is never confused with "not set up" — an agent reporting a false all-clear is worse than one reporting an error.
+- **Transcription** — `transcribe_audio` turns a recording into text with the **local** whisper model (nothing uploaded), so a meeting or voice note can be summarised and its action items pulled out. The model is loaded once and shared with the live voice listener rather than duplicated in RAM.
+
+### 🎯 Goals, with the plan made visible
+Clicking a goal shows **which agent ran each step**, that agent's live state, the task it is on, and a **progress bar** derived from the plan — not just a status word. The plan, the findings each desk produced, and a round counter appear together, and a **re-plan replaces the step list rather than merging into it**, so steps from an abandoned plan cannot linger looking like work still to do.
 
 ### 🌐 Browser & Desktop
 Four browser backends with **task-based routing**: your running Chrome/Edge via CDP (read-only by default, opt-in), Playwright's own Chromium, the **browser-use** AI framework for open-ended tasks (used only when installed AND an LLM is available), and an always-on HTTP fallback. Backends are installed from the Settings page with a manual button (or on demand, `ask` / `off` / `auto` policy with a dashboard approval banner). **Desktop control** (mouse/keyboard) is first-class but off by default: session grants via dashboard prompt, screen-bounds checks, typing caps, hotkey whitelist, pyautogui FAILSAFE, and egress logging.
 
-### �📦 Installer & Auto-Update
+### 📦 Installer & Auto-Update
 Windows NSIS + portable installer via electron-builder. **Weekly auto-update** against the latest GitHub release (version discovery via the GitHub API; delta updates via latest.yml + blockmap). If the repo is private, the check degrades gracefully and resumes automatically once it's public. Manual "Check for Updates" in the tray. First-run PyQt6 onboarding wizard (8 steps: provider, local model, name, workspace folder, voice, wake word, autostart).
-
+**An upgrade keeps your setup.** Settings, memory, skills, tools, MCP servers and the swarm roster all live beside the install, and the installer deliberately ships **no copy** of any of them — an upgrade adds and replaces program files and has nothing to overwrite your data with. This is now enforced rather than assumed: a check reads the paths the backend *writes* out of the source and fails if any of them could be packaged, so a future store cannot start shipping by being added to one list and not another. Settings are also saved **atomically** (write to a temp file, then swap it in), so an upgrade landing mid-write cannot leave a truncated config behind.
 ---
 
-## WebSocket API (193 handlers)
+## WebSocket API (197 handlers)
 
 ### Core
-`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `approvals.list` `approvals.alwaysAllow` `approvals.revoke` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `guide.status` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload`
+`chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `approvals.list` `approvals.alwaysAllow` `approvals.revoke` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `guide.status` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload` `modelApi.status` `modelApi.start` `modelApi.stop`
 
 ### Goals
 `goal.create` `goal.list` `goal.start` `goal.cancel`
@@ -390,7 +428,7 @@ Addled/
 │   ├── main.py              # Entry point + onboarding + single-instance lock + kill switch + voice
 │   ├── config.py            # Portable JSON settings
 │   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
-│   ├── ws_server.py         # 183 JSON-RPC 2.0 handlers + server pushes
+│   ├── ws_server.py         # 197 JSON-RPC 2.0 handlers + server pushes
 │   ├── providers/           # 10 AI providers (base + registry + selector + router)
 │   │                        #   + live model catalog + local Florence-2 vision
 │   ├── mcp_client/          # MCP client (stdio + streamable HTTP) → tools as skills

@@ -62,7 +62,11 @@ DEFAULT_TYPES: dict[str, dict] = {
         "does": "Takes any task that does not fit a specialised desk.",
         "prompt": ("You are a capable general assistant. Answer clearly and "
                    "practically, and use your tools rather than guessing."),
-        "skills": [],
+        # The two habits that apply to any work at all: find the cause before
+        # fixing, and verify before claiming done.
+        "skills": ["systematic-debugging", "verification-before-completion",
+                   "email_list", "email_search", "email_send",
+                   "transcribe_audio"],
     },
     "coder": {
         "role": "Software Engineer",
@@ -72,7 +76,9 @@ DEFAULT_TYPES: dict[str, dict] = {
                    "change that solves the problem. Read before you write, and "
                    "verify with the project's own test command when one exists."),
         "skills": ["code_read", "search_in_files", "verify_code", "run_command",
-                   "guidelines:karpathy", "guidelines:ponytail"],
+                   "guidelines:karpathy", "guidelines:ponytail",
+                   "test-driven-development", "systematic-debugging",
+                   "executing-plans", "domain-modeling", "docx", "pdf"],
     },
     "reviewer": {
         "role": "Code Reviewer",
@@ -83,7 +89,9 @@ DEFAULT_TYPES: dict[str, dict] = {
                    "the change is sound, say so plainly rather than inventing a "
                    "problem."),
         "skills": ["code_read", "search_in_files", "file_info",
-                   "guidelines:karpathy"],
+                   "guidelines:karpathy", "requesting-code-review",
+                   "receiving-code-review",
+                   "verification-before-completion"],
     },
     "analyst": {
         "role": "Data Analyst",
@@ -91,7 +99,11 @@ DEFAULT_TYPES: dict[str, dict] = {
         "prompt": ("You are a data analyst. Break complex material into the "
                    "findings that matter, show the reasoning that got you "
                    "there, and say what is uncertain. Never invent a number."),
-        "skills": ["read_file", "search_in_files"],
+        # xlsx for real spreadsheets and pdf for source documents, plus the
+        # evidence habit: state nothing as settled without checking it.
+        "skills": ["read_file", "search_in_files", "xlsx", "pdf", "query",
+                   "read-file", "systematic-debugging",
+                   "verification-before-completion"],
     },
     "researcher": {
         "role": "Researcher",
@@ -100,7 +112,8 @@ DEFAULT_TYPES: dict[str, dict] = {
                    "tools, prefer primary sources, and cite where each claim "
                    "came from. Say plainly when something could not be "
                    "confirmed."),
-        "skills": ["web_search", "read_file", "wiki_search", "wiki_read"],
+        "skills": ["web_search", "read_file", "wiki_search", "wiki_read",
+                   "research", "brainstorming", "pdf", "query"],
     },
     "writer": {
         "role": "Writer",
@@ -108,7 +121,11 @@ DEFAULT_TYPES: dict[str, dict] = {
         "prompt": ("You are a writer. Match the register the audience expects, "
                    "lead with the point, and cut anything that does not carry "
                    "weight. Prefer concrete over abstract."),
-        "skills": ["read_file", "wiki_search", "sop_lookup"],
+        # writing-guidelines is the craft; docx/pptx/pdf are the delivery
+        # formats a writer is actually asked to produce.
+        "skills": ["read_file", "wiki_search", "sop_lookup",
+                   "writing-guidelines", "docx", "pptx", "pdf",
+                   "doc-coauthoring", "internal-comms", "email_send"],
     },
     "planner": {
         "role": "Planner",
@@ -117,7 +134,8 @@ DEFAULT_TYPES: dict[str, dict] = {
                    "executed in order, name the dependencies and the risks, and "
                    "say what you could not determine rather than inventing it. "
                    "A step that cannot be acted on alone is not a step."),
-        "skills": ["sop_lookup", "sop_list", "wiki_search"],
+        "skills": ["sop_lookup", "sop_list", "wiki_search",
+                   "writing-plans", "brainstorming"],
     },
     "devops": {
         "role": "DevOps Engineer",
@@ -126,7 +144,8 @@ DEFAULT_TYPES: dict[str, dict] = {
                    "fixes the problem, make the rollback obvious, and never run "
                    "something destructive without saying what it will do first."),
         "skills": ["run_command", "read_file", "session_open", "session_send",
-                   "guidelines:ponytail"],
+                   "guidelines:ponytail", "systematic-debugging",
+                   "finishing-a-development-branch"],
     },
     "qa": {
         "role": "Quality Assurance",
@@ -135,7 +154,10 @@ DEFAULT_TYPES: dict[str, dict] = {
                    "claims against the evidence, the edge cases nobody "
                    "mentioned, and the numbers. Report what failed; do not "
                    "approve something you could not test."),
-        "skills": ["verify_code", "read_file", "search_in_files"],
+        "skills": ["verify_code", "read_file", "search_in_files",
+                   "verification-before-completion",
+                   "test-driven-development", "webapp-testing",
+                   "diagnosing-bugs"],
     },
 }
 
