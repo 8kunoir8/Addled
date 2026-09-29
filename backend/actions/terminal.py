@@ -78,9 +78,19 @@ def _rtk_rewrite(command: str, rtk: str | None) -> tuple[str, bool]:
 class TerminalExecutor:
     """Execute shell commands safely."""
 
-    async def execute(self, command: str, cwd: str | None = None, timeout: int = 30,
-                      allow_dangerous: bool = False) -> dict:
-        """Execute a shell command and return stdout/stderr."""
+    async def execute(self, command: str, cwd: str | None = None,
+                      timeout: int = 30) -> dict:
+        """Execute a shell command and return stdout/stderr.
+
+        There is no `allow_dangerous` parameter. One used to sit here, accepted
+        and never read, while the executor dutifully passed its
+        `_approved_run` flag into it — so the code read as though approving an
+        action lifted a guard inside this method, when the only thing that ever
+        granted an approved command permission was the executor clearing its
+        own gate. Removed rather than honoured: the destruction gate owns this
+        decision, and a second, silent switch here would be a second place for
+        it to be wrong.
+        """
         if not command.strip():
             return {"success": False, "error": "Empty command"}
 

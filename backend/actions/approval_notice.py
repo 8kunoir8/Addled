@@ -42,28 +42,92 @@ def _classify(action_type: str) -> str:
         return "tool" if getattr(skill, "category", "") == "mcp" else "skill"
     return "action"
 
+def _kind_for(action_type: str) -> str | None:
+    """The `kind` the dashboard will send back for this action, or None.
+
+    This is the value that reaches `policy._valid_kind`, so it is computed once
+    and used by every grantability answer. Two cases have to be told apart:
+
+    A name that is not a registered skill but IS gated by the destruction gate
+    (`close_app`) must still resolve to something the policy accepts, because
+    the executor's own grant check reads the `skill` bucket first. Classifying
+    it as `action` made it un-grantable in both scopes and left the card with no
+    memory control, which is the dead end the session control exists to remove.
+
+    A name nothing recognises at all is different: it is None, so it is not
+    advertised as grantable. Returning `skill` for any unknown string would have
+    made every typo a permanently permittable name.
+    """
+    kind = str(_classify(action_type))
+    if kind in ("skill", "tool"):
+        return kind
+    try:
+        from backend.safety.destruction_gate import DESTRUCTIVE_ACTIONS
+        if str(action_type) in DESTRUCTIVE_ACTIONS:
+            return "skill"
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read the gate's actions: %s", e)
+    return None
+
 def _grantable(action_type: str) -> bool:
     """May the user make this permanent? The policy decides, not the caller."""
     try:
         from backend.approvals import policy
         if policy.is_protected(action_type):
             return False
-        return str(_classify(action_type)) in ("skill", "tool")
+        return policy._valid_kind(_kind_for(action_type)) is not None
     except Exception as e:  # noqa: BLE001
         log.debug("could not decide whether %s is grantable: %s", action_type, e)
         return False
 
+def _session_grantable(action_type: str) -> bool:
+    """May the user allow this until restart?
+
+    True for everything that can ask, including the actions a permanent grant
+    refuses — `run_command` is the motivating case, and a session grant is the
+    only one it can have. The card uses this to offer the session control where
+    a permanent switch would be refused, so the button it shows is one that
+    actually works.
+
+    The test is "can the policy store a grant for this", not "did it classify
+    as a skill or a tool". Classifying on the kind answered a narrower question
+    than it looked: an action the gate really does gate but registers as a bare
+    executor handler — `close_app` — classifies as `action`, so the card offered
+    neither switch and the user's only answer was "Allow once" and Deny, which
+    is exactly the dead end the session control exists to remove.
+
+    The policy is the authority on what it will accept, so it is asked rather
+    than predicted. `_kind_for` resolves the same name the dashboard will send,
+    so the button cannot be shown for an answer the backend would reject.
+    """
+    try:
+        from backend.approvals import policy
+        return policy._valid_kind(_kind_for(action_type)) is not None
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not decide whether %s is session-grantable: %s",
+                  action_type, e)
+        return False
+
 def publish(approval_id: str, action_type: str, params: dict | None = None) -> bool:
-    """Announce one queued approval. Never raises, returns whether it went out."""
+    """Announce one queued approval. Never raises, returns whether it went out.
+
+    The `kind` sent here is the one resolved by `_kind_for`, not the raw
+    classification. The dashboard echoes this value straight back as the `kind`
+    of its answer, so sending `action` for a gated handler like `close_app` meant
+    the answer arrived under a kind `policy._valid_kind` rejects and the grant
+    was refused — the button would have failed had the card offered it at all.
+    """
     params = params or {}
-    kind = _classify(action_type)
+    kind = _kind_for(action_type)
     grantable = _grantable(action_type)
+    session_grantable = _session_grantable(action_type)
     record = {
         "approval_id": approval_id,
         "action_type": action_type,
         "kind": kind,
         "name": action_type,
         "grantable": grantable,
+        "session_grantable": session_grantable,
         "params": params,
     }
     _pending.append(record)
@@ -79,6 +143,10 @@ def publish(approval_id: str, action_type: str, params: dict | None = None) -> b
             "kind": kind,
             "name": action_type,
             "grantable": grantable,
+            # Sent, not left to the dashboard's default. The card treats a
+            # missing field as "offer the session button", so omitting it
+            # promised a control the backend would have refused.
+            "session_grantable": session_grantable,
             "command": str(params.get("command", ""))[:500],
         })
         return True

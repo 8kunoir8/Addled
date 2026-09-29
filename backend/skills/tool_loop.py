@@ -175,12 +175,20 @@ def _last_user_text(messages: list[dict]) -> str:
     return ""
 
 
-def _learn_procedure(messages: list[dict], tool_results: list[dict]) -> None:
+def _learn_procedure(messages: list[dict], tool_results: list[dict],
+                     system_prompt: str = "") -> None:
     """Keep the route a turn actually took, when it worked.
 
     Called on the way out of a tool-using turn. It is a side effect of a reply
     that has already been produced, so it must never raise and must never
     delay or alter the response.
+
+    `system_prompt` is passed so the recipe can carry a one-line reason. It is
+    the same context the turn was actually given — recalled facts, wiki pages,
+    and the procedure that was offered — so storing a fragment of it records
+    WHY this route was chosen, not just which tools were used. A list of tool
+    names tells the next run what happened; it does not tell it what the model
+    knew at the time.
     """
     try:
         if not tool_results:
@@ -189,7 +197,8 @@ def _learn_procedure(messages: list[dict], tool_results: list[dict]) -> None:
             return
         from backend.sop.learn import record_run
         names = [str(tr.get("tool") or "") for tr in tool_results]
-        record_run(None, names, _last_user_text(messages), success=True)
+        record_run(None, names, _last_user_text(messages), success=True,
+                   context=system_prompt)
     except Exception as e:
         log.debug("Procedure learning skipped: %s", e)
 
@@ -305,7 +314,7 @@ async def chat_with_tools(
                     hint += "\n\nWhat you wrote was:\n" + unreadable[0][:400]
                     full_messages.append({"role": "user", "content": hint})
                     continue
-                _learn_procedure(messages, all_tool_results)
+                _learn_procedure(messages, all_tool_results, system_prompt)
                 return {
                     "response": ("I tried to call a tool for that, but the "
                                  "call could not be read, so nothing ran — "
@@ -317,7 +326,7 @@ async def chat_with_tools(
                     "unreadable": unreadable,
                 }
             _learn_procedure(messages, all_tool_results
-                             or result.get("tool_results", []))
+                             or result.get("tool_results", []), system_prompt)
             return {
                 "response": result.get("response", ""),
                 "tokens": result.get("tokens", 0),
@@ -381,8 +390,10 @@ async def chat_with_tools(
         # agrees, and the same tool is called again with confirm=true. This
         # nudges exactly that, and only for MCP tools — `confirm` is an MCP
         # argument, so sending a shell command round again would just repeat a
-        # call that cannot succeed. A gated command instead waits in-band for
-        # the user's decision (see ActionExecutor.execute_for_chat).
+        # call that cannot succeed. A gated command needs no nudge at all: the
+        # turn ended when it asked, the request is queued, and approving it runs
+        # the action and pushes the outcome into the conversation. Telling the
+        # model to wait would only make it narrate a wait nobody is holding.
         if (rounds < max_tool_rounds
                 and any(str(tr.get("tool") or "").startswith("mcp__")
                         and (tr.get("result") or {}).get("requires_approval")
@@ -396,6 +407,29 @@ async def chat_with_tools(
                             "asked for one."),
             })
             continue
+
+        # A permission request is not a failure, and must not be reported as one.
+        #
+        # `execute_for_chat` returns success=False for a gated action so the
+        # caller knows nothing ran, and it marks the result `requires_approval`.
+        # Feeding that into the all-failed branch below produced "I couldn't run
+        # the tool for that: run_command — <error>" and invited the model to
+        # invent a cause — the user saw a failed attempt where a permission
+        # prompt had been raised. Asking is a distinct outcome, so it is
+        # separated from failure before that branch is reached.
+        pending = [tr for tr in tool_results
+                   if (tr.get("result") or {}).get("requires_approval")]
+        if pending and not any(tr["success"] for tr in tool_results):
+            said = ", ".join(str(tr.get("tool") or "the action")
+                             for tr in pending[:3])
+            return {
+                "response": (f"This needs your approval before it can run: "
+                             f"{said}. Approve it in the dashboard and it will "
+                             f"run straight away."),
+                "tokens": 0,
+                "tool_rounds": rounds,
+                "tool_results": tool_results,
+            }
 
         # If all tools failed, try a forced plain-text answer before giving up
         if all(not tr["success"] for tr in tool_results):
@@ -417,7 +451,8 @@ async def chat_with_tools(
     # Round cap reached: force one final answer from the gathered results.
     final = await _final_answer(tool_results if tool_results else [])
     if final is not None:
-        _learn_procedure(messages, all_tool_results or tool_results)
+        _learn_procedure(messages, all_tool_results or tool_results,
+                         system_prompt)
         return final
 
     return {

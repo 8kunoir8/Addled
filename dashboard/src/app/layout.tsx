@@ -209,6 +209,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 error={approvalErrors[req.approval_id]}
                 onAllow={answer(req).allow}
                 onAlwaysAllow={answer(req).always}
+                onAllowForSession={answer(req).session}
                 onDeny={answer(req).deny}
               />
             ))}

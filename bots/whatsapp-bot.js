@@ -9,6 +9,10 @@ const fs = require('fs');
 
 const WS_URL = process.env.ADDLED_WS_URL || 'ws://127.0.0.1:9876';
 const AUTH_DIR = process.env.WHATSAPP_AUTH_DIR || path.join(__dirname, 'auth', 'whatsapp');
+// Where the last chat that messaged us is remembered, so a proactive
+// notification (a scheduled reminder) has somewhere to go. Beside the auth
+// folder, so it survives a restart and is not shipped with the app.
+const LAST_CHAT_FILE = path.join(AUTH_DIR, 'last-chat.txt');
 
 // WhatsApp has no interactive buttons — Baileys cannot send the tappable
 // replies Telegram and Discord have. So the answer is a *word*: the request is
@@ -65,17 +69,145 @@ async function main() {
 
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
+    // No `printQRInTerminal`. Baileys removed it in 6.x and says so at
+    // runtime: "You will no longer receive QR codes in the terminal
+    // automatically. Please listen to the connection.update event yourself."
+    // Passing it produced a deprecation warning and NO QR AT ALL, which is why
+    // pairing looked broken. The `qr` from `connection.update` below is the
+    // supported path, and it is what we emit.
     browser: ['Addled Desktop', 'Chrome', '1.0.0'],
   });
 
   sock.ev.on('creds.update', saveCreds);
 
+  // ---- proactive delivery -------------------------------------------------
+  //
+  // Everything above this line only ever speaks when spoken to. The scheduler
+  // fires reminders and broadcasts `bot.notify`, and until now nothing listened
+  // — the broadcast went out and was dropped, so a scheduled reminder reached
+  // the dashboard, the character bubble and TTS but never the phone.
+  //
+  // The chat to deliver to comes from config, because a notification is not a
+  // reply: there is no incoming message to take the sender from. Two sources,
+  // in order:
+  //   1. WHATSAPP_NOTIFY_TO — an explicit destination, set in Settings.
+  //   2. the last chat that messaged the bot, remembered in lastChatFile.
+  // The fallback is a convenience for a single-user setup: you message the bot
+  // once to introduce yourself, and reminders have somewhere to go. A quiet
+  // reminder with nowhere to send is logged rather than thrown, so the fault is
+  // visible instead of silent.
+  const NOTIFY_TO = (process.env.WHATSAPP_NOTIFY_TO || '').trim();
+
+  function rememberChat(jid) {
+    try {
+      if (!jid) return;
+      fs.writeFileSync(LAST_CHAT_FILE, String(jid), 'utf8');
+    } catch (e) {
+      console.error('[WhatsApp] could not remember the chat:', e.message);
+    }
+  }
+
+  function lastChat() {
+    try {
+      if (fs.existsSync(LAST_CHAT_FILE)) {
+        return fs.readFileSync(LAST_CHAT_FILE, 'utf8').trim();
+      }
+    } catch (e) {
+      console.error('[WhatsApp] could not read the last chat:', e.message);
+    }
+    return '';
+  }
+
+  async function deliver(text) {
+    const body = String(text || '').trim();
+    if (!body) return;
+    const to = NOTIFY_TO || lastChat();
+    if (!to) {
+      console.log('[WhatsApp] A notification had nowhere to go — message the '
+                  + 'bot once, or set a destination in Settings.');
+      return;
+    }
+    try {
+      await sock.sendMessage(to, { text: body });
+      console.log(`[WhatsApp] Delivered a notification to ${to}`);
+    } catch (e) {
+      console.error('[WhatsApp] Could not deliver the notification:', e.message);
+    }
+  }
+
+  ws.onNotification('bot.notify', (params) => {
+    // The broadcast reaches every connected bot, so each one decides whether it
+    // is a named destination. An empty list means "no preference" — the case a
+    // single-bot setup is in, and the only way the feature works before anyone
+    // has been to Settings.
+    const wanted = Array.isArray(params?.platforms) ? params.platforms : [];
+    if (wanted.length && !wanted.includes('whatsapp')) return;
+    // Fire-and-forget: this runs on the socket's message handler, and awaiting
+    // here would stall every other notification behind a slow send.
+    deliver(params?.text).catch((e) =>
+      console.error('[WhatsApp] notify failed:', e.message));
+  });
+
+  // ---- outbound send ------------------------------------------------------
+  //
+  // `bots.send` is the backend asking this process to send a message it did not
+  // receive. Two things make this different from the reply path:
+  //
+  //   * the backend cannot call `sock.sendMessage` itself — the socket lives in
+  //     THIS process, and the WebSocket is the only bridge between them;
+  //   * `to` is a real phone number supplied by the caller, so it is validated
+  //     rather than trusted. A number that is not a WhatsApp JID is refused with
+  //     a message naming the expected shape, because a malformed JID fails
+  //     inside Baileys with an error that does not say what was wrong.
+  function normaliseJid(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return '';
+    // Already a JID.
+    if (/@(s\.whatsapp\.net|g\.us)$/.test(text)) return text;
+    // A bare number, with or without punctuation, in international form.
+    const digits = text.replace(/[^\d]/g, '');
+    if (digits.length < 8 || digits.length > 15) return '';
+    return `${digits}@s.whatsapp.net`;
+  }
+
+  ws.onNotification('bots.send', async (params) => {
+    const requestId = params?.requestId;
+    const to = normaliseJid(params?.to);
+    const text = String(params?.text || '').trim();
+    const reply = (payload) => {
+      // The reply travels back as a notification because the backend sent this
+      // as a notification: it does not hold a request id to resolve, and
+      // blocking its handler on a round trip would tie it to this process.
+      if (!requestId) return;
+      ws.send('bots.sendResult', { requestId, ...payload }).catch(() => {});
+    };
+    if (!to) {
+      reply({ success: false, error:
+        'Give a phone number in international form, e.g. 6281234567890.' });
+      return;
+    }
+    if (!text) {
+      reply({ success: false, error: 'The message text is empty.' });
+      return;
+    }
+    try {
+      await sock.sendMessage(to, { text });
+      console.log(`[WhatsApp] Sent to ${to}`);
+      reply({ success: true, platform: 'whatsapp', to, length: text.length });
+    } catch (e) {
+      console.error('[WhatsApp] Send failed:', e.message);
+      reply({ success: false, error: e.message });
+    }
+  });
+
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
     if (qr) {
-      console.log('[WhatsApp] Scan QR code to pair:');
-      if (typeof qr === 'string') console.log(`QR_DATA:${qr}`);
+      // Emitted on its own line with a marker the dashboard looks for. The
+      // dashboard renders it as a QR image; the raw string is long, so nothing
+      // else should try to read it as a log line.
+      console.log('[WhatsApp] Scan this QR code with WhatsApp (Linked Devices).');
+      console.log(`QR_DATA:${qr}`);
     }
     if (connection === 'close') {
       const reconnect = (lastDisconnect?.error instanceof Boom) &&
@@ -96,6 +228,9 @@ async function main() {
     const content = msg.message[type];
     if (sender === 'status@broadcast') return;
     const isGroup = sender.endsWith('@g.us');
+    // Remembered so a scheduled reminder has a destination even when nothing
+    // is pinned in Settings — see `deliver`.
+    rememberChat(sender);
 
     try {
       if (type === 'conversation' || type === 'extendedTextMessage') {

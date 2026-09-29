@@ -1,10 +1,10 @@
 # Addled
 
 > An AI desktop companion with a floating animated character, full web dashboard,  
-> voice interaction (wake word + speech), 81 built-in skills, self-extending  
+> voice interaction (wake word + speech), **141 built-in skills**, self-extending  
 > capability forge, 10 AI provider backends, live screen awareness, long-term  
-> memory, and a full safety suite.  
-> Built with Python 3.14 + PyQt6 + Electron 28 + Next.js 16.
+> memory, **Office & PDF document handling**, and a full safety suite.  
+> Built with Python 3.14 + PyQt6 + Electron + Next.js 16.
 >
 > **Repository**: [github.com/8kunoir8/Addled](https://github.com/8kunoir8/Addled)  
 > **Releases**: [github.com/8kunoir8/Addled/releases](https://github.com/8kunoir8/Addled/releases)
@@ -65,12 +65,13 @@ launch.bat
 │          ▼                   ▼           │
 │  ┌────────────────────────────────────┐  │
 │  │      Python Backend Service        │  │
-│  │  Engine • 197 WS Handlers          │  │
-│  │  81 Skills • Skill Forge           │  │
+│  │  Engine • 203 WS Handlers          │  │
+│  │  141 Skills • Skill Forge          │  │
 │  │  10 AI Providers • Goals • Code    │  │
 │  │  Swarm • Calendar • Email • Browser│  │
-│  │  Character • Safety • Memory •     │  │
-│  │  Observer • Voice • Onboarding     │  │
+│  │  Office & PDF • Bots • Memory •    │  │
+│  │  Character • Safety • Voice •      │  │
+│  │  Observer • Onboarding             │  │
 │  └────────────────┬───────────────────┘  │
 │                   │ Qt Signals           │
 │  ┌────────────────▼───────────────────┐  │
@@ -234,27 +235,53 @@ not per server, and a *Trusted* switch on the server skips the prompt. A server
 that is missing, slow or crashed records an error and returns a readable tool
 failure rather than hanging the conversation.
 
-### 🛠️ 60 Built-in Skills (Provider-Agnostic)
+### 🛠️ 141 Built-in Skills (Provider-Agnostic)
 All 10 AI providers can invoke any skill — no provider lock-in.
 
 | Category | Skills |
 |----------|--------|
 | **System** | `run_command`, `get_screen_size`, `screenshot`, `get_clipboard`, `set_clipboard`, `set_volume`, `set_brightness`, `lock_screen` |
-| **Files** | `read_file`, `write_file`, `list_dir`, `search_files`, `delete_file`, `create_dir`, `file_info` |
+| **Files** | `read_file`, `write_file`, `list_dir`, `search_files`, `search_in_files`, `delete_file`, `copy_file`, `move_file`, `create_dir`, `file_info` |
+| **Documents** | `word_read`, `word_create`, `word_edit`, `excel_read`, `excel_write`, `excel_sheets`, `pptx_read`, `pptx_create`, `pptx_add_slide`, `pdf_read`, `pdf_create`, `pdf_edit`, `pdf_merge`, `pdf_pages`, `pdf_extract`, `pdf_redact`, `pdf_redact_verify`, `convert_to_pdf`, `convert_from_pdf` |
 | **Windows** | `list_windows`, `focus_window`, `resize_window`, `close_window` |
 | **Browser** | `browser_navigate`, `browser_extract`, `browser_click`, `browser_type` |
 | **Code** | `code_read`, `code_edit` |
-| **Calendar** | `calendar_add`, `calendar_list` |
+| **Calendar & Tasks** | `calendar_add`, `calendar_list`, `calendar_delete`, `task_schedule`, `task_list`, `task_cancel` |
+| **Contacts** | `send_message`, `chat_history`, `bot_status`, `email_send`, `email_search`, `email_list`, `transcribe_audio` |
 | **Web** | `web_search`, `web_fetch` (auto-falls back to search discovery when sites block bots) |
 | **Memory relations** | `memory_get`, `memory_set`, `memory_link`, `memory_unlink`, `memory_related`, `memory_files`, `memory_graph` |
 | **Wiki** | `wiki_search`, `wiki_read`, `wiki_write`, `wiki_ingest`, `wiki_links`, `wiki_lint` |
-| **Meta** | `forge_skill`, `list_forged`, `guidelines_status`, `ponytail_review` |
+| **Meta** | `forge_skill`, `list_forged`, `find_mcp_server`, `guidelines_status` |
 
 Plus the MCP-bridged skills from any connected server, registered dynamically as `mcp__<server>__<tool>`.
 
 The table above groups them by area rather than listing every one. **Settings → Guide**
-lists the live catalogue — all 60, with each skill's own description and whether it is
+lists the live catalogue — all 141, with each skill's own description and whether it is
 currently switched on.
+
+#### 📄 Office & PDF Documents
+The agent works with the document formats an office day actually involves, reading and
+writing them directly rather than shelling out to another application.
+
+- **Word** (`.docx`) — read headings and paragraphs, create a document from Markdown-ish
+  text, and edit it in place.
+- **Excel** (`.xlsx`/`.xlsm`) — list sheets, read cells and ranges, write values and formulas.
+- **PowerPoint** (`.pptx`) — read slide text, create a deck, add slides.
+- **PDF** — read the text, create one from content, edit pages (rotate, reorder, keep or
+  remove), merge, extract a page range into a new file, and **redact**.
+- **Conversion** — `convert_to_pdf` and `convert_from_pdf` move between PDF and the Office
+  formats (and plain text), so a `.docx` can be handed over as a PDF without leaving the chat.
+
+Two behaviours are worth knowing:
+
+- **Redaction is real.** `pdf_redact` *removes* the text rather than drawing a black box
+  over it, so it cannot be recovered by copying the page or extracting the text — and
+  `pdf_redact_verify` re-reads the file afterwards to confirm it is actually gone. It
+  writes to a new file by default, because redaction cannot be undone.
+- **Nothing is overwritten by accident.** Every operation that writes a file refuses to
+  replace an existing one unless you pass `overwrite=true`, and every path must stay
+  inside the bound workspace — a path that tries to leave it is refused. A file whose
+  extension does not match its contents is reported as such instead of being half-read.
 
 ### 🔨 Skill Forge — Self-Extending Agent
 When the agent encounters a task it can't handle, it automatically:
@@ -295,6 +322,13 @@ Local calendar with Google Calendar OAuth sync — and a **tick-driven task sche
 ### 🤖 Bot Bridges
 Telegram (grammY with 6 commands), WhatsApp (Baileys multi-device with QR pairing), Discord (discord.js with 5 slash commands). All forward messages to Addled's chat. Scheduler notifications broadcast as `bot.notify` events for bridge push integration.
 
+The bots are **two-way**, not just a way to talk to Addled: the agent can also reach *out*
+through them. `send_message` sends to a contact or chat on any connected bridge,
+`chat_history` reads back a conversation, and `task_schedule` queues a message to be
+delivered later — so "message Sam that I'll be late" and "remind the team tomorrow at 9"
+are ordinary requests. Delivery is recorded, so a send that failed is reported as failed
+rather than assumed to have arrived.
+
 ### 💗 Lifelike companion (mood, timeline, presence)
 A persistent **mood & emotion engine** (valence + energy, decays over time) drives the character's visual tint, movement energy and **voice emotion** (Kokoro speech speed follows the mood). **Barge-in**: start talking while Addled speaks and it stops mid-sentence. **Initiative cadence**: return greetings + a daily check-in. An **episodic timeline** journals every day (nightly summaries) and a learned **user model** (preferences, rituals, hours) is injected into every chat — the agent references its own past naturally. **Project awareness**: index your code workspace (semantic search, chat injection). **Predictive proactivity**: weekly rhythms mined from tasks/calendar → gentle suggestions. **Reflection loop**: per-skill telemetry + weekly self-review.
 
@@ -329,7 +363,7 @@ A **Karpathy-pattern wiki** instead of another chat transcript: markdown pages u
 **Voice input**: wake word → command → chat → spoken reply. **Silero VAD** segments real speech for turn detection (RMS fallback). STT: **faster-whisper** (local, offline; tiny/small selectable) with **SenseVoice** auto-activating when funasr is available. **TTS**: **Kokoro** neural voices fully offline (local 82M ONNX) with **edge-tts** online fallback — engine selectable in Settings → Voice, with an **Auto TTS toggle** so dashboard chat and character prompts speak replies out loud. **Voice pickers** list what is actually available rather than asking you to type a voice name: the installed Kokoro pack is read straight out of `voices-v1.0.bin` (54 voices, offline, without loading the model) and the Edge voices come from the service, cached for a day with a curated offline fallback. Both are grouped by language and follow the **Language** setting, and where an engine simply cannot speak the chosen language — Kokoro has no Indonesian voice — Addled says so and routes to one that can. Speech input is local & offline; Edge TTS is the only network-dependent part. **3-tier observer**: light hash (5s) / window-title classification (~15s) / deep Florence-2 vision (5 min, local), with a **Deep vision toggle + interval** in Settings → Observation (turn off to keep the vision model out of RAM). **Live screen awareness**: chat automatically receives the current activity context + latest vision description; asking "what do you see?" triggers a fresh capture. **Proactive insights**: the agent suggests help when you've been stuck on a task — delivered as chat messages + character bubbles (optionally spoken).
 
 ### 🧩 Skills & Market
-81 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
+141 built-in skills with a **Skills dashboard page** — every skill can be toggled on/off, market/forged skills deleted. **SKILL.md market support**: install skills from Claude Code/Copilot/opencode ecosystems via URL or GitHub repo, and **market search** (GitHub `claude-skills` topic, ranked with the local embedder) — when the agent calls a missing skill, Addled auto-finds, installs and runs the best market match, falling back to LLM code-generation (Skill Forge).
 
 Two things worth calling out:
 

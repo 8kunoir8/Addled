@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
@@ -61,6 +63,86 @@ class SkillDefinition:
     handler: Callable[..., Awaitable[dict]]
     category: str = "general"
     requires_approval: bool = False
+
+    # Extra accepted spellings for a parameter, keyed by the real name:
+    # `{"path": ("file_path", "filepath", "filename")}`.
+    #
+    # A local model reliably invents a plausible-but-wrong key — `file_path` for
+    # `path` — and the handler then reads `params.get("path", "")`, gets "", and
+    # fails with "No path given." That is a recoverable slip reported as a dead
+    # end: the model is told nothing it can act on, so it either gives up or
+    # invents an explanation. Naming the aliases here turns it back into a call
+    # that works, and the schema shown to the model is unchanged.
+    aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def normalise(self, params: dict | None) -> dict:
+        """Fill real parameter names from their aliases, and report problems.
+
+        Returns `(params, error)`. `error` is a message naming what is missing
+        or what was not recognised, so a caller that cannot proceed can say so
+        usefully instead of failing on an empty string.
+
+        Never renames a key the caller already supplied correctly, and never
+        overwrites a real parameter with an alias value.
+        """
+        given = dict(params or {})
+        props = (self.parameters or {}).get("properties", {}) or {}
+        required = list((self.parameters or {}).get("required", []) or [])
+
+        # Alias -> real name, only for parameters this skill actually declares.
+        for real, alternatives in (self.aliases or {}).items():
+            if real not in props or real in given:
+                continue
+            for alt in alternatives:
+                if alt in given:
+                    given[real] = given.pop(alt)
+                    break
+
+        # Coerce single scalars into the declared array shape.
+        #
+        # A model asked for `sources` ("the PDFs to join") very naturally sends
+        # one path as a string, because that is how it would say it in English.
+        # The handler then iterates the string character by character, the
+        # "path" becomes "E", and validation reports "'(no extension)' is not
+        # an Office or PDF format" — an error about a file the caller never
+        # mentioned. Coercing here means one fix covers every array parameter
+        # in every skill, driven by the schema they already declare.
+        for name, spec in props.items():
+            if (spec or {}).get("type") != "array" or name not in given:
+                continue
+            value = given[name]
+            if value is None or isinstance(value, list):
+                continue
+            if not (isinstance(value, str)
+                    and spec.get("items", {}).get("type") == "string"):
+                given[name] = [value]
+                continue
+            # Splitting a single string into several items is only safe when it
+            # cannot be one real path: "Report, Final.pdf" is a legal filename,
+            # and splitting it would invent two files that do not exist. Comma
+            # and semicolon are the usual spoken separators, so honour them —
+            # but only when the whole string is not itself a path. A newline is
+            # never part of a filename, so it always splits.
+            if "\n" in value and not os.path.exists(value):
+                given[name] = [p.strip() for p in value.splitlines() if p.strip()]
+            elif re.search(r"[,;]", value) and not os.path.exists(value):
+                given[name] = [p.strip() for p in re.split(r"[,;]", value) if p.strip()]
+            else:
+                given[name] = [value]
+
+        # A parameter that arrived under a name nobody knows is worth naming:
+        # it is the difference between "No path given" and "you sent file_path,
+        # I expected path". Only reported when something required is missing,
+        # so a harmless extra key does not block a working call.
+        unrecognised = [k for k in given if k not in props]
+        missing = [k for k in required if k not in given or given.get(k) in ("", None)]
+        if missing:
+            trouble = f"missing required parameter(s): {', '.join(missing)}"
+            if unrecognised:
+                trouble += (f". You sent: {', '.join(sorted(unrecognised))}"
+                            f" — this skill takes: {', '.join(sorted(props))}")
+            return given, trouble
+        return given, ""
 
     def to_openai_tool(self) -> dict:
         """OpenAI/DeepSeek function-calling format."""
@@ -523,10 +605,36 @@ class SkillRegistry:
             log.debug("could not read the approval policy for %s: %s", name, e)
             return False
 
-    # Kept as an alias because `_execute_gated` reads better naming the thing
-    # it is asking about, and because a caller should not have to know which
-    # of the two spellings the registry grew first.
-    _is_granted = is_always_allowed
+    @staticmethod
+    def _is_granted(name: str) -> bool:
+        """Has the user already answered for this skill — permanently OR for
+        this session?
+
+        The session half is not an optimisation. "Allow for session" is the
+        ONLY grant a content-classified skill can have, and `move_file`,
+        `write_file` and `delete_file` are all granted that way. Checking only
+        the permanent list meant the answer was stored, the dashboard showed it
+        as granted, and the very next call asked again — a button that visibly
+        does nothing, which teaches the user to stop reading the card.
+
+        The session check comes first for the same reason it does in the
+        executor: it is the only one some names can carry.
+        """
+        try:
+            from backend.approvals import policy
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read the approval policy for %s: %s", name, e)
+            return False
+        try:
+            if policy.is_allowed_for_session(policy.SKILL, name):
+                return True
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read session grants for %s: %s", name, e)
+        try:
+            return policy.is_always_allowed(policy.SKILL, name)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read the approval policy for %s: %s", name, e)
+            return False
 
     def enabled_list_all(self) -> list[SkillDefinition]:
         return [s for s in self._skills.values() if self.is_enabled(s.name)]
@@ -732,6 +840,31 @@ class SkillRegistry:
             return SkillResult(False, name,
                                error=f"Skill '{name}' is disabled")
 
+        # Alias the parameters BEFORE asking for approval, and refuse a call
+        # that is missing something required.
+        #
+        # Order matters twice over. A model sending `{"file_path": ...}` to a
+        # skill that declares `path` used to fail as "No path given." — true,
+        # and useless: nothing told it which name it got wrong, so it retried
+        # the same shape or gave up. And asking must come second, or the user is
+        # shown a permission card for a call that cannot work either way: they
+        # approve, and it fails on an empty string. Nobody should be asked to
+        # authorise a call that was never going to run.
+        if hasattr(skill, "normalise"):
+            params, trouble = skill.normalise(params)
+            if trouble:
+                log.info("Skill %s called with wrong parameters: %s", name,
+                         trouble)
+                # `success` is mirrored into the data dict as well as the
+                # SkillResult. Every skill reports its own failures that way
+                # (`{"success": False, "error": ...}`), and a caller reading
+                # `result.data` — which is what the dashboards and the check
+                # suites do — would otherwise see an empty dict and treat a
+                # refused call as a silent success.
+                return SkillResult(False, name, error=trouble,
+                                   data={"success": False, "error": trouble,
+                                         "invalid_params": True})
+
         if getattr(skill, "requires_approval", False):
             result = await self._execute_gated(name, skill, params)
             if result is not None:
@@ -842,6 +975,7 @@ class SkillRegistry:
         """Register all 55+ agent skills."""
         self._register_system_skills()
         self._register_file_skills()
+        self._register_office_skills()
         self._register_window_skills()
         self._register_browser_skills()
         self._register_code_skills()
@@ -1327,6 +1461,7 @@ class SkillRegistry:
                 "encoding": {"type": "string", "description": "File encoding", "default": "utf-8"},
             }, "required": ["path"]},
             read_file, "files",
+            aliases={"path": ("file_path", "filepath", "filename", "file")},
         ))
 
         async def write_file(params: dict) -> dict:
@@ -1342,6 +1477,8 @@ class SkillRegistry:
                 "content": {"type": "string", "description": "Content to write"},
             }, "required": ["path", "content"]},
             write_file, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename", "file"),
+                     "content": ("text", "data", "contents", "body")},
         ))
 
         async def list_dir(params: dict) -> dict:
@@ -1511,6 +1648,78 @@ class SkillRegistry:
                 "path": {"type": "string", "description": "File to delete"},
             }, "required": ["path"]},
             delete_file, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename", "file")},
+        ))
+
+        # Renaming and moving, as distinct from delete and write.
+        #
+        # `FileOps.move` and `FileOps.copy` existed and were reachable through
+        # the ActionExecutor, but neither was registered as a skill — so from a
+        # chat turn the capability was invisible. Asked to rename a file, the
+        # model looked at its tool list, correctly reported "none of the listed
+        # tools can rename files", and fell back to shelling out to
+        # `Rename-Item`. A file operation that basic belongs in the catalogue.
+        #
+        # Renaming IS a move: within one folder, a move is the rename. That is
+        # why there is no separate `rename_file` skill — a second entry point to
+        # the same operation would be a second thing to keep in step.
+        async def move_file(params: dict) -> dict:
+            from backend.actions.file_ops import FileOps
+            return await FileOps().move(
+                str(params.get("source", "")),
+                str(params.get("dest", "")),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "move_file",
+            "Move or rename a file or folder. To rename, give the same folder "
+            "with a new name in `dest` (e.g. source 'notes.txt' -> dest "
+            "'draft.txt'). The destination must not already exist unless you "
+            "pass overwrite=true, and the result reports the path it actually "
+            "used — moving onto an existing folder puts the source INSIDE it.",
+            {"type": "object", "properties": {
+                "source": {"type": "string",
+                           "description": "Path to move or rename"},
+                "dest": {"type": "string",
+                         "description": ("New path. For a rename, the same "
+                                         "folder with a new filename.")},
+                "overwrite": {"type": "boolean",
+                              "description": ("Replace an existing destination. "
+                                              "Refused by default, and a .bak "
+                                              "of the old file is kept when it "
+                                              "is allowed."),
+                              "default": False},
+            }, "required": ["source", "dest"]},
+            move_file, "files", True,
+            aliases={"source": ("src", "from", "path", "file", "file_path",
+                                "old_path", "old_name"),
+                     "dest": ("destination", "dst", "to", "target", "new_path",
+                              "new_name", "new")},
+        ))
+
+        async def copy_file(params: dict) -> dict:
+            from backend.actions.file_ops import FileOps
+            return await FileOps().copy(
+                str(params.get("source", "")),
+                str(params.get("dest", "")),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "copy_file",
+            "Copy a file or folder, leaving the original in place. Refuses an "
+            "existing destination unless overwrite=true, and keeps a .bak of "
+            "the file it replaces.",
+            {"type": "object", "properties": {
+                "source": {"type": "string", "description": "Path to copy"},
+                "dest": {"type": "string", "description": "Where to copy it to"},
+                "overwrite": {"type": "boolean",
+                              "description": ("Replace an existing destination. "
+                                              "Refused by default."),
+                              "default": False},
+            }, "required": ["source", "dest"]},
+            copy_file, "files", True,
+            aliases={"source": ("src", "from", "path", "file", "file_path"),
+                     "dest": ("destination", "dst", "to", "target", "new_path")},
         ))
 
         async def create_dir(params: dict) -> dict:
@@ -1522,17 +1731,526 @@ class SkillRegistry:
                 "path": {"type": "string", "description": "Directory path to create"},
             }, "required": ["path"]},
             create_dir, "files",
+            aliases={"path": ("dir_path", "directory", "dir", "folder", "folder_path")},
         ))
 
         async def file_info(params: dict) -> dict:
             from backend.actions.file_ops import FileOps
             return await FileOps().info(str(params.get("path", "")))
         self.register(SkillDefinition(
-            "file_info", "Get file metadata (size, modified time, type)",
+            "file_info",
+            "Get file metadata (size, modified time, type)",
             {"type": "object", "properties": {
                 "path": {"type": "string", "description": "File path"},
             }, "required": ["path"]},
             file_info, "files",
+            aliases={"path": ("file_path", "filepath", "filename", "file")},
+        ))
+
+    # ── Office documents ─────────────────────────────────────────────────
+    #
+    # Separate from the plain file skills because these formats are not text.
+    # `.docx`, `.xlsx` and `.pptx` are ZIP archives of XML and a `.pdf` is a
+    # binary container, so `write_file` produces a corrupt file for any of them:
+    # it opens with `encoding="utf-8"` and writes TEXT. These use a library that
+    # knows the format.
+    #
+    # Reads are ungated, writes are gated. Reading a document tells Addled no
+    # more than reading a text file it is already trusted with; writing one can
+    # discard a document the user was working in. The `overwrite` flag is the
+    # same rule the plain file skills follow.
+    def _register_office_skills(self):
+        async def word_read(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.word_read(str(params.get("path", "")))
+        self.register(SkillDefinition(
+            "word_read",
+            "Read a Word document (.docx) — its text, its headings, and any "
+            "tables. Use this rather than read_file, which cannot open a .docx.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .docx"},
+            }, "required": ["path"]},
+            word_read, "files",
+            aliases={"path": ("file_path", "filepath", "filename", "file")},
+        ))
+
+        async def word_create(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.word_create(
+                str(params.get("path", "")),
+                title=str(params.get("title", "")),
+                content=str(params.get("content", "")),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "word_create",
+            "Create a Word document (.docx) from text. Lay `content` out with "
+            "plain markers: '# ', '## ' and '### ' become headings, and '- ' "
+            "becomes a bullet. Refuses to replace an existing file unless "
+            "overwrite=true, so use word_edit to change a document that is "
+            "already there.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path for the .docx"},
+                "title": {"type": "string", "description": "Document title."},
+                "content": {"type": "string",
+                            "description": ("Body text. '# ' heading, "
+                                            "'- ' bullet, blank line separates.")},
+                "overwrite": {"type": "boolean", "default": False,
+                              "description": "Replace an existing file."},
+            }, "required": ["path"]},
+            word_create, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def word_edit(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.word_edit(
+                str(params.get("path", "")),
+                find=str(params.get("find", "")),
+                replace=str(params.get("replace", "")),
+                append=str(params.get("append", "")),
+                add_heading=str(params.get("add_heading", "")),
+            )
+        self.register(SkillDefinition(
+            "word_edit",
+            "Change an existing Word document (.docx) in place. find/replace "
+            "rewrites every paragraph containing the phrase; append adds "
+            "paragraphs at the end; add_heading adds a heading. Give at least "
+            "one of them. Fails if the phrase is not found, rather than "
+            "reporting a save that changed nothing.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .docx"},
+                "find": {"type": "string", "description": "Text to find."},
+                "replace": {"type": "string", "description": "Text to put there."},
+                "append": {"type": "string",
+                           "description": "Paragraph(s) to add at the end."},
+                "add_heading": {"type": "string",
+                                "description": "A heading to add at the end."},
+            }, "required": ["path"]},
+            word_edit, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename"),
+                     "find": ("search", "old", "old_text"),
+                     "replace": ("new", "new_text", "with")},
+        ))
+
+        async def excel_read(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.excel_read(
+                str(params.get("path", "")),
+                sheet=str(params.get("sheet", "")),
+                max_rows=params.get("max_rows", 500),
+            )
+        self.register(SkillDefinition(
+            "excel_read",
+            "Read a spreadsheet (.xlsx/.xlsm). Returns rows as lists, with "
+            "formulas as their computed values. Name a sheet to read one, or "
+            "omit it for the active sheet. Use excel_sheets first when you do "
+            "not know the sheet names.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .xlsx"},
+                "sheet": {"type": "string", "description": "Sheet name."},
+                "max_rows": {"type": "integer", "default": 500},
+            }, "required": ["path"]},
+            excel_read, "files",
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def excel_write(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.excel_write(
+                str(params.get("path", "")),
+                sheet=str(params.get("sheet", "")),
+                grid=params.get("grid"),
+                cells=params.get("cells"),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "excel_write",
+            "Write values into a spreadsheet (.xlsx), creating it if needed. "
+            "Pass `grid` as a list of rows (written from A1) or `cells` as "
+            "[{row, col, value}]. An existing file is UPDATED — other sheets "
+            "and rows are kept. Pass overwrite=true only when you mean to "
+            "replace the whole workbook with a new one.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .xlsx"},
+                "sheet": {"type": "string", "description": "Sheet name."},
+                "grid": {"type": "array",
+                         "description": "Rows, e.g. [[\"Item\",\"Cost\"],[...]]",
+                         "items": {"type": "array"}},
+                "cells": {"type": "array",
+                          "description": "[{row, col, value}] — 1-based.",
+                          "items": {"type": "object"}},
+                "overwrite": {"type": "boolean", "default": False,
+                              "description": "Start a new workbook instead."},
+            }, "required": ["path"]},
+            excel_write, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def excel_sheets(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.excel_sheets(str(params.get("path", "")))
+        self.register(SkillDefinition(
+            "excel_sheets",
+            "List the sheet names and their sizes in a spreadsheet (.xlsx). "
+            "Read-only. Use it to find the right sheet before excel_read.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .xlsx"},
+            }, "required": ["path"]},
+            excel_sheets, "files",
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def pptx_read(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pptx_read(str(params.get("path", "")))
+        self.register(SkillDefinition(
+            "pptx_read",
+            "Read a PowerPoint deck (.pptx) — the title and body text of each "
+            "slide, in order.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .pptx"},
+            }, "required": ["path"]},
+            pptx_read, "files",
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def pptx_create(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pptx_create(
+                str(params.get("path", "")),
+                title=str(params.get("title", "")),
+                slides=params.get("slides"),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "pptx_create",
+            "Create a PowerPoint deck (.pptx). Give a title and a list of "
+            "slides, each {\"title\": ..., \"bullets\": [...]} — or a plain "
+            "string for a slide that is a title alone. Refuses to replace an "
+            "existing deck unless overwrite=true.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path for the .pptx"},
+                "title": {"type": "string", "description": "Deck title."},
+                "slides": {"type": "array",
+                           "description": ("[{\"title\":..., \"bullets\":[...]}] "
+                                           "or a string per slide."),
+                           "items": {}},
+                "overwrite": {"type": "boolean", "default": False},
+            }, "required": ["path"]},
+            pptx_create, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def pptx_add_slide(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pptx_add_slide(
+                str(params.get("path", "")),
+                title=str(params.get("title", "")),
+                bullets=params.get("bullets"),
+            )
+        self.register(SkillDefinition(
+            "pptx_add_slide",
+            "Append one slide to an existing PowerPoint deck (.pptx).",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .pptx"},
+                "title": {"type": "string", "description": "Slide title."},
+                "bullets": {"type": "array", "description": "Bullet lines.",
+                            "items": {"type": "string"}},
+            }, "required": ["path"]},
+            pptx_add_slide, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def pdf_read(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pdf_read(
+                str(params.get("path", "")),
+                pages=str(params.get("pages", "")),
+                max_pages=params.get("max_pages", 500),
+            )
+        self.register(SkillDefinition(
+            "pdf_read",
+            "Read a PDF — its text, page count and metadata. Use `pages` to "
+            "read part of a long document instead of all of it: \"1-5\", \"2\" "
+            "or \"1,3,7\". A PDF with no text layer (a scan) is reported as "
+            "such rather than returned as empty. This reads; it cannot edit an "
+            "existing PDF.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .pdf"},
+                "pages": {"type": "string",
+                          "description": "e.g. '1-5', '2', '1,3,7'. Omit for all."},
+                "max_pages": {"type": "integer", "default": 500},
+            }, "required": ["path"]},
+            pdf_read, "files",
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def pdf_create(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pdf_create(
+                str(params.get("path", "")),
+                title=str(params.get("title", "")),
+                content=str(params.get("content", "")),
+                page_size=str(params.get("page_size", "a4")),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "pdf_create",
+            "Create a new PDF from text. Lay `content` out with the same "
+            "markers as word_create: '# ', '## ' and '### ' become headings, "
+            "'- ' a bullet, and a blank line a paragraph break. This makes a "
+            "new document — it cannot edit or merge an existing PDF. Text "
+            "outside the PDF core fonts (non-Latin scripts, emoji) is written "
+            "as '?' and reported, because rendering it needs an embedded font.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path for the .pdf"},
+                "title": {"type": "string", "description": "Document title."},
+                "content": {"type": "string",
+                            "description": ("Body text. '# ' heading, '- ' "
+                                            "bullet, blank line separates.")},
+                "page_size": {"type": "string", "default": "a4",
+                              "description": "a4, letter, legal or a3."},
+                "overwrite": {"type": "boolean", "default": False,
+                              "description": "Replace an existing file."},
+            }, "required": ["path"]},
+            pdf_create, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def pdf_pages(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pdf_pages(str(params.get("path", "")))
+        self.register(SkillDefinition(
+            "pdf_pages",
+            "List the pages of a PDF, each with a short text preview and its "
+            "size. Read-only. Take this before pdf_edit when you need to "
+            "rearrange or delete pages — a count alone does not say which page "
+            "is which, and moving the wrong one is not recoverable from the "
+            "result.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .pdf"},
+            }, "required": ["path"]},
+            pdf_pages, "files",
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def pdf_edit(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pdf_edit(
+                str(params.get("path", "")),
+                remove_pages=params.get("remove_pages", ""),
+                keep_pages=params.get("keep_pages", ""),
+                order=params.get("order", ""),
+                rotate=params.get("rotate", 0),
+                rotate_pages=params.get("rotate_pages", ""),
+                title=str(params.get("title", "")),
+                author=str(params.get("author", "")),
+                subject=str(params.get("subject", "")),
+            )
+        self.register(SkillDefinition(
+            "pdf_edit",
+            "Change the PAGES and metadata of an existing PDF, in place. Select "
+            "with remove_pages or keep_pages ('1-3,7'), reorder with order, turn "
+            "pages with rotate (90/180/270), and set title/author/subject. "
+            "IMPORTANT: this cannot rewrite the TEXT inside a page — a PDF "
+            "stores positioned glyphs, not paragraphs. To change wording, "
+            "re-create the document or produce a new one.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to the .pdf"},
+                "remove_pages": {"type": "string",
+                                 "description": "Pages to drop, e.g. '2,5-7'."},
+                "keep_pages": {"type": "string",
+                               "description": "Pages to keep. Overrides remove."},
+                "order": {"type": "string",
+                          "description": ("The wanted page sequence, e.g. "
+                                          "'3,1,2'. Pages left out are dropped.")},
+                "rotate": {"type": "integer", "default": 0,
+                           "description": "Degrees: 90, 180 or 270."},
+                "rotate_pages": {"type": "string",
+                                 "description": "Which pages to rotate."},
+                "title": {"type": "string", "description": "Set the PDF title."},
+                "author": {"type": "string", "description": "Set the author."},
+                "subject": {"type": "string", "description": "Set the subject."},
+            }, "required": ["path"]},
+            pdf_edit, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename")},
+        ))
+
+        async def pdf_merge(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pdf_merge(
+                str(params.get("path", "")),
+                sources=params.get("sources"),
+                keep_source=params.get("keep_source", True),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "pdf_merge",
+            "Combine PDFs into one file, in the order given. `sources` are "
+            "joined onto `path`, so this also appends files to an existing "
+            "document. The sources are kept by default; pass keep_source=false "
+            "to remove them afterwards. Refuses to overwrite the destination "
+            "unless overwrite=true.",
+            {"type": "object", "properties": {
+                "path": {"type": "string",
+                         "description": "Destination PDF (created, or appended to)."},
+                "sources": {"type": "array",
+                            "description": "PDF paths to join, in order.",
+                            "items": {"type": "string"}},
+                "keep_source": {"type": "boolean", "default": True,
+                                "description": "Keep the source files."},
+                "overwrite": {"type": "boolean", "default": False,
+                              "description": "Replace an existing destination."},
+            }, "required": ["path", "sources"]},
+            pdf_merge, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename"),
+                     "sources": ("files", "inputs", "from")},
+        ))
+
+        async def pdf_extract(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pdf_extract(
+                str(params.get("path", "")),
+                pages=str(params.get("pages", "")),
+                output=str(params.get("output", "")),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "pdf_extract",
+            "Copy pages out of a PDF into a NEW file, leaving the original "
+            "untouched. Use `pages` to choose them ('1-3,7'; omit for all), and "
+            "`output` for the destination — without it the name is derived from "
+            "the source. Different from pdf_edit: this keeps the original, so it "
+            "is the right tool when the user only wants a subset.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Source .pdf"},
+                "pages": {"type": "string",
+                          "description": "e.g. '1-3,7'. Omit for every page."},
+                "output": {"type": "string",
+                           "description": "Destination path for the new PDF."},
+                "overwrite": {"type": "boolean", "default": False},
+            }, "required": ["path"]},
+            pdf_extract, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename"),
+                     "output": ("dest", "destination", "out", "to")},
+        ))
+
+        async def pdf_redact(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pdf_redact(
+                str(params.get("path", "")),
+                terms=params.get("terms"),
+                pages=str(params.get("pages", "")),
+                output=str(params.get("output", "")),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "pdf_redact",
+            "Permanently REMOVE text from a PDF — an account number, a name, an "
+            "address. `terms` lists the exact strings to find and delete; the "
+            "text is replaced, not covered, so it cannot be recovered by "
+            "copying the page or extracting the text. Writes a NEW file by "
+            "default, because redaction cannot be undone. Always say what you "
+            "are about to remove and let the user confirm before calling this.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Source .pdf"},
+                "terms": {"type": "array",
+                          "description": "Exact strings to remove.",
+                          "items": {"type": "string"}},
+                "pages": {"type": "string",
+                          "description": "Limit to pages, e.g. '1-3'. Omit for all."},
+                "output": {"type": "string",
+                           "description": ("Where to write the redacted file. "
+                                           "Defaults to <name>_redacted.pdf — "
+                                           "never the original.")},
+                "overwrite": {"type": "boolean", "default": False,
+                              "description": ("Replace the output if it exists.")},
+            }, "required": ["path", "terms"]},
+            pdf_redact, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename"),
+                     "terms": ("text", "search", "find", "values"),
+                     "output": ("dest", "destination", "out", "to")},
+        ))
+
+        async def pdf_redact_verify(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.pdf_redact_verify(str(params.get("path", "")),
+                                            terms=params.get("terms"))
+        self.register(SkillDefinition(
+            "pdf_redact_verify",
+            "Check that text really is gone from a PDF — that it cannot be "
+            "extracted any more. Read-only. Run this after pdf_redact when the "
+            "document matters: a black box drawn over text leaves it "
+            "extractable, and only a search can tell the difference between "
+            "removed and merely covered.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "The redacted .pdf"},
+                "terms": {"type": "array",
+                          "description": "The strings that should be gone.",
+                          "items": {"type": "string"}},
+            }, "required": ["path", "terms"]},
+            pdf_redact_verify, "files",
+            aliases={"path": ("file_path", "filepath", "filename"),
+                     "terms": ("text", "search", "find")},
+        ))
+
+        async def convert_to_pdf(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.convert_to_pdf(
+                str(params.get("path", "")),
+                output=str(params.get("output", "")),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "convert_to_pdf",
+            "Convert a document to PDF, keeping its layout: .docx, .pptx, "
+            ".xlsx, .txt, .md or .csv -> .pdf. Word keeps headings and fonts; "
+            "PowerPoint gives one page per slide; a spreadsheet becomes a table "
+            "of its values. Use this to hand someone a single readable file, or "
+            "to make a PDF out of a document Addled just wrote.",
+            {"type": "object", "properties": {
+                "path": {"type": "string",
+                         "description": "The document to convert."},
+                "output": {"type": "string",
+                           "description": ("Where to write the PDF. Defaults to "
+                                           "the same name with .pdf.")},
+                "overwrite": {"type": "boolean", "default": False},
+            }, "required": ["path"]},
+            convert_to_pdf, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename", "source"),
+                     "output": ("dest", "destination", "out", "to")},
+        ))
+
+        async def convert_from_pdf(params: dict) -> dict:
+            from backend.actions import office_ops as office
+            return office.convert_from_pdf(
+                str(params.get("path", "")),
+                output=str(params.get("output", "")),
+                to=str(params.get("to", "text")),
+                overwrite=bool(params.get("overwrite")),
+            )
+        self.register(SkillDefinition(
+            "convert_from_pdf",
+            "Turn a PDF into text (.txt), HTML (.html) or a Word document "
+            "(.docx) — choose with `to`. This EXTRACTS the text; it does not "
+            "rebuild the layout, because a PDF stores positioned glyphs and "
+            "tables and columns do not survive being reflowed. A scanned PDF "
+            "has no text to extract and is reported rather than written out "
+            "empty.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "description": "The .pdf to convert."},
+                "to": {"type": "string", "default": "text",
+                       "description": "text, html or docx."},
+                "output": {"type": "string",
+                           "description": ("Where to write it. Defaults to the "
+                                           "same name with the new extension.")},
+                "overwrite": {"type": "boolean", "default": False},
+            }, "required": ["path"]},
+            convert_from_pdf, "files", True,
+            aliases={"path": ("file_path", "filepath", "filename", "source"),
+                     "to": ("format", "target", "as"),
+                     "output": ("dest", "destination", "out")},
         ))
 
     # ── Window Management ────────────────────────────────────────────────
@@ -2069,6 +2787,143 @@ class SkillRegistry:
                          "description": "Path to the audio/video file."},
             }, "required": ["path"]},
             transcribe_audio, "integrations",
+        ))
+
+        # ---- messaging a person through a bot bridge -----------------------
+        #
+        # Gated, and deliberately. Every other bot action replies to someone who
+        # already spoke to us; this one puts a message in front of a THIRD PARTY
+        # who never asked for it and cannot un-read it. That is the same class of
+        # act as `email_send`, which asks for the same reason.
+        async def send_message(params: dict) -> dict:
+            """Send a chat message through a running bot bridge.
+
+            The bot owns the platform's connection — the socket lives in its own
+            process — so this asks it over the WebSocket and waits for the
+            answer. A failure names which part failed, because from the chat page
+            "nothing happened" is the hardest thing to act on.
+            """
+            from backend.bots import manager as bots
+
+            platform = str(params.get("platform") or "whatsapp").strip().lower()
+            to = str(params.get("to") or "").strip()
+            text = str(params.get("text") or "").strip()
+
+            if not text:
+                return {"success": False,
+                        "error": ("What should it say? Pass the words as "
+                                  "'text'.")}
+            if not to:
+                return {"success": False,
+                        "error": ("Who should it go to? Pass a phone number in "
+                                  "international form, e.g. 6281234567890, or a "
+                                  "chat id ending in @g.us for a group.")}
+            return await bots.send(platform, to, text)
+
+        self.register(SkillDefinition(
+            "send_message",
+            "Send a chat message to someone through a running bot bridge "
+            "(WhatsApp, Telegram or Discord). Use the phone number the user "
+            "gives you, in international form without a leading plus — "
+            "'6281234567890'. The message is delivered and cannot be recalled, "
+            "so say who you are about to message and what you will say before "
+            "calling this, and never guess a number the user did not give you. "
+            "The bot must be running; check with bot_status if unsure.",
+            {"type": "object", "properties": {
+                "to": {"type": "string",
+                       "description": ("Recipient: a phone number in "
+                                       "international form (6281234567890) or a "
+                                       "group id ending in @g.us.")},
+                "text": {"type": "string",
+                         "description": "The message to send."},
+                "platform": {"type": "string",
+                             "description": ("Which bridge: whatsapp, telegram "
+                                             "or discord. Defaults to whatsapp."),
+                             "default": "whatsapp"},
+            }, "required": ["to", "text"]},
+            send_message, "integrations",
+            requires_approval=True,
+            aliases={"to": ("recipient", "number", "phone", "chat_id", "jid"),
+                     "text": ("message", "body", "content", "msg")},
+        ))
+
+        async def bot_status(params: dict) -> dict:
+            """Are the bot bridges running, and where would a message go?
+
+            Reading, not sending: no approval. It exists because every failure
+            of `send_message` is easier to act on with this in hand, and because
+            a model that cannot check will otherwise guess.
+            """
+            from backend.bots import manager as bots
+
+            status = bots.status()
+            out = {}
+            for name, info in (status.get("platforms") or {}).items():
+                out[name] = {
+                    "running": bool(info.get("running")),
+                    "ready": bool(info.get("ready")),
+                    "blockers": info.get("blockers") or [],
+                    "needs_qr": bool(info.get("qr")),
+                }
+            return {"success": True, "platforms": out,
+                    "running": [n for n, v in out.items() if v["running"]],
+                    "node": status.get("node") or ""}
+
+        self.register(SkillDefinition(
+            "bot_status",
+            "Check which chat bots are running and whether they are ready "
+            "(WhatsApp, Telegram, Discord). Read-only. Use this before "
+            "send_message, and to explain to the user which bot to start or "
+            "which still needs its QR code scanned.",
+            {"type": "object", "properties": {}},
+            bot_status, "integrations",
+        ))
+
+        async def chat_history(params: dict) -> dict:
+            """Recent turns of a bot conversation.
+
+            The backend records what a bridge sent and received, so this reads
+            the record rather than asking the platform: WhatsApp does not serve
+            history for a linked device without an explicit sync store, which
+            this bridge does not configure.
+            """
+            from backend.memory.bot_history import recent
+
+            platform = str(params.get("platform") or "").strip().lower()
+            conversation = str(params.get("conversation") or "").strip()
+            limit = params.get("limit", 20)
+            try:
+                limit = max(1, min(int(limit), 100))
+            except (TypeError, ValueError):
+                limit = 20
+            turns = recent(platform=platform or None,
+                           conversation=conversation or None, limit=limit)
+            if not turns:
+                where = f" for {conversation}" if conversation else ""
+                return {"success": True, "turns": [], "count": 0,
+                        "message": (f"Nothing has been exchanged{where} yet. "
+                                    f"History starts from when a bot first "
+                                    f"spoke with someone.")}
+            return {"success": True, "turns": turns, "count": len(turns)}
+
+        self.register(SkillDefinition(
+            "chat_history",
+            "Read the recent messages exchanged through a chat bot bridge — "
+            "what a contact asked and what Addled replied. Use it to answer "
+            "'what did they say', to follow up on a conversation, or to check "
+            "whether a message was actually sent. Optionally narrow it with a "
+            "platform (whatsapp/telegram/discord) or a conversation id.",
+            {"type": "object", "properties": {
+                "platform": {"type": "string",
+                             "description": "whatsapp, telegram or discord."},
+                "conversation": {"type": "string",
+                                 "description": ("A specific chat: the phone "
+                                                 "number or chat id.")},
+                "limit": {"type": "integer",
+                          "description": "How many recent turns (1-100).",
+                          "default": 20},
+            }, "required": []},
+            chat_history, "integrations",
         ))
 
     # ── Web Search ───────────────────────────────────────────────────────

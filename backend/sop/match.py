@@ -76,6 +76,34 @@ def _skill_category(tool_name: str) -> str | None:
         log.debug("Could not resolve category for %s: %s", tool_name, e)
     return None
 
+# Tool categories that do not exist in this module's taxonomy, mapped to the
+# procedure category that covers them.
+#
+# The two classifiers disagreed, and it was not theoretical. LEARNING files a
+# procedure under `category_for(tools)`, whose values come from the skill
+# registry (`files`, `system`, `windows`, `integrations`, `meta`, `general`).
+# LOOKUP searches with `guess_category(message)`, which can only ever produce the
+# CATEGORY_HINTS keys (`files`, `code`, `web`, `browser`, `calendar`, `system`,
+# `desktop`, `memory`, `vision`).
+#
+# So `windows`, `integrations`, `meta` and `general` were write-only: a learned
+# procedure filed under one of them could never be found, because no message is
+# ever classified into a category the lookup does not know. The recipe was
+# saved, counted, and permanently unreachable.
+#
+# Mapping rather than adding new categories on purpose: making `windows` its own
+# bucket would split window tasks across two — filed under `windows` when they
+# ran, searched under `desktop` when asked about — so the same work would
+# produce two procedures that never reinforce each other.
+TOOL_CATEGORY_ALIASES = {
+    "windows": "desktop",
+    "integrations": "calendar",
+    "mcp": "system",
+    "market": "system",
+    "forged": "system",
+    "meta": "system",
+}
+
 
 def category_for(tool_names) -> str:
     """The category most of these tools belong to.
@@ -83,6 +111,10 @@ def category_for(tool_names) -> str:
     Tools are the best evidence available: they are what actually ran, so the
     category reflects what the task turned out to be rather than what the
     wording suggested.
+
+    The result is translated through TOOL_CATEGORY_ALIASES, so it is always a
+    category the LOOKUP side can produce. A category only one side knows about
+    is a procedure nobody will ever be offered.
     """
     names = [str(t or "").strip() for t in (tool_names or []) if str(t or "").strip()]
     if not names:
@@ -91,6 +123,7 @@ def category_for(tool_names) -> str:
     for name in names:
         category = _skill_category(name)
         if category:
+            category = TOOL_CATEGORY_ALIASES.get(category, category)
             counts[category] = counts.get(category, 0) + 1
     if not counts:
         return DEFAULT_CATEGORY
@@ -192,9 +225,31 @@ def score(task: str, sop: dict, task_vector=None) -> tuple[float, str]:
 def similarity_pair(task: str, sop: dict) -> tuple[float, str]:
     """(score, method) against a task string, for merge decisions.
 
-    The method matters: an embedding cosine and a word-overlap share are not
-    the same units, so they cannot be compared against one number.
+    The method matters: an embedding cosine and a word-overlap share are not the
+    same units, so they cannot be compared against one number.
+
+    Both are computed and the LEXICAL answer wins when it clears its own merge
+    bar. That is not a preference for words, it is a correction: `score()`
+    returns the embedding whenever one is available, and an embedding cosine
+    cannot clear the merge bar even for a string compared against itself —
+    measured on this machine, an identical title scored 0.7665 against a bar of
+    0.82, while the lexical score for the same pair was 0.80 against a bar of
+    0.55.
+
+    The consequence was that merging never happened while embeddings were
+    working, so every repeat of a task created another near-identical procedure
+    — the exact duplication the merge exists to prevent, and the reason a
+    long-lived store fills with clones instead of sharpening one recipe.
+
+    Merging is a decision about near-identity, and words answer it well: shared
+    vocabulary is strong evidence two runs did the same thing. `best()` still
+    ranks with the embedding, because "is this relevant" is a different question
+    with a different bar.
     """
+    lexical = _lexical(words(task), sop)
+    if lexical >= threshold("lexical", "merge"):
+        return lexical, "lexical"
+
     task_vector = None
     try:
         from backend.memory.embedding import embed_text
@@ -394,11 +449,42 @@ def build_sop_context(task: str) -> str | None:
     if not steps:
         return None
 
+    # Offering counts as a use.
+    #
+    # It did not, and that is why every procedure in a long-lived store read
+    # "0/0 successful": `record_use` was only reached on the LEARNING path, when
+    # a repeat run merged into an existing recipe. A seed that was correctly
+    # matched and injected twenty times still showed zero. Two consequences, both
+    # bad — the block told the model "0/0 successful", which argues AGAINST
+    # following it, and there was no way to see whether lookup ever fired at all,
+    # or which seeds are dead weight.
+    #
+    # Counted here rather than in `best()` because this is the point at which a
+    # procedure is actually handed to the model. A lookup that is computed and
+    # then discarded has not been used.
+    try:
+        store.record_use(sop.get("id"), success=True)
+        # Reflect the increment in what is about to be printed. `record_use`
+        # wrote to disk; `sop` is the dict read before it, so without this the
+        # block would still say "0/1 successful" on the very turn it counted.
+        sop["uses"] = int(sop.get("uses") or 0) + 1
+        sop["successes"] = int(sop.get("successes") or 0) + 1
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not record the procedure offer: %s", e)
+
     lines = [
         "[Procedure]",
         f"A procedure for '{sop.get('category')}' tasks worked before "
         f"({sop.get('successes') or 0}/{sop.get('uses') or 0} successful): "
         f"{sop.get('title')}.",
+    ]
+    # The reason, when one was recorded. It is the part that carries WHY the
+    # route was chosen — a step list alone reads as arbitrary ritual, and a
+    # procedure followed without understanding is one applied to the wrong task.
+    reason = str(sop.get("reason") or "").strip()
+    if reason:
+        lines.append(f"Because: {reason}")
+    lines += [
         *(f"{i}. {step}" for i, step in enumerate(steps, 1)),
         "Follow it when it fits. If the task differs, say so and do what the "
         "task actually needs.",

@@ -668,37 +668,48 @@ def run_shell_access_tests():
         check("nothing was queued for it", not ex.pending_approvals(),
               str(ex.pending_approvals()))
 
-        # A destructive one must queue with a usable handle, not a dead end.
-        task = asyncio.create_task(ex.execute_for_chat(
-            "run_command", {"command": "rm -rf /tmp/addled-probe"}))
-        await asyncio.sleep(0.5)
+        # A destructive one must queue with a usable handle, and must NOT hold
+        # the turn open. It used to wait in-band for the user, which meant the
+        # answer usually arrived after the caller had given up — the user saw a
+        # timeout rather than the prompt.
+        blocked = await ex.execute_for_chat(
+            "run_command", {"command": "rm -rf /tmp/addled-probe"})
         pending = ex.pending_approvals()
-        check("a destructive command waits for approval", bool(pending),
+        check("a destructive command does not block the turn", not blocked.success,
+              "it ran, or it waited")
+        check("and it is queued for the user to answer", bool(pending),
               "it was not queued")
         check("and the queue carries a real approval id",
               bool(pending)
               and str(pending[0].get("approval_id")).startswith("appr_"),
               str(pending[:1]))
+        check("and the turn reports that approval is needed",
+              bool((blocked.data or {}).get("requires_approval")),
+              str(blocked.data)[:120])
+        check("and it does not tell the user to ask again",
+              "ask again" not in str(blocked.error or ""),
+              str(blocked.error)[:120])
 
+        # Approving runs it there and then, because nothing else will. Asserted
+        # on the command having been DISPATCHED, not on it succeeding: this is a
+        # PowerShell host, so `rm -rf` is expected to fail at the shell. What is
+        # being checked is that approving reached the shell at all.
         approved = await ex.approve(pending[0]["approval_id"])
-        check("approving wakes the waiting turn",
-              approved.success and "Approved" in (approved.summary or ""),
-              f"{approved.success} {approved.summary}")
-        ran = await task
-        check("and the turn then reports the command result",
-              ran.error is None
-              or "needs your approval" not in str(ran.error),
-              str(ran.error)[:80])
+        reached = bool((approved.data or {}).get("exit_code") is not None
+                       or (approved.data or {}).get("stdout")
+                       or (approved.data or {}).get("stderr"))
+        check("approving runs the deferred command",
+              reached, f"{approved.success} {approved.error} {approved.data}")
 
-        # Denial must be reported as denial, not as missing access.
-        task2 = asyncio.create_task(ex.execute_for_chat(
-            "run_command", {"command": "rm -rf /tmp/addled-probe-2"}))
-        await asyncio.sleep(0.5)
-        ex.deny(ex.pending_approvals()[0]["approval_id"])
-        out2 = await task2
-        check("a denied command reports that the user denied it",
-              bool((out2.data or {}).get("denied")),
-              str(out2.data)[:120])
+        # Denial is a separate answer, and reports itself as one.
+        denied = await ex.execute_for_chat(
+            "run_command", {"command": "rm -rf /tmp/addled-probe-2"})
+        aid2 = (denied.data or {}).get("approval_id")
+        ex.deny(aid2)
+        check("denying clears the request",
+              aid2 not in {p.get("approval_id")
+                           for p in ex.pending_approvals()},
+              "it is still queued after being denied")
 
     asyncio.run(drive())
 

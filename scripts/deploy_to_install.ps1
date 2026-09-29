@@ -126,6 +126,41 @@ Invoke-Sync -From (Join-Path $repo 'backend') -To (Join-Path $resources 'backend
             -ExtraArgs $excludes
 
 if (-not $BackendOnly) {
+    # The bot bridges live in `bots/`, NOT under `backend/`, so the sync above
+    # never touched them. Editing a bot script and deploying looked like it
+    # worked — the backend restarted, the dashboard updated — while the running
+    # app still ran the OLD JavaScript. Found when a WhatsApp fix was deployed
+    # and the installed copy still had the previous code.
+    #
+    # Packaged builds run them from `app.asar.unpacked\bots` (an external node
+    # cannot read inside app.asar), which is where electron-builder puts them.
+    # Both layouts are handled so a dev run and an installed app agree.
+    $botsFrom = Join-Path $repo 'bots'
+    if (Test-Path $botsFrom) {
+        $botTargets = @()
+        $unpacked = Join-Path $resources 'app.asar.unpacked\bots'
+        if (Test-Path (Split-Path $unpacked -Parent)) { $botTargets += $unpacked }
+        $plain = Join-Path $resources 'bots'
+        if (Test-Path $plain) { $botTargets += $plain }
+        if ($botTargets.Count -eq 0) {
+            Write-Host "No bots folder in the install; skipping bot scripts." -ForegroundColor Yellow
+        }
+        foreach ($botsTo in $botTargets) {
+            $jsCount = (Get-ChildItem $botsFrom -Filter '*.js' -File -ErrorAction SilentlyContinue).Count
+            Write-Host ("Deploying bot scripts ({0} file(s)) -> {1}..." -f $jsCount, $botsTo) -ForegroundColor Cyan
+            # Only the scripts, and only *.js. `node_modules` under bots/ is
+            # large and installed by npm; `auth/` holds live WhatsApp pairing
+            # credentials, which are user data that must survive a deploy.
+            Invoke-Sync -From $botsFrom -To $botsTo `
+                        -ExtraArgs (@('/XD', 'node_modules', 'auth', 'shared\auth') +
+                                    @('/XF', '*.log', 'package-lock.json'))
+        }
+    } else {
+        Write-Host "No bots folder in the repo; skipping bot scripts." -ForegroundColor Yellow
+    }
+}
+
+if (-not $BackendOnly) {
     $out = Join-Path $repo 'dashboard\out'
     if (-not (Test-Path (Join-Path $out 'index.html'))) {
         throw "dashboard\out is not built. Run: cd dashboard; npm run build"

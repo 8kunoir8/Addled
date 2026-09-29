@@ -33,6 +33,9 @@ SOURCES: dict[str, tuple[str, str]] = {
     "swarm": ("a swarm agent", "🐝"),
     "code": ("Code mode", "💻"),
     "remote": ("a remote session", "📡"),
+    # An action the user approved. It runs after the turn that asked has ended,
+    # so the outcome has to be announced like any other out-of-turn message.
+    "approval": ("an approved action", "✅"),
 }
 
 # Sources that are the user talking *in this app*. A message from one of these

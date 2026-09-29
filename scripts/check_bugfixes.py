@@ -256,9 +256,10 @@ def run():
 
     # The flag must actually be ENFORCED, not just declared. With no approval
     # UI answering, a gated skill must refuse and leave the target untouched.
-    import backend.actions.executor as _ex
-    _saved_wait = _ex.APPROVAL_WAIT_S
-    _ex.APPROVAL_WAIT_S = 0.3
+    #
+    # There is no approval wait to shorten any more: the turn ends the moment a
+    # gated action is queued, so the refusal is immediate and this needs no
+    # timeout fiddling to observe.
     _tmp = Path(tempfile.mkdtemp(prefix="gate_"))
     try:
         _victim = _tmp / "keep-me.txt"
@@ -274,7 +275,6 @@ def run():
                   and _res.data.get("requires_approval")),
               str(_res)[:200])
     finally:
-        _ex.APPROVAL_WAIT_S = _saved_wait
         import shutil as _sh
         _sh.rmtree(_tmp, ignore_errors=True)
 

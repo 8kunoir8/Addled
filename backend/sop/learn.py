@@ -18,6 +18,10 @@ log = logging.getLogger("addled.sop.learn")
 MIN_TOOLS = 2
 MAX_TRACE_TOOLS = 8
 GOAL_CHARS = 160
+# How much of the turn's own context is kept as the reason. One line, not a
+# transcript: it is stored per procedure and read back on every match, so a long
+# excerpt would cost tokens forever for a small gain.
+REASON_CHARS = 240
 
 
 def _shorten(text: str, limit: int) -> str:
@@ -32,9 +36,43 @@ def _trace_steps(goal: str, tools: list[str]) -> list[str]:
     steps += [f"Call {tool}" for tool in tools]
     return steps
 
+def _reason_from(context: str) -> str:
+    """One line explaining WHY this route was taken, from the turn's context.
+
+    The tool list says what happened; it cannot say what the model knew when it
+    chose. The system prompt the turn ran with already contains that — recalled
+    facts, wiki pages, and the procedure that was offered — so the useful
+    sentences are lifted out of it rather than summarised. Summarising would
+    mean a model call inside a side effect that must never fail or delay.
+
+    Only the labelled blocks are read, so the standing instructions that make up
+    most of the prompt (tool catalogue, persona, formatting rules) are skipped:
+    they are identical on every task and would make every reason the same.
+    """
+    text = str(context or "")
+    if not text:
+        return ""
+    heads = ("[Facts]", "[Memory]", "[Wiki]", "[Procedure]", "[Recall]",
+             "[Session]", "[Timeline]")
+    picked: list[str] = []
+    for block in text.split("\n\n"):
+        if not any(block.lstrip().startswith(h) for h in heads):
+            continue
+        for line in block.splitlines():
+            clean = line.strip()
+            # Skip the header and any bracket label; keep the prose under it.
+            if not clean or clean.startswith("["):
+                continue
+            picked.append(clean)
+            if len(" ".join(picked)) >= REASON_CHARS:
+                break
+        if len(" ".join(picked)) >= REASON_CHARS:
+            break
+    return _shorten(" ".join(picked), REASON_CHARS)
+
 
 def record_run(category: str, tools_used, message: str = "",
-               success: bool = True) -> dict:
+               success: bool = True, context: str = "") -> dict:
     """Fold a finished task into the procedures. Never raises.
 
     Called after a tool-using turn: if it went well, the sequence that got
@@ -66,6 +104,7 @@ def record_run(category: str, tools_used, message: str = "",
         trace = tools[:MAX_TRACE_TOOLS]
         steps = _trace_steps(goal, trace)
         task_text = " ".join([goal] + trace)
+        reason = _reason_from(context)
 
         comparison = goal or " ".join(trace)
         closest, best, method = None, 0.0, "lexical"
@@ -78,11 +117,19 @@ def record_run(category: str, tools_used, message: str = "",
             # Same task, done again: widen the tool set and count the use
             # rather than adding a near-duplicate nobody will ever read.
             merged_tools = store._clean_tools(list(closest.get("tools") or []) + trace)
-            store.upsert({"id": closest["id"], "tools": merged_tools})
+            patch = {"id": closest["id"], "tools": merged_tools}
+            # Keep the first reason rather than the latest: the task is the same
+            # one, so the original justification is the one that has now been
+            # validated by repetition. Overwriting it on every repeat would make
+            # the stored reason whichever run happened to come last.
+            if reason and not str(closest.get("reason") or "").strip():
+                patch["reason"] = reason
+            store.upsert(patch)
             store.record_use(closest["id"], success=True)
             log.debug("Merged a run into %s (%s, %.2f)", closest["id"], resolved, best)
             return {"merged": closest["id"], "category": resolved,
-                    "similarity": round(best, 3), "tools": merged_tools}
+                    "similarity": round(best, 3), "tools": merged_tools,
+                    "reason": patch.get("reason", "")}
 
         title = _shorten(goal, 60) or " → ".join(trace[:3])
         out = store.upsert({
@@ -90,6 +137,7 @@ def record_run(category: str, tools_used, message: str = "",
             "title": title,
             "steps": steps,
             "tools": trace,
+            "reason": reason,
             "source": "learned",
         })
         if not out.get("success"):
@@ -97,7 +145,7 @@ def record_run(category: str, tools_used, message: str = "",
         store.record_use(out["sop"]["id"], success=True)
         log.info("Learned a procedure for '%s': %s", resolved, title)
         return {"created": out["sop"]["id"], "category": resolved,
-                "title": title, "tools": trace}
+                "title": title, "tools": trace, "reason": reason}
     except Exception as e:
         # Learning is a side effect of a conversation that has already
         # succeeded; failing it must never surface to the user.

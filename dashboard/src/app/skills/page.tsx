@@ -10,8 +10,19 @@ interface SkillInfo {
   requires_approval: boolean;
   /** Granted standing permission, so it does not ask any more. */
   always_allowed: boolean;
-  /** False for the names the destruction gate owns — the switch is disabled. */
+  /**
+   * May this be remembered permanently?
+   *
+   * False for an action whose danger is in what it is handed rather than what
+   * it is — `run_command` judges the command text against a list of
+   * unrecoverable ones. A grant is keyed by name, so remembering it would
+   * allow every command it will ever carry.
+   */
   grantable: boolean;
+  /** May it be allowed until Addled restarts? True for anything that asks. */
+  session_grantable?: boolean;
+  /** Already allowed for this session. */
+  session_allowed?: boolean;
   /** Was allowed, but its files changed since, so it asks again. */
   code_changed?: boolean;
   enabled: boolean;
@@ -82,6 +93,24 @@ export default function SkillsPage() {
     setMsg(r?.success
       ? { ok: true, text: allowed
           ? `"${name}" will not ask again until you turn this off`
+          : `"${name}" will ask before it runs` }
+      : { ok: false, text: r?.error || 'Could not change the permission' });
+    load();
+  };
+
+  // The session answer, for the actions a permanent grant is refused for. It
+  // lasts until Addled restarts and is never written to disk, which is what
+  // makes it safe to give to something that judges each request on its
+  // contents: the allowed scope ends with the sitting.
+  const setSessionAllowed = async (name: string, allowed: boolean) => {
+    setMsg(null);
+    const r = allowed
+      ? await send('approvals.alwaysAllow',
+                   { kind: 'skill', name, session: true })
+      : await send('approvals.revokeSession', { kind: 'skill', name });
+    setMsg(r?.success
+      ? { ok: true, text: allowed
+          ? `"${name}" will not ask again until Addled restarts`
           : `"${name}" will ask before it runs` }
       : { ok: false, text: r?.error || 'Could not change the permission' });
     load();
@@ -228,6 +257,13 @@ export default function SkillsPage() {
                       {s.always_allowed && s.requires_approval && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#12261e] text-[#3fb950]">✓ always allowed</span>
                       )}
+                      {s.session_allowed && !s.always_allowed && s.requires_approval && (
+                        <span
+                          title="Allowed until Addled restarts. It is not written to disk, so the prompt comes back when the app does."
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-[#2d2416] text-[#d29922] cursor-help">
+                          ✓ allowed this session
+                        </span>
+                      )}
                       {s.code_changed && (
                         <span
                           title="You allowed this skill, but its files are not the ones you allowed — reinstalling or editing a skill clears its permission on purpose."
@@ -261,11 +297,25 @@ export default function SkillsPage() {
                           {s.always_allowed ? '✓ Always' : 'Always allow'}
                         </button>
                       ) : (
-                        <span
-                          title="This skill guards something destructive, so it always asks first"
-                          className="text-[10px] px-2 py-1 rounded border border-[#21262d] text-[#484f58] cursor-help">
-                          always asks
-                        </span>
+                        // Not permanently grantable, but still answerable —
+                        // for a session. Previously this was a dead label
+                        // saying "always asks", which left the user with no
+                        // way to stop a safe command prompting every time.
+                        <button
+                          onClick={() => setSessionAllowed(s.name, !s.session_allowed)}
+                          title={s.session_allowed
+                            ? 'Allowed until Addled restarts — click to make it ask again'
+                            : 'Never ask again until Addled restarts. This one judges each request on what it carries, so it cannot be remembered permanently.'}
+                          aria-label={s.session_allowed
+                            ? `Make ${s.name} ask again`
+                            : `Allow ${s.name} for this session`}
+                          className={`text-[10px] px-2 py-1 rounded border transition-colors ${
+                            s.session_allowed
+                              ? 'border-[#d2992255] bg-[#2d2416] text-[#d29922]'
+                              : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58]'
+                          }`}>
+                          {s.session_allowed ? '✓ Session' : 'Allow session'}
+                        </button>
                       )
                     )}
                     <button onClick={() => toggle(s.name, !s.enabled)}

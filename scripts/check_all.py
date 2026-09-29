@@ -65,6 +65,10 @@ SUITES = [
     "check_rtk.py",
     "check_uv.py",
     "check_secrets.py",
+    "check_command_gate.py",
+    "check_bot_qr.py",
+    "check_bot_messaging.py",
+    "check_office.py",
 ]
 
 

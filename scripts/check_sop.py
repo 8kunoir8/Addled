@@ -280,6 +280,182 @@ def run():
               or "_learn_procedure" in open(
                   os.path.join(ROOT, "backend", "skills", "tool_loop.py"),
                   encoding="utf-8").read(), "")
+
+        # ---- 16. offering a procedure COUNTS as using it ------------------
+        #
+        # `record_use` was only reached on the learning path, so a seed that was
+        # correctly matched and injected twenty times still read "0/0
+        # successful" — and the block told the model that, which argues against
+        # following it. There was also no way to see whether lookup ever fired.
+        for sop in store.list_all():
+            store.delete(sop["id"])
+        made = store.upsert({"category": "files",
+                             "title": "Inspect before overwriting",
+                             "steps": ["List the target first.",
+                                       "Read it before rewriting it.",
+                                       "Write the change."],
+                             "tools": ["list_dir", "read_file", "write_file"],
+                             "source": "seed"})
+        check("the seed starts unused",
+              (store.get(made["sop"]["id"]) or {}).get("uses") == 0, "")
+
+        # Wording that shares vocabulary with the seed. The scorer is lexical
+        # first, so an unrelated sentence would correctly find nothing — and
+        # testing that here would prove nothing about counting.
+        block = match.build_sop_context(
+            "read the existing file before I overwrite it")
+        check("a matching task offers the procedure", bool(block), "none offered")
+        used = store.get(made["sop"]["id"]) or {}
+        check("offering incremented uses", used.get("uses") == 1, str(used.get("uses")))
+        check("offering incremented successes", used.get("successes") == 1,
+              str(used.get("successes")))
+        check("the block does not tell the model 0/0",
+              "0/0 successful" not in (block or ""), (block or "")[:160])
+        check("the block shows the incremented count",
+              "1/1 successful" in (block or ""), (block or "")[:160])
+
+        # A lookup that finds nothing must not move a counter.
+        before_uses = (store.get(made["sop"]["id"]) or {}).get("uses")
+        check("an unrelated question offers nothing",
+              match.build_sop_context("what is the capital of Peru") is None, "")
+        check("and counted nothing",
+              (store.get(made["sop"]["id"]) or {}).get("uses") == before_uses,
+              "an unmatched lookup moved a counter")
+
+        # ---- 17. a learned category must be one the LOOKUP can produce -----
+        #
+        # LEARNING files under `category_for(tools)`, whose values come from the
+        # skill registry. LOOKUP searches with `guess_category(message)`, which
+        # can only produce the CATEGORY_HINTS keys. `windows`, `integrations`,
+        # `meta` and `general` existed only on the write side, so a procedure
+        # filed under one was saved, counted, and unreachable forever.
+        seekable = {c for c, _ in match.CATEGORY_HINTS} | {match.DEFAULT_CATEGORY}
+        for tools, expected in ((["list_windows", "focus_window"], "desktop"),
+                                (["close_window"], "desktop"),
+                                (["calendar_add", "calendar_list"], "calendar"),
+                                (["email_send"], "calendar"),
+                                (["task_schedule"], "system"),
+                                (["read_file", "write_file"], "files")):
+            got = match.category_for(tools)
+            check(f"category_for({tools[0]}) is {expected}", got == expected,
+                  f"got {got!r}")
+            check(f"  and {got!r} is reachable by lookup", got in seekable,
+                  f"{got!r} has no CATEGORY_HINTS entry, so nothing learned "
+                  f"there could ever be found")
+
+        # The end-to-end version: learn from a window task, then find it by the
+        # same wording. Before the alias this could not succeed.
+        learned = learn.record_run(None, ["list_windows", "focus_window"],
+                                   "bring the browser window to the front")
+        check("a window task is learned or merged",
+              bool(learned.get("created") or learned.get("merged")), str(learned))
+        check("filed under a seekable category",
+              learned.get("category") in seekable, repr(learned.get("category")))
+        found = match.best("bring the browser window to the front")
+        check("its own task finds it again", bool(found),
+              "a learned procedure the lookup can never reach")
+
+        # ---- 18. the reason is kept, shown, and not overwritten ------------
+        # Emptied first so "the repeat merged" means the repeat of THIS task,
+        # not whatever an earlier section happened to leave behind.
+        for sop in store.list_all():
+            store.delete(sop["id"])
+        ctx = ("You are Addled.\n\n[Facts]\nThe user prefers the report as CSV.\n\n"
+               "[Wiki]\nQ3 figures live in the finance wiki.\n\n"
+               "A standing instruction identical on every task.\n")
+        got = learn.record_run(None, ["read_file", "write_file"],
+                               "update the quarterly report from the wiki",
+                               success=True, context=ctx)
+        sid = got.get("created") or got.get("merged")
+        rec = store.get(sid) or {}
+        reason = str(rec.get("reason") or "")
+        check("a reason was stored", bool(reason), "the reason is empty")
+        check("it quotes the turn's own context",
+              "CSV" in reason or "finance wiki" in reason, reason[:160])
+        check("standing instructions are not kept",
+              "standing instruction" not in reason,
+              "the reason is boilerplate, identical on every task")
+        check("it is one line and bounded",
+              "\n" not in reason and len(reason) <= store.MAX_REASON_CHARS,
+              f"{len(reason)} chars")
+        shown = match.build_sop_context("update the quarterly report from the wiki")
+        check("the injected block shows the reason",
+              bool(shown) and "Because:" in shown, (shown or "")[:200])
+
+        # Repeating the task widens the tools but must not rewrite the reason.
+        #
+        # The repeat is made with an EMPTY context, so the assertion is about
+        # the preserved reason rather than about which new reason won. Whether
+        # two similar runs merge is a scoring question with its own section (9)
+        # and its own thresholds; this section is only about `reason`.
+        first_reason = str((store.get(sid) or {}).get("reason") or "")
+        again = learn.record_run(None, ["read_file", "write_file", "list_dir"],
+                                 "update the quarterly report from the wiki",
+                                 success=True, context="[Facts]\nA later reason.\n")
+        same = store.get(sid) or {}
+        check("the repeat was recorded against the same procedure",
+              again.get("merged") == sid or again.get("created") == sid,
+              str(again))
+        if again.get("merged") == sid:
+            check("the tools were widened",
+                  "list_dir" in (same.get("tools") or []),
+                  str(same.get("tools")))
+            check("the original reason was kept, not replaced",
+                  str(same.get("reason") or "") == first_reason,
+                  f"{first_reason!r} became {same.get('reason')!r}")
+        else:
+            # A near-miss created a second procedure instead of merging, which
+            # is the documented behaviour of the merge bar. Recorded rather than
+            # silently skipped, so this cannot pass by doing nothing.
+            check("a new procedure carries its own reason",
+                  "A later reason" in str(same.get("reason") or ""),
+                  str(same.get("reason"))[:120])
+
+        # The merge path, exercised deterministically.
+        #
+        # `score()` prefers the embedding whenever one is available, and its
+        # merge bar (0.82) is deliberately higher than a near-miss scores — an
+        # identical sentence measured 0.77 on this machine, so it creates a
+        # second procedure rather than merging. That is the documented design,
+        # not a fault, but it means the merge cannot be relied on to happen from
+        # wording alone in a test. The preserved-reason rule is therefore driven
+        # through the merge directly.
+        import backend.sop.store as _store
+        target = store.get(sid) or {}
+        if target:
+            _store.upsert({"id": sid, "tools": ["read_file", "write_file"],
+                           "reason": "Original kept reason."})
+            merged = learn.record_run(None, ["read_file", "write_file"],
+                                      target.get("title") or "",
+                                      success=True, context="")
+            after_merge = store.get(sid) or {}
+            check("an exact title repeat merges",
+                  merged.get("merged") == sid, str(merged))
+            check("and does not overwrite the stored reason",
+                  "Original kept reason" in str(after_merge.get("reason") or ""),
+                  repr(after_merge.get("reason"))[:120])
+
+        # ---- 19. a store written before 'reason' existed still loads -------
+        import json as _json
+        legacy_path = store.path()
+        legacy_path.write_text(_json.dumps({
+            "version": 1,
+            "sops": [{"id": "old1", "category": "files", "title": "Legacy",
+                      "steps": ["Do the thing."], "tools": ["read_file"],
+                      "uses": 3, "successes": 2, "source": "seed"}]}),
+            encoding="utf-8")
+        try:
+            legacy = store.list_all()
+            entry = next((s for s in legacy if s.get("id") == "old1"), None)
+            check("an old store still loads", entry is not None,
+                  str(legacy)[:160])
+            if entry:
+                check("the missing reason becomes empty",
+                      entry.get("reason") == "", repr(entry.get("reason")))
+                check("its counts survive", entry.get("uses") == 3,
+                      str(entry.get("uses")))
+        except Exception as e:  # noqa: BLE001
+            check("an old store still loads", False, f"{type(e).__name__}: {e}")
     finally:
         config._data["sop"] = original_sop
         shutil.rmtree(tmp, ignore_errors=True)

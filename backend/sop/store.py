@@ -27,6 +27,9 @@ MAX_STEPS = 24
 MAX_STEP_CHARS = 400
 MAX_TITLE_CHARS = 120
 MAX_TOOLS = 24
+# The stored "why". Kept short because it is read back on every match and
+# injected into the prompt alongside the steps.
+MAX_REASON_CHARS = 300
 
 CATEGORY_RE = re.compile(r"[^a-z0-9_ -]+")
 
@@ -137,6 +140,11 @@ def _clean_sop(raw: dict, existing: dict | None = None) -> dict:
         "title": title[:MAX_TITLE_CHARS],
         "steps": steps,
         "tools": tools,
+        # Why this route was chosen, taken from the context the turn ran with.
+        # Empty for seeds and for anything learned before this field existed;
+        # `_clean_sop` keeps them loadable rather than rejecting the file.
+        "reason": str(raw.get("reason") if raw.get("reason") is not None
+                      else existing.get("reason") or "")[:MAX_REASON_CHARS].strip(),
         "uses": int(existing.get("uses") or 0),
         "successes": int(existing.get("successes") or 0),
         "created": existing.get("created") or _now(),
@@ -164,7 +172,13 @@ def _empty() -> dict:
 
 
 def load() -> dict:
-    """Read the file. A corrupt file is reported and treated as empty."""
+    """Read the file. A corrupt file is reported and treated as empty.
+
+    Records written before a field existed come back without it, so anything
+    reading a procedure goes through `.get(...)`. `reason` is filled in here
+    rather than only in `_clean_sop`, because `_clean_sop` runs on the way IN
+    (`upsert`) and a file written by an older build never passes through it.
+    """
     file = path()
     if not file.exists():
         return _empty()
@@ -176,7 +190,14 @@ def load() -> dict:
     if not isinstance(data, dict) or not isinstance(data.get("sops"), list):
         log.warning("%s is not in the expected shape — ignoring it", file)
         return _empty()
-    return {"version": VERSION, "sops": [s for s in data["sops"] if isinstance(s, dict)]}
+    sops = []
+    for raw in data["sops"]:
+        if not isinstance(raw, dict):
+            continue
+        if "reason" not in raw:
+            raw = {**raw, "reason": ""}
+        sops.append(raw)
+    return {"version": VERSION, "sops": sops}
 
 
 def save(data: dict) -> None:

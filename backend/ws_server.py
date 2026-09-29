@@ -1755,6 +1755,18 @@ def _register_default_handlers():
         # than in each bot bridge means voice, tasks and the character are
         # covered by the same line of code.
         _announce_turn(params, message, reply)
+        # Keep a record of what a bridge exchanged, so `chat_history` can answer
+        # "what did they say" and "did that actually send". Recorded here rather
+        # than in each bridge because this is the one point every surface passes
+        # through, and a bridge that forgot to record would be invisible.
+        try:
+            from backend.memory import bot_history
+            bot_history.record_turn(params.get("source"),
+                                    params.get("conversation")
+                                    or params.get("conversationId"),
+                                    message, reply)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not record the bot turn: %s", e)
         # Hand the caller any decision this turn left waiting. The reply used
         # to carry only a count, so a bot was told "approval needed" with no id
         # to answer with — it could not build a button even if it wanted to.
@@ -1877,11 +1889,22 @@ def _register_default_handlers():
         from backend.actions import approval_notice
         allowed = policy.list_allowed()
         return {"success": True, **allowed,
+                # Grants that expire at restart are listed too, so a card can
+                # show one as on. An invisible grant is one the user forgets
+                # they made, which is the failure that makes the prompt
+                # worthless.
+                "session": policy.session_grants(),
                 "pending": approval_notice.pending(),
                 "protected": sorted(policy.protected_names())}
 
     async def approvals_always_allow(params: dict, ws) -> dict:
         """Grant standing permission for one skill or tool.
+
+        Two scopes. `session: true` allows it until Addled restarts, and is the
+        only grant available for an action the gate classifies by its argument
+        (`run_command`), because a name-keyed permanent grant could not tell a
+        safe command from `format`. Without it the grant is permanent, which is
+        still refused for those names.
 
         Named two ways. The dashboard sends `kind` and `name` because its card
         is about a specific thing. A bot sends only `approvalId`, because the
@@ -1897,6 +1920,7 @@ def _register_default_handlers():
         kind = str(params.get("kind") or "").strip()
         name = str(params.get("name") or "").strip()
         approval_id = str(params.get("approvalId") or "").strip()
+        session_only = bool(params.get("session"))
 
         if not name and approval_id:
             entry = pending_origins.get(approval_id)
@@ -1909,7 +1933,10 @@ def _register_default_handlers():
                     "error": ("name is required, or an approvalId whose "
                               "request is still known")}
 
-        result = policy.always_allow(kind, name)
+        if session_only:
+            result = policy.allow_for_session(kind, name)
+        else:
+            result = policy.always_allow(kind, name)
         if not result.get("success"):
             result.setdefault("success", False)
             return result
@@ -1919,6 +1946,25 @@ def _register_default_handlers():
             await executor.approve(approval_id)
             approval_notice.remember(approval_id)
         return {**result, "allowed": True}
+
+    async def approvals_session(params: dict, ws) -> dict:
+        """What this session has allowed, so the UI can show and revoke it."""
+        from backend.approvals import policy
+        return {"success": True, **policy.session_grants()}
+
+    async def approvals_revoke_session(params: dict, ws) -> dict:
+        """Take one session grant back, so the prompt returns before restart."""
+        from backend.approvals import policy
+        kind = str(params.get("kind") or "").strip()
+        name = str(params.get("name") or "").strip()
+        if not name:
+            return {"success": False, "error": "name is required"}
+        return policy.revoke_session(kind, name)
+
+    async def approvals_clear_session(params: dict, ws) -> dict:
+        """Drop every session grant now, without waiting for a restart."""
+        from backend.approvals import policy
+        return policy.clear_session()
 
     async def approvals_revoke(params: dict, ws) -> dict:
         """Take standing permission back, so the prompt returns."""
@@ -4310,6 +4356,38 @@ def _register_default_handlers():
         platform = str(params.get("platform") or "").strip().lower()
         return await bots.stop(platform)
 
+    async def bots_send(params: dict, ws) -> dict:
+        """Ask a running bot to send a message to someone.
+
+        The destination is a phone number or chat id the caller supplies, so
+        this is the one bot RPC that acts on a third party rather than on the
+        bot itself. It is gated by the `send_message` skill, which requires
+        approval — the RPC is reachable directly, so a caller that skipped the
+        skill would skip the prompt with it.
+        """
+        from backend.bots import manager as bots
+        platform = str(params.get("platform") or "").strip().lower()
+        return await bots.send(platform, str(params.get("to") or ""),
+                               str(params.get("text") or ""))
+
+    async def bots_send_result(params: dict, ws) -> dict:
+        """A bot reporting the outcome of a `bots.send` it was given.
+
+        A notification, not a request: the bot cannot hold a request id, because
+        the backend sent it asynchronously and is not blocking on this socket.
+        """
+        from backend.bots import manager as bots
+        bots.resolve_send(str(params.get("requestId") or ""), params)
+        return {"success": True}
+
+    async def bots_notify_platforms(params: dict, ws) -> dict:
+        """Which bots a scheduled reminder should reach. Empty means any."""
+        from backend.bots import manager as bots
+        from backend.config import config
+        current = config.get("bots", "notify_platforms", default=[]) or []
+        return {"success": True, "platforms": list(current),
+                "known": list(bots.PLATFORMS)}
+
     async def project_search(params: dict, ws) -> dict:
         from backend.project.indexer import search_project
         results = search_project(str(params.get("query", "")),
@@ -4574,13 +4652,23 @@ def _register_default_handlers():
         try:
             from backend.approvals import policy
             granted = set(policy.list_allowed()["skills"])
-            grantable = {s["name"]: not policy.is_protected(s["name"])
+            session = set(policy.session_grants()["skills"])
+            # Two different questions, because the card offers two different
+            # controls. `grantable` decides whether a permanent switch is a
+            # meaningful answer; `session_grantable` decides whether a
+            # until-restart one is. For `run_command` the first is False and the
+            # second is True, which is the whole point: its danger is in the
+            # command it carries, so a permanent grant by name could not tell a
+            # safe command from `format`.
+            grantable = {s["name"]: policy.is_permanently_grantable(s["name"])
                          for s in out}
         except Exception as e:  # noqa: BLE001
             log.debug("could not read the approval policy: %s", e)
-            granted, grantable = set(), {}
+            granted, session, grantable = set(), set(), {}
         for s in out:
             s["grantable"] = grantable.get(s["name"], False)
+            s["session_grantable"] = s["requires_approval"]
+            s["session_allowed"] = s["name"] in session
             # A granted skill whose code no longer matches the grant asks
             # again. Saying so beats a switch that looks on and behaves off.
             s["code_changed"] = bool(
@@ -4744,6 +4832,9 @@ def _register_default_handlers():
     _server.register("approvals.list", approvals_list)
     _server.register("approvals.alwaysAllow", approvals_always_allow)
     _server.register("approvals.revoke", approvals_revoke)
+    _server.register("approvals.session", approvals_session)
+    _server.register("approvals.revokeSession", approvals_revoke_session)
+    _server.register("approvals.clearSession", approvals_clear_session)
     _server.register("voice.speak", voice_speak)
     _server.register("voice.voices", voice_voices)
     _server.register("character.setState", character_set_state)
@@ -4850,6 +4941,9 @@ def _register_default_handlers():
     _server.register("bots.setToken", bots_set_token)
     _server.register("bots.start", bots_start)
     _server.register("bots.stop", bots_stop)
+    _server.register("bots.send", bots_send)
+    _server.register("bots.sendResult", bots_send_result)
+    _server.register("bots.notifyPlatforms", bots_notify_platforms)
     _server.register("project.search", project_search)
     _server.register("project.patterns", project_patterns)
     _server.register("project.status", project_status)

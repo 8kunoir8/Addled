@@ -64,7 +64,29 @@ PLATFORMS: dict[str, dict] = {
 LOG_LINES = 40
 _procs: dict[str, asyncio.subprocess.Process] = {}
 _logs: dict[str, deque] = {p: deque(maxlen=LOG_LINES) for p in PLATFORMS}
+# The most recent pairing QR per platform, kept OUTSIDE the log ring.
+#
+# A QR is one very long line carrying the entire pairing payload. Putting it in
+# a 40-line ring meant the dashboard's own "last 12 lines" window threw it away,
+# so the code was emitted and never shown. It is state, not a log line — the
+# newest one is the only one worth keeping.
+_qr: dict[str, str] = {}
 _tasks: dict[str, asyncio.Task] = {}
+
+QR_PREFIX = "QR_DATA:"
+
+# Outbound sends waiting for their bot to answer.
+#
+# The bot owns the WhatsApp socket, so the backend cannot send directly — it
+# asks over the same WebSocket and waits for `bots.sendResult`. A request id
+# rather than a bare future key: two sends can be in flight at once, and a
+# result must be matched to the message it belongs to, not to whichever waiter
+# happens to be first.
+_send_waiters: dict[str, asyncio.Future] = {}
+_send_counter = 0
+# Long enough for a cold socket, short enough that a dead bot does not hold a
+# chat turn open. A send that times out says so rather than failing silently.
+SEND_TIMEOUT_S = 20.0
 
 
 def _root() -> Path | None:
@@ -175,6 +197,9 @@ def status() -> dict:
             "ready": not blockers,
             "blockers": blockers,
             "log": list(_logs[platform])[-LOG_LINES:],
+            # Empty unless the bot is waiting to be paired. The dashboard shows
+            # it as a scannable code, which is the only way to link a phone.
+            "qr": _qr.get(platform, ""),
         }
     return {"platforms": out, "node": node or "", "root": str(root) if root else ""}
 
@@ -186,8 +211,18 @@ async def _drain(platform: str, stream) -> None:
             if not line:
                 break
             text = line.decode("utf-8", errors="replace").rstrip()
-            if text:
-                _logs[platform].append(text)
+            if not text:
+                continue
+            # A pairing QR is pulled out of the stream rather than left in it.
+            # It is ~1500 characters on one line, which would push every other
+            # log line out of a 40-line buffer, and the dashboard needs it as a
+            # value to render — not as text to scroll past.
+            if text.startswith(QR_PREFIX):
+                payload = text[len(QR_PREFIX):].strip()
+                if payload:
+                    _qr[platform] = payload
+                continue
+            _logs[platform].append(text)
     except Exception:
         pass
 
@@ -223,6 +258,9 @@ async def start(platform: str) -> dict:
         return {"success": False, "error": f"Could not start it: {e}"}
 
     _procs[platform] = proc
+    # Drop any QR from a previous run before the new process has said anything.
+    # A stale code left on screen looks scannable and silently fails to pair.
+    _qr.pop(platform, None)
     _logs[platform].append(f"[addled] started {script.name} (pid {proc.pid})")
     _tasks[platform] = asyncio.create_task(_drain(platform, proc.stdout))
     # Give it a moment so an immediate crash is reported rather than claimed as
@@ -240,6 +278,7 @@ async def stop(platform: str) -> dict:
     proc = _procs.get(platform)
     if not proc or proc.returncode is not None:
         _procs.pop(platform, None)
+        _qr.pop(platform, None)
         return {"success": True, "already": True}
     try:
         proc.terminate()
@@ -255,5 +294,102 @@ async def stop(platform: str) -> dict:
     task = _tasks.pop(platform, None)
     if task:
         task.cancel()
+    # A stopped bot cannot be paired, so its code must not stay on screen.
+    _qr.pop(platform, None)
     _logs[platform].append("[addled] stopped")
     return {"success": True}
+
+def resolve_send(request_id: str, result: dict) -> bool:
+    """Hand a bot's answer to whoever is waiting for it.
+
+    Called from the WebSocket handler when `bots.sendResult` arrives. Never
+    raises: an unknown or already-settled id is a late answer to a request that
+    timed out, which is not an error worth surfacing.
+    """
+    waiter = _send_waiters.pop(str(request_id or ""), None)
+    if waiter is None or waiter.done():
+        return False
+    try:
+        waiter.set_result(result or {})
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not settle send %s: %s", request_id, e)
+        return False
+
+async def send(platform: str, to: str, text: str) -> dict:
+    """Ask a running bot to send a message, and wait for its answer.
+
+    The bot owns the platform's connection, so this cannot be done from here —
+    it is a request over the WebSocket the bot already holds. Every failure mode
+    is named, because "nothing happened" is the hardest kind of bug to chase
+    from the chat page:
+
+      * unknown platform, or one that cannot send (it is not running)
+      * an empty destination or body
+      * the bot never answering, which means it is wedged or was closed
+    """
+    if platform not in PLATFORMS:
+        return {"success": False,
+                "error": f"Unknown bot '{platform}'. Known: "
+                         + ", ".join(PLATFORMS)}
+    body = str(text or "").strip()
+    if not body:
+        return {"success": False, "error": "The message text is empty."}
+    destination = str(to or "").strip()
+    if not destination:
+        return {"success": False,
+                "error": ("Give a destination — a phone number in international "
+                          "form, e.g. 6281234567890.")}
+
+    proc = _procs.get(platform)
+    if not proc or proc.returncode is not None:
+        return {"success": False,
+                "error": f"The {platform} bot is not running. Start it first."}
+
+    try:
+        from backend.ws_server import get_server
+        server = get_server()
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "error": f"no way to reach the bot: {e}"}
+    if server is None:
+        return {"success": False, "error": "the server is not running"}
+
+    global _send_counter
+    _send_counter += 1
+    request_id = f"send_{_send_counter}"
+    loop = asyncio.get_running_loop()
+    waiter: asyncio.Future = loop.create_future()
+    _send_waiters[request_id] = waiter
+    try:
+        server.broadcast_nowait("bots.send", {
+            "requestId": request_id,
+            "platform": platform,
+            "to": destination,
+            "text": body,
+        })
+        result = await asyncio.wait_for(waiter, timeout=SEND_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        _send_waiters.pop(request_id, None)
+        return {"success": False,
+                "error": (f"The {platform} bot did not answer within "
+                          f"{int(SEND_TIMEOUT_S)}s. Check its log on the Bots "
+                          f"page — it may need re-pairing.")}
+    except Exception as e:  # noqa: BLE001
+        _send_waiters.pop(request_id, None)
+        return {"success": False, "error": str(e)}
+
+    out = dict(result or {})
+    out.setdefault("success", False)
+    if not out.get("success") and not out.get("error"):
+        out["error"] = "the bot refused the message without saying why"
+    # Recorded either way. A send that failed is exactly the thing someone will
+    # come back to ask about, and an unrecorded failure looks identical to a
+    # message that was never attempted.
+    try:
+        from backend.memory import bot_history
+        bot_history.record_outbound(platform, destination, body,
+                                    bool(out.get("success")),
+                                    str(out.get("error") or ""))
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not record the outbound message: %s", e)
+    return out

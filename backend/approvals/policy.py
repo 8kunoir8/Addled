@@ -2,8 +2,10 @@
 
 A skill or tool that needs approval asks every time. That is right for a
 destructive action and wrong for the fourth time in a row in the same session,
-so the approval card offers **Always allow** and the skill and tool cards each
-carry a switch for the same answer. Both write here.
+so there are two answers to remember: **Always allow** (permanent) and **Allow
+for session** (until Addled restarts). The approval card offers both, and the
+skill and tool cards carry the same controls, so the two surfaces cannot
+disagree.
 
 Three rules shape this module:
 
@@ -12,11 +14,22 @@ Three rules shape this module:
    revoked. `SkillDefinition.requires_approval` still says the skill *can* ask;
    this says the user has already answered.
 
-2. **Destructive actions are refused here, not merely hidden in the UI.** The
-   destruction gate owns `delete_file` and the dangerous shell commands, and
-   those ask every time. `always_allow()` returns False for them rather than
-   writing the name, so a dashboard bug, a crafted RPC or a future caller
-   cannot turn one click into permanent permission to format a disk.
+2. **A grant's reach has to match what makes the thing dangerous.** Some
+   actions are dangerous *inherently* — `delete_file` is a file deletion
+   whatever you pass it — so a grant by name is a real answer to a real
+   question, and the skill card may offer it permanently. Others are dangerous
+   by their **arguments**: `run_command` is only as dangerous as the command it
+   carries, and the destruction gate decides that per call from
+   `terminal.DANGEROUS_COMMANDS` (`format`, `diskpart`, `reg delete`, `rm -rf`,
+   `shutdown`). A name-keyed permanent grant for `run_command` would therefore
+   allow every command it will *ever* carry, including those — a stored answer
+   that no later check can narrow, because the name is all that is kept.
+
+   So a content-classified action may be granted for **this session only**
+   (`allow_for_session`), held in memory and gone at restart. Permanent grants
+   (`always_allow`) still refuse it. The guard lives here rather than in the UI
+   so a dashboard bug, a crafted RPC or a future caller cannot turn one click
+   into permanent permission to format a disk.
 
 3. **Failures never grant permission.** If the config cannot be read or written,
    the answer is "not allowed" and the prompt appears as it did before. The
@@ -27,6 +40,7 @@ Three rules shape this module:
 from __future__ import annotations
 
 import logging
+import threading
 
 log = logging.getLogger("addled.approvals.policy")
 
@@ -39,6 +53,19 @@ KINDS = (SKILL, TOOL)
 
 _SECTION = ("safety", "always_allow")
 _MAX_NAMES = 500
+
+# Actions whose danger comes from what they are handed, not from what they are.
+# A permanent grant cannot express "these commands but not those", so these are
+# session-only. See rule 2 in the module docstring.
+CONTENT_CLASSIFIED = {"run_command"}
+
+# Session grants, held for the life of the process and never written anywhere.
+# Keyed by kind so a skill and a tool can share a name without sharing a grant.
+# `_MAX_SESSION` bounds it for the same reason the persistent list is bounded:
+# an unbounded set fed by a loop is a leak, even if nothing touches disk.
+_SESSION: dict[str, set[str]] = {kind: set() for kind in KINDS}
+_SESSION_LOCK = threading.Lock()
+_MAX_SESSION = 500
 
 def _bucket_key(kind: str) -> str:
     """`skill` -> `skills`, `tool` -> `tools` (the config dict's own keys)."""
@@ -61,20 +88,137 @@ def protected_names() -> set[str]:
         # is not a list of skill names. It is included because the same names
         # must not become grantable if a skill is ever named after one.
         from backend.actions.terminal import DANGEROUS_COMMANDS
-        names |= {str(c).strip().rstrip("/\\") for c in DANGEROUS_COMMANDS}
+        from backend.safety.destruction_gate import command_stem
+        names |= {command_stem(c) for c in DANGEROUS_COMMANDS}
     except Exception as e:  # noqa: BLE001
         log.debug("could not read the dangerous-command set: %s", e)
     return {n for n in names if n}
 
 def is_protected(name: str) -> bool:
-    """True when this name must keep asking, whatever the user clicks."""
+    """True when this name must keep asking for a *permanent* grant.
+
+    Only the content-classified names, and the dangerous command names that
+    must never be grantable if a skill is ever named after one. The rest of the
+    gate's set — `delete_file`, `close_window`, `close_app` — is intentionally
+    *not* protected: their danger is inherent, so a name-keyed grant is a real
+    answer, and the user has asked for exactly that. They remain gated per call;
+    what changes is that the answer can be remembered.
+    """
     clean = str(name or "").strip().lower()
     if not clean:
         return True
-    for guarded in protected_names():
-        if clean == guarded or clean.startswith(guarded):
-            return True
-    return False
+    if clean in CONTENT_CLASSIFIED:
+        return True
+    # Exact match only, deliberately. The command list holds prefixes meant to
+    # be compared against a *command string* ("del /q x" starts with "del"),
+    # and applying that test to a skill name produced a coincidence rather than
+    # a guard: `delete_file` starts with `del`. That made the delete skill
+    # permanently un-grantable for a reason nothing in the design intended.
+    return clean in _command_names()
+
+def _command_names() -> set[str]:
+    """The dangerous shell commands, as bare names.
+
+    Separate from `protected_names()` because the two sets now answer different
+    questions: that one is "what does the gate own" (for display), this one is
+    "what must never be remembered" (for the guard).
+
+    The entries are normalised through `destruction_gate.command_stem` rather
+    than by calling `rstrip` here. The local `rstrip("/\\\\")` this replaced was
+    the same defect as the gate's: `rstrip` takes a character set, so `"del "`,
+    `"del\\t"` and `"del/"` all collapsed to `"del"`, and `"rd "` to `"rd"`.
+    Sharing the one implementation means the gate and the policy cannot drift
+    into disagreeing about what a dangerous command is.
+    """
+    names: set[str] = set()
+    try:
+        from backend.actions.terminal import DANGEROUS_COMMANDS
+        from backend.safety.destruction_gate import command_stem
+        names |= {command_stem(c) for c in DANGEROUS_COMMANDS}
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read the dangerous-command set: %s", e)
+    return {n for n in names if n}
+
+def is_permanently_grantable(name: str) -> bool:
+    """Whether a permanent grant is a meaningful answer for this action.
+
+    False for anything the gate classifies by argument, and for the dangerous
+    command names themselves. The skill card asks this to decide whether to
+    offer a permanent switch or a session one.
+    """
+    return not is_protected(name)
+
+# -- session grants ----------------------------------------------------------
+
+def allow_for_session(kind: str, name: str) -> dict:
+    """Allow a skill or tool until Addled restarts.
+
+    Deliberately accepts names `always_allow` refuses. For a content-classified
+    action this is the *only* grant available, and the alternative is not
+    "safer" — it is the same prompt every time the user runs the same safe
+    command, which teaches them to approve without reading.
+
+    Never written to config. Nothing here survives the process, so the reach of
+    the answer is exactly as long as the sitting in which it was given.
+    """
+    k = _valid_kind(kind)
+    clean = str(name or "").strip()
+    if k is None:
+        return {"success": False, "error": f"unknown kind: {kind!r}"}
+    if not clean:
+        return {"success": False, "error": "a name is required"}
+    with _SESSION_LOCK:
+        bucket = _SESSION[k]
+        if clean not in bucket:
+            if len(bucket) >= _MAX_SESSION:
+                return {"success": False,
+                        "error": f"too many session grants ({_MAX_SESSION})"}
+            bucket.add(clean)
+    return {"success": True, "kind": k, "name": clean,
+            "session": True, "allowed": True}
+
+def is_allowed_for_session(kind: str, name: str) -> bool:
+    """Whether this session has already answered for this name. Never raises."""
+    k = _valid_kind(kind)
+    clean = str(name or "").strip()
+    if k is None or not clean:
+        return False
+    try:
+        with _SESSION_LOCK:
+            return clean in _SESSION[k]
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read session grants: %s", e)
+        return False
+
+def revoke_session(kind: str, name: str) -> dict:
+    """Take a session grant back before it expires."""
+    k = _valid_kind(kind)
+    clean = str(name or "").strip()
+    if k is None or not clean:
+        return {"success": False, "error": "kind and name are required"}
+    with _SESSION_LOCK:
+        _SESSION[k].discard(clean)
+    return {"success": True, "kind": k, "name": clean, "allowed": False}
+
+def session_grants() -> dict:
+    """What this session has allowed, so the UI can show it.
+
+    A grant the user cannot see is a grant they will forget they made, which is
+    the failure mode that makes an approval prompt worthless.
+    """
+    try:
+        with _SESSION_LOCK:
+            return {_bucket_key(k): sorted(_SESSION[k]) for k in KINDS}
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not list session grants: %s", e)
+        return {"skills": [], "tools": []}
+
+def clear_session() -> dict:
+    """Drop every session grant. Used by the suite and by a Settings control."""
+    with _SESSION_LOCK:
+        for k in KINDS:
+            _SESSION[k].clear()
+    return {"success": True, "skills": [], "tools": []}
 
 def fingerprint(name: str) -> str:
     """A short digest of what an installed skill actually *is*.

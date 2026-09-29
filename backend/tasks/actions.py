@@ -44,6 +44,23 @@ def _in_quiet_hours() -> bool:
 def in_quiet_hours() -> bool:
     return _in_quiet_hours()
 
+def _notify_platforms() -> list[str]:
+    """Which bot platforms a reminder should reach. Empty means any.
+
+    Read every time rather than cached: the setting is changed from the
+    dashboard while the daemon is running, and a cached list would keep sending
+    reminders to a bot the user had just turned off.
+    """
+    try:
+        from backend.config import config
+        values = config.get("bots", "notify_platforms", default=[]) or []
+        if isinstance(values, str):
+            values = [v.strip() for v in values.split(",")]
+        return [str(v).strip().lower() for v in values if str(v).strip()]
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read notify_platforms: %s", e)
+        return []
+
 
 async def _run_notify(task) -> dict:
     """Reminder: WS broadcast + chat push + character bubble + spoken TTS."""
@@ -59,8 +76,27 @@ async def _run_notify(task) -> dict:
                 "text": text,
                 "time": task.time,
             })
-            # Remote companion: bot bridges can consume this broadcast
-            server.broadcast_nowait("bot.notify", {"text": message})
+            # Remote companion: the bot bridges deliver this to a phone.
+            #
+            # `platforms` scopes it. The broadcast reaches every connected
+            # client, and each bot subscribes on its own behalf — so without a
+            # destination list a reminder would be sent once per running bot and
+            # the user would get the same message two or three times. Empty
+            # means "whatever is running", which is the behaviour a single-bot
+            # setup wants and the only sane default.
+            server.broadcast_nowait("bot.notify", {
+                "text": message,
+                "platforms": _notify_platforms(),
+            })
+            # Recorded so "did my reminder go out" is answerable. The actual
+            # delivery is reported by each bridge and lands here only if it
+            # resolves a destination — see `record_notify_delivery`.
+            try:
+                from backend.memory import bot_history
+                bot_history.record_outbound(
+                    "reminder", f"task:{task.id}", message, True)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not record the reminder: %s", e)
             server.broadcast_nowait("chat.push", {
                 "role": "assistant",
                 "content": message,

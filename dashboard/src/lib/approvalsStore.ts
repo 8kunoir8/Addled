@@ -107,13 +107,21 @@ export function subscribeApprovals(listener: (reqs: ApprovalRequest[]) => void) 
 }
 
 /**
- * The three answers, in one place.
+ * The four answers, in one place.
  *
  * Both surfaces that show a card — the message stream and the floating prompt
  * on other pages — call this, so "Allow once" cannot mean one thing in chat and
  * another in Settings. The card is dropped only when the backend confirms;
  * otherwise the reason is recorded and shown on the card, because a request
  * that disappears without running reads as though it had been granted.
+ *
+ * `always` and `session` differ in reach, not in convenience. `always` writes a
+ * permission that survives a restart and is keyed by name, so the backend
+ * refuses it for an action whose danger is in its arguments — `run_command`
+ * judges the command text, and a name-keyed grant could not tell a safe one
+ * from `rm -rf`. `session` allows it until Addled restarts and writes nothing,
+ * which is the only grant that action can have. The backend decides which is
+ * offered; this only sends the answer.
  *
  * `send` is passed in rather than imported so this module stays free of the
  * socket and can be exercised on its own.
@@ -140,6 +148,13 @@ export function makeAnswers(
       req.approval_id,
       send('action.approve', { approvalId: req.approval_id }),
       'That request is no longer waiting — ask again.'),
+    session: () => settle(
+      req.approval_id,
+      send('approvals.alwaysAllow', {
+        kind: req.kind, name: req.name, approvalId: req.approval_id,
+        session: true,
+      }),
+      'That permission could not be granted.'),
     always: () => settle(
       req.approval_id,
       send('approvals.alwaysAllow', {

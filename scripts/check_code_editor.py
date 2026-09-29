@@ -30,6 +30,27 @@ ROOT = os.environ.get("ADDLED_ROOT") or os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+# Redirect settings to a throwaway file BEFORE anything reads the config.
+#
+# This suite sets `workspace.root` to a temp folder to exercise containment. It
+# used to do that on the LIVE settings.json and restore the old value in a
+# `finally` — which works until a run is interrupted, and then the user's real
+# workspace is left pointing at a directory a test created. That happened: the
+# installed app was found bound to a leftover fixture in %TEMP% full of test
+# files, with ~200 more temp workspaces beside it. A test that can damage the
+# settings it is testing is a worse bug than the one it checks for.
+_SETTINGS_TMP = Path(tempfile.mkdtemp(prefix="cfg_")) / "settings.json"
+try:
+    from backend.config import config as _boot_cfg
+    from backend.config import use_settings_file as _use_settings
+    _use_settings(_SETTINGS_TMP)
+    _boot_cfg._data = {}          # drop anything cached from the real file
+    _boot_cfg.load()
+except Exception as _e:  # noqa: BLE001
+    print(f"could not redirect settings ({_e}); refusing to run, because this "
+          f"suite writes workspace.root and must not touch the live file")
+    sys.exit(2)
+
 fails = []
 
 

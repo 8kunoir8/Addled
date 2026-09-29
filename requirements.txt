@@ -15,8 +15,17 @@ pyautogui>=0.9.54
 pyperclip>=1.8.2
 pywin32>=306; platform_system == "Windows"
 
-# ── Spreadsheets ───────────────────────────────────────────────
+# ── Office documents ──────────────────────────────────────────
+# Spreadsheets, Word, PowerPoint and PDF. These are NOT optional: without them
+# the corresponding skill reports itself as missing, and `write_file` cannot
+# stand in — a .docx is a ZIP of XML and a .pdf is a binary container, so
+# writing text to one produces a file the application refuses to open.
 openpyxl>=3.1.5
+python-docx>=1.1.0
+python-pptx>=1.0.0
+pypdf>=4.0.0
+pymupdf>=1.24.0
+fpdf2>=2.7.0
 
 # ── AI providers ──────────────────────────────────────────────
 ollama>=0.3.0

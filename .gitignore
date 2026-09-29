@@ -4,6 +4,7 @@ python-bundle/
 build_cache/
 .env
 *.log
+.vscode/
 # Vendored binaries at the repository root (rtk, ripgrep). Anchored: an
 # unanchored `tools/` also matched `backend/tools/`, so a new backend package
 # would have been silently ignored and never committed.

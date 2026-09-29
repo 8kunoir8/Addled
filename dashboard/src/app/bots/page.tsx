@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import { useWS } from '@/lib/useWS';
 
 // Everything here comes from bots.status, which checks rather than assumes:
@@ -23,6 +24,8 @@ interface Bot {
   ready: boolean;
   blockers: string[];
   log: string[];
+  /** Pairing payload while the bot waits to be linked. Empty otherwise. */
+  qr: string;
 }
 
 export default function BotsPage() {
@@ -51,11 +54,18 @@ export default function BotsPage() {
 
   // Poll only while something is actually running, so the log stays live
   // without hammering the backend on an idle page.
+  //
+  // Faster while a pairing code is on screen. A WhatsApp QR is only valid for
+  // about 20 seconds and then rotates, so a 5-second poll can leave the user
+  // looking at a code that has already expired — they scan it, nothing happens,
+  // and it reads as a broken bot. Two seconds means the rendered code is never
+  // more than a moment behind the current one.
+  const waitingForScan = bots.some(b => b.qr);
   useEffect(() => {
     if (!bots.some(b => b.running)) return;
-    const t = setInterval(load, 5000);
+    const t = setInterval(load, waitingForScan ? 2000 : 5000);
     return () => clearInterval(t);
-  }, [bots, load]);
+  }, [bots, load, waitingForScan]);
 
   const saveToken = async (bot: Bot) => {
     setBusy(bot.id); setError(''); setNote('');
@@ -177,8 +187,28 @@ export default function BotsPage() {
               </div>
             )}
 
+            {/* The pairing code, when the bot is waiting to be linked.
+                Rendered from the payload the bot emits on `connection.update`
+                — Baileys removed `printQRInTerminal` in 6.x, so nothing draws
+                this in a terminal any more and the dashboard is the only place
+                a user can scan it from. */}
+            {bot.qr && (
+              <div className="mt-3 p-3 bg-white rounded border border-[#21262d] flex flex-col items-center">
+                <QRCodeSVG value={bot.qr} size={220} level="L" marginSize={2} />
+                <p className="mt-2 text-[11px] text-[#484f58] text-center">
+                  WhatsApp → Settings → Linked Devices → Link a Device
+                </p>
+              </div>
+            )}
+            {bot.qr && (
+              <p className="mt-1 text-[11px] text-[#d29922]">
+                Waiting to be scanned. The code refreshes on its own — if it
+                expires, scan the newest one.
+              </p>
+            )}
+
             {bot.log.length > 0 && (
-              <pre className="mt-3 p-2 bg-[#0d1117] rounded border border-[#21262d] text-[10px] leading-relaxed text-[#8b949e] max-h-40 overflow-y-auto whitespace-pre-wrap">
+              <pre className="mt-3 p-2 bg-[#0d1117] rounded border border-[#21262d] text-[10px] leading-relaxed text-[#8b949e] max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
                 {bot.log.slice(-12).join('\n')}
               </pre>
             )}

@@ -18,7 +18,21 @@ mss>=9.0.0
 pyautogui>=0.9.54
 pyperclip>=1.8.2
 pywin32>=306; platform_system == "Windows"
+# Office documents. Not optional: the Office skills report themselves missing
+# without these, and plain text writing cannot produce a valid .docx/.xlsx/
+# .pptx/.pdf — those are ZIP archives of XML and a binary container.
 openpyxl>=3.1.5
+python-docx>=1.1.0
+python-pptx>=1.0.0
+pypdf>=4.0.0
+# PyMuPDF: true REDACTION (removing text from the content stream, which pypdf
+# cannot do) and Office -> PDF layout conversion. Its own xlsx path drops text
+# cells, so spreadsheets are rendered here instead.
+pymupdf>=1.24.0
+# PDF creation. fpdf2 is pure Python with no compiled extensions, unlike
+# reportlab which pulls in a C accelerator — this ships inside the bundled
+# interpreter, so a wheel that needs building is a risk.
+fpdf2>=2.7.0
 sounddevice>=0.5.0
 faster-whisper>=1.0.0
 kokoro-onnx>=0.4

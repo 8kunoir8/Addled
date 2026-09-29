@@ -186,13 +186,19 @@ def run():
               "a tool grant needed a fingerprint")
 
         # ---- the guard still holds over all of it ------------------------
-        check("a destructive name is still refused",
-              policy.always_allow(policy.SKILL, "delete_file")
-              .get("success") is False, "delete_file was granted")
+        # The name that must stay out of reach is the content-classified one,
+        # because a stored name cannot express "these commands but not those".
+        check("a content-classified name is still refused",
+              policy.always_allow(policy.SKILL, "run_command")
+              .get("success") is False, "run_command was granted permanently")
+        check("and it cannot be smuggled in by starting with a command name",
+              policy.always_allow(policy.SKILL, "format")
+              .get("success") is False, "a dangerous command name was granted")
     finally:
         market.MARKET_DIR = real_dir
         shutil.rmtree(tmp, ignore_errors=True)
         policy.clear()
+        policy.clear_session()
         if config is not None:
             if saved is not None:
                 config.set("safety", "always_allow", value=saved)

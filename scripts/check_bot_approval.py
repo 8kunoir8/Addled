@@ -9,8 +9,12 @@ and the two directions that must stay impossible:
 * a chat must not be able to answer a request raised by a *different* chat, or
   by a different platform, or by a scheduled task — a "yes" typed in a group is
   not consent for a command someone else asked for; and
-* a destructive name must not become permanently allowed by a bot clicking
-  "Always allow", because the policy refuses those whoever asks.
+* an action whose danger is in its *arguments* must not become permanently
+  allowed by a bot clicking "Always allow". `run_command` is judged on the
+  command it carries, so a name-keyed grant would allow every command the skill
+  will ever run; the policy refuses it whoever asks, and offers only the
+  until-restart grant. An action that is dangerous whatever you pass it —
+  `delete_file` — may be remembered, because the answer is about the action.
 
 Run from the project root:
     .\\python-bundle\\python.exe -s .\\scripts\\check_bot_approval.py
@@ -114,14 +118,26 @@ def run():
         check("and the queue is clear", aid2 not in executor._pending_approvals,
               "it is still queued")
 
-        # ---- a bot cannot make a destructive name permanent --------------
+        # ---- a bot cannot make a content-classified name permanent --------
         # The button is only offered when the policy would accept the name; the
-        # policy is what actually refuses, and it does so whoever calls.
-        for guarded in ("delete_file", "run_command"):
+        # policy is what actually refuses, and it does so whoever calls. That
+        # matters most for a bot, where the answer arrived as a button press and
+        # the name came back through a payload — so the refusal cannot depend on
+        # the surface having asked a sensible question.
+        for guarded in ("run_command", "rm -rf", "format"):
             r = policy.always_allow(policy.SKILL, guarded)
             check(f"a bot cannot grant '{guarded}' permanently",
                   r.get("success") is False and r.get("protected") is True,
                   str(r))
+
+        # The session grant IS available to a bot, and must not persist.
+        r = policy.allow_for_session(policy.SKILL, "run_command")
+        check("a bot can grant a content-classified name for the session",
+              r.get("success") is True, str(r))
+        check("and it does not become permanent",
+              policy.is_always_allowed(policy.SKILL, "run_command") is False,
+              "a session grant was stored as permanent")
+        policy.clear_session()
 
         r = policy.always_allow(policy.SKILL, "send_email")
         check("an ordinary skill can still be granted", r.get("success") is True,
@@ -265,15 +281,26 @@ def run():
             check(f"the reply {word!r} is read as {expected!r}",
                   verdict == expected, f"got {verdict!r}")
 
-        # ---- destructive requests do not offer "Always allow" -------------
+        # ---- a content-classified action does not offer "Always allow" ------
+        # `run_command` judges the command it carries, so a name-keyed permanent
+        # grant could not tell a safe command from `rm -rf`. The bot must not
+        # offer the button for it. An inherent-danger action (`delete_file`)
+        # IS grantable now, so that is asserted too rather than left implied.
         from backend.actions import approval_notice
-        check("a destructive action is not announced as grantable",
-              approval_notice._grantable("delete_file") is False,
+        check("a content-classified action is not announced as grantable",
+              approval_notice._grantable("run_command") is False,
               "the button would be offered")
+        check("but it is announced as session-grantable",
+              approval_notice._session_grantable("run_command") is True,
+              "the card would have no usable answer for it")
+        check("an inherent-danger action is announced as grantable",
+              approval_notice._grantable("delete_file") is True,
+              "the switch would be hidden even though it works")
     finally:
         pending.clear()
         executor._pending_approvals.clear()
         policy.clear()
+        policy.clear_session()
         if config is not None and saved_policy is not None:
             config.set("safety", "always_allow", value=saved_policy)
 

@@ -22,11 +22,11 @@ log = logging.getLogger("addled.executor")
 # still be answered from the dashboard — `approve()` runs it directly when no
 # waiter is active.
 #
-# Raised from 60s because a local model routinely takes longer than that to
-# produce the turn that follows a tool call, so the approval card could be
-# raised and expire before it was ever rendered. The user is not slow; the
-# turn they are answering is.
-APPROVAL_WAIT_S = 180.0
+# There is no longer an approval wait window. A gated action used to block the
+# turn for APPROVAL_WAIT_S, which a local model routinely exceeded before the
+# user could answer — so the turn lost the race and reported a timeout instead
+# of showing the prompt. The turn now ends and the request waits for the user
+# however long that takes; see `execute_for_chat`.
 
 
 @dataclass
@@ -59,11 +59,12 @@ class ActionExecutor:
         self._system = None
         self._terminal = None
         self._cancel_flag = False
-        self._approved_run = False
         self._handlers: dict[str, callable] = {}
         self._pending_approvals: dict[str, ActionRequest] = {}
         self._approval_counter = 0
-        # approval_id -> Future, for a chat turn waiting on the answer.
+        # Always empty now. Kept, and popped from in `_resolve_waiter`, so an
+        # out-of-tree caller from a build that had a waiting turn finds the
+        # attribute it expects rather than an AttributeError.
         self._approval_waiters: dict[str, asyncio.Future] = {}
 
     def _lazy_init(self):
@@ -100,26 +101,69 @@ class ActionExecutor:
         ]
 
     async def approve(self, approval_id: str) -> ActionResult:
-        """Approve and execute a pending destructive action."""
+        """Approve and run a pending destructive action.
+
+        Nothing is waiting on this decision any more — the turn that asked ended
+        when it asked — so the action runs here. Its outcome is pushed into the
+        conversation afterwards, because approving used to be silent: the
+        command ran, and the chat showed nothing at all, which reads as though
+        the approval did nothing.
+        """
         request = self._pending_approvals.pop(approval_id, None)
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
         self._forget_origin(approval_id)
-        # A chat turn may be blocked on this decision. Wake it so the command
-        # runs on that turn rather than being executed a second time here.
-        waiter = self._resolve_waiter(approval_id, "approved")
-        if waiter:
-            return ActionResult(True, request.action_type,
-                                summary="Approved — running now",
-                                data={"approval_id": approval_id})
+        # Clearing the gate for this one call is the WHOLE of what approval
+        # does. There used to be a `_approved_run` flag passed into the
+        # terminal's `allow_dangerous` parameter, which the terminal accepted
+        # and never read — so it looked like a second guard was being lifted
+        # when nothing was there to lift.
         gate = self._gate
-        self._gate = None  # already approved — bypass the gate for this run
-        self._approved_run = True  # let run_command execute the approved command
+        self._gate = None
         try:
-            return await self.execute(request)
+            result = await self.execute(request)
         finally:
             self._gate = gate
-            self._approved_run = False
+        self._report_to_chat(approval_id, request, result)
+        return result
+
+    @staticmethod
+    def _report_to_chat(approval_id: str, request: ActionRequest,
+                        result: ActionResult) -> None:
+        """Tell the conversation what an approved action did.
+
+        Never raises: the command has already run by the time this is called,
+        and a reporting failure must not turn a completed action into an error
+        the user sees. The push carries the action's own summary, so the chat
+        shows what happened rather than only that something was approved.
+        """
+        try:
+            from backend.ws_server import get_server
+            server = get_server()
+            if server is None:
+                return
+            from backend import chat_sources
+            what = request.action_type
+            command = str((request.params or {}).get("command") or "").strip()
+            if command:
+                what = f"`{command}`"
+            if result.success:
+                detail = str(result.summary or "").strip()
+                body = f"✅ Approved and ran {what}."
+                if detail:
+                    body += f"\n\n{detail}"
+            else:
+                body = (f"⚠️ Approved {what}, but it failed: "
+                        f"{result.error or 'no reason given'}")
+            server.broadcast_nowait("chat.push", {
+                "role": "assistant",
+                "content": body,
+                "insight": True,
+                **chat_sources.describe("approval"),
+            })
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not report approval %s to chat: %s",
+                      approval_id, e)
 
     def deny(self, approval_id: str) -> ActionResult:
         """Deny a pending destructive action."""
@@ -127,39 +171,36 @@ class ActionExecutor:
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
         self._forget_origin(approval_id)
-        self._resolve_waiter(approval_id, None)
         return ActionResult(True, request.action_type, summary="Action denied by user",
                             data={"approval_id": approval_id})
 
     def _resolve_waiter(self, approval_id: str, verdict) -> bool:
-        """Wake a waiting chat turn. Returns True when one was waiting.
+        """Retired: no chat turn waits on an approval any more.
 
-        Must never raise: it is called from approve/deny, and a scheduling
-        detail there must not turn a working approval into an error.
+        Kept as a no-op so an out-of-tree caller from an older build does not
+        raise `AttributeError` on a path that used to work. It never returns
+        True, because there is nothing left to wake.
         """
-        waiter = self._approval_waiters.pop(approval_id, None)
-        if waiter is None:
-            return False
-        try:
-            loop = getattr(waiter, "get_loop", lambda: None)()
-            if loop is not None and loop.is_closed():
-                return False
-            if waiter.done():
-                return False
-            waiter.set_result(verdict)
-            return True
-        except Exception as e:  # noqa: BLE001
-            log.debug("could not wake approval waiter %s: %s", approval_id, e)
-            return False
+        self._approval_waiters.pop(approval_id, None)
+        return False
 
     async def execute_for_chat(self, action_type: str,
                                params: dict) -> ActionResult:
-        """Run an action from a chat turn, asking in-band when it is gated.
+        """Run an action from a chat turn, handing a gated one back unanswered.
 
-        `execute()` queues a gated action and returns immediately, which left a
-        tool call with an approval id and no way to consume it — the console
-        command then read as a permissions wall. Here the turn waits for the
-        user's decision and runs the command on the same turn when they agree.
+        This used to wait in-band for the user's decision, and the wait was the
+        problem. The turn blocked inside the tool call for up to
+        `APPROVAL_WAIT_S`, while the dashboard's own socket timeout was the same
+        180 seconds and a local-model turn had already spent minutes thinking —
+        so the turn lost the race almost every time, and what the user saw was
+        "Request timed out" rather than the permission prompt they were meant to
+        answer. Asking for permission is not a failure and must not be reported
+        as one.
+
+        So the turn ENDS here and the request is left queued. `approve()` runs it
+        when the user answers — that path already existed for requests the old
+        timeout gave up on — and reports the outcome back into the conversation,
+        so approving is not a silent act.
         """
         self._lazy_init()
         request = ActionRequest(action_type=action_type, params=params or {})
@@ -175,53 +216,16 @@ class ActionExecutor:
         except Exception as e:  # noqa: BLE001
             log.debug("approval broadcast failed: %s", e)
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return ActionResult(False, action_type,
-                error="This action needs approval, which is only available "
-                      "while the app is running.",
-                data={"approval_id": approval_id, "requires_approval": True})
-
-        waiter: asyncio.Future = loop.create_future()
-        self._approval_waiters[approval_id] = waiter
-        try:
-            verdict = await asyncio.wait_for(waiter, APPROVAL_WAIT_S)
-        except asyncio.TimeoutError:
-            self._approval_waiters.pop(approval_id, None)
-            # Leave the approval pending in _pending_approvals so the user
-            # can still approve it asynchronously from the dashboard after
-            # the chat turn gave up waiting.  `approve()` runs the action
-            # directly when no waiter is active — but only if the request
-            # is still queued.  Previously this `finally` deleted it on
-            # every exit, including timeout, which made the dashboard's
-            # Approve button return "No pending approval" for anything the
-            # agent asked about longer ago than the wait window.
-            return ActionResult(False, action_type,
-                error=f"'{params.get('command', action_type)}' needs your "
-                      f"approval before it can run. Approve it in the "
-                      f"dashboard (Settings or the pending-action prompt) and "
-                      f"ask again.",
-                data={"approval_id": approval_id, "requires_approval": True})
-
-        # The chat turn got a verdict.  NOW it is safe to dequeue — the
-        # action either ran below (approved) or was denied, and the user
-        # will not be approving this same id later.
-        self._pending_approvals.pop(approval_id, None)
-
-        if verdict != "approved":
-            return ActionResult(False, action_type,
-                error="The user denied this command, so it was not run.",
-                data={"approval_id": approval_id, "denied": True})
-
-        gate = self._gate
-        self._gate = None            # already decided — do not queue it again
-        self._approved_run = True
-        try:
-            return await self.execute(request)
-        finally:
-            self._gate = gate
-            self._approved_run = False
+        # Deliberately NOT registered as a waiter: nothing is blocked on this
+        # decision, so there is no future to wake and no window to expire. The
+        # request stays in `_pending_approvals`, which is exactly what
+        # `approve()` looks in when it finds no waiter.
+        return ActionResult(
+            False, action_type,
+            error=("This needs your permission before it can run. Approve it "
+                   "in the dashboard and it will run straight away."),
+            data={"approval_id": approval_id, "requires_approval": True,
+                  "deferred": True})
 
     def _gated(self, action_type: str, params: dict) -> bool:
         self._lazy_init()
@@ -254,12 +258,20 @@ class ActionExecutor:
             log.debug("approval policy unavailable: %s", e)
             return False
         try:
+            # The session grant is checked first because it is the only one a
+            # content-classified action can have. `run_command` is granted for
+            # the sitting and not permanently, so looking for the permanent
+            # answer first would leave that grant unable to take effect.
+            if policy.is_allowed_for_session(policy.SKILL, action_type):
+                return True
             if policy.is_always_allowed(policy.SKILL, action_type):
                 return True
             # A destructive command carried on a non-destructive action type
             # still has to be recognised, so the gate's content check is
             # repeated here rather than trusted to the caller's action name.
             name = str(params.get("command", "")).strip() if params else ""
+            if name and policy.is_allowed_for_session(policy.TOOL, name):
+                return True
             if name and policy.is_always_allowed(policy.TOOL, name):
                 return True
             return False
@@ -273,9 +285,16 @@ class ActionExecutor:
         Returns:
           True   — approved, run it now
           False  — denied, do not run it
-          {"approval_id": ..., "message": ...} — still waiting after the
-                   in-band window; the request stays queued so the dashboard
-                   can answer it later.
+          {"approval_id": ..., "message": ...} — queued and unanswered. The
+                   turn ends here; the request waits for the user and runs when
+                   they answer it.
+
+        **It never waits.** Holding the turn open for `APPROVAL_WAIT_S` meant the
+        answer usually arrived after the caller had given up, because that
+        window is not longer than the dashboard's socket timeout once a
+        local-model turn has spent minutes thinking — so the user saw a timeout
+        rather than the prompt. Approving later runs the action through
+        `approve()`, which is the path the old timeout already fell back to.
 
         Kept separate from `execute_for_chat` because the two answer different
         questions. That one RUNS the action for a chat turn; this one only
@@ -301,36 +320,15 @@ class ActionExecutor:
         except Exception as e:  # noqa: BLE001
             log.debug("approval broadcast failed: %s", e)
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No loop means no way to wait. Keep the request queued so the
-            # dashboard can still answer it, and tell the caller it is pending.
-            return {"approval_id": approval_id, "requires_approval": True,
-                    "message": (f"'{action_type}' needs approval, which is only "
-                                "available while the app is running.")}
-
-        waiter: asyncio.Future = loop.create_future()
-        self._approval_waiters[approval_id] = waiter
-        try:
-            verdict = await asyncio.wait_for(waiter, APPROVAL_WAIT_S)
-        except asyncio.TimeoutError:
-            self._approval_waiters.pop(approval_id, None)
-            # Left pending on purpose: the user can still approve it from the
-            # dashboard, and `approve()` runs it directly when no waiter is
-            # active. Deleting it here is what once made Approve return "No
-            # pending approval" for anything older than the wait window.
-            return {"approval_id": approval_id, "requires_approval": True,
-                    "message": (f"'{action_type}' needs your approval before it "
-                                "can run. Approve it in the dashboard and ask "
-                                "again.")}
-        self._pending_approvals.pop(approval_id, None)
-        try:
-            from backend.approvals import pending as _pending_origins
-            _pending_origins.forget(approval_id)
-        except Exception:  # noqa: BLE001
-            pass
-        return verdict == "approved"
+        # Deliberately NOT registered as a waiter: nothing is blocked on this
+        # decision, so there is no future to wake and no window to expire. The
+        # request stays in `_pending_approvals`, which is exactly what
+        # `approve()` looks in when it finds no waiter.
+        return {"approval_id": approval_id, "requires_approval": True,
+                "deferred": True,
+                "message": ("This needs your permission before it can run. "
+                            "Approve it in the dashboard and it will run "
+                            "straight away.")}
 
     async def resolve_by_conversation(self, source: object, conversation: object):
         """The approval a chat conversation is waiting on, oldest first.
@@ -438,7 +436,49 @@ class ActionExecutor:
         # 3. Dispatch
         handler = self._handlers.get(request.action_type)
         if handler is None:
-            return ActionResult(False, request.action_type, error=f"Unknown action: {request.action_type}")
+            # A gated SKILL has no executor handler: the approval was raised by
+            # `SkillRegistry._execute_gated`, which queued the skill's NAME, and
+            # this is where that name is run. Without this fallback every gated
+            # skill that is not also an executor action was answered and then
+            # failed with "Unknown action: <name>" — the card worked, the user
+            # approved, and nothing happened. `pdf_create`, `word_create`,
+            # `word_edit`, `pptx_create` and `pptx_add_slide` are all in that
+            # set, and so is any skill added later.
+            #
+            # The skill's own handler is called rather than the registry's
+            # `execute`, because `execute` would gate it again and ask the user
+            # a second time for the thing they just approved.
+            skill = None
+            try:
+                from backend.skills.registry import skill_registry
+                skill = skill_registry.get(request.action_type)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not look up skill %s: %s",
+                          request.action_type, e)
+            if skill is None:
+                return ActionResult(False, request.action_type,
+                                    error=f"Unknown action: {request.action_type}")
+            try:
+                result = await skill.handler(request.params or {})
+                elapsed = int((time.monotonic() - started) * 1000)
+                if isinstance(result, dict):
+                    known_meta = {"success", "summary", "data", "error"}
+                    extra = {k: v for k, v in result.items() if k not in known_meta}
+                    return ActionResult(
+                        success=result.get("success", True),
+                        action_type=request.action_type,
+                        summary=result.get("summary", ""),
+                        duration_ms=elapsed,
+                        data=result.get("data") or extra or None,
+                        error=result.get("error"),
+                    )
+                return ActionResult(True, request.action_type,
+                                    duration_ms=elapsed, data=result)
+            except Exception as e:  # noqa: BLE001
+                log.exception("Approved skill %s failed", request.action_type)
+                elapsed = int((time.monotonic() - started) * 1000)
+                return ActionResult(False, request.action_type, error=str(e),
+                                    duration_ms=elapsed)
 
         try:
             result = await handler(request.params)
@@ -518,9 +558,12 @@ class ActionExecutor:
         self._handlers["screenshot"] = lambda p: s.screenshot(p.get("monitor"), p.get("region"))
 
         # Terminal actions
+        # No `allow_dangerous` argument: the terminal never had a guard to lift,
+        # and passing `_approved_run` into a parameter nothing read implied one
+        # existed. An approved command runs because `approve()` clears
+        # `self._gate` for the call, which is the single place approval acts.
         self._handlers["run_command"] = lambda p: t.execute(
-            str(p.get("command", "")), p.get("cwd"), p.get("timeout", 30),
-            allow_dangerous=bool(getattr(self, "_approved_run", False)))
+            str(p.get("command", "")), p.get("cwd"), p.get("timeout", 30))
 
         # Utility actions
         self._handlers["wait"] = lambda p: asyncio.sleep(p.get("ms", 1000) / 1000)
@@ -529,13 +572,19 @@ class ActionExecutor:
         self._handlers["get_clipboard"] = lambda p: s.get_clipboard()
         self._handlers["set_clipboard"] = lambda p: s.set_clipboard(str(p.get("text", "")))
 
-        # Excel actions
-        from backend.actions.excel_ops import excel_ops
-        self._handlers["excel_read"] = lambda p: excel_ops.read(
-            str(p.get("path", "")), p.get("sheet"), p.get("max_rows", 500))
-        self._handlers["excel_write"] = lambda p: excel_ops.write(
-            str(p.get("path", "")), p.get("sheet", "Sheet1"),
-            p.get("cells", []), p.get("grid"))
+        # Excel actions are NOT registered here.
+        #
+        # `excel_read`, `excel_write` and `excel_sheets` are all skills, and both
+        # paths reach them through the skill fallback above. The handlers that
+        # used to sit here called the older `excel_ops`, which takes a different
+        # argument shape (`cells` before `grid`) and hands the path straight to
+        # the OS with no workspace guard.
+        #
+        # Two implementations sharing a name is worse than either one alone: an
+        # approved write went to the unguarded one, so a relative path failed
+        # with "No such file or directory" while the same call through the skill
+        # worked, and a path outside the workspace would have been allowed. One
+        # implementation is the only version of this that stays correct.
 
 
 # Singleton (with destruction gate: destructive actions await approval)

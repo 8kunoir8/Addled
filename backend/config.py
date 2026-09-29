@@ -31,6 +31,32 @@ _MEMORY.mkdir(parents=True, exist_ok=True)
 
 SETTINGS_PATH = _MEMORY / "settings.json"
 
+# Test-only redirect. `SETTINGS_PATH` is resolved at import and every write
+# goes through `settings_path()`, which checks this first.
+#
+# Why it exists: `scripts/check_code_editor.py` sets `workspace.root` to a temp
+# folder to exercise containment, and used to do that on the LIVE settings file,
+# restoring the old value in a `finally`. That works until a run is interrupted
+# — then the user's real workspace is left pointing at a throwaway directory
+# created by a test. It happened: the app was found bound to a leftover fixture
+# in %TEMP% full of test files, with ~200 more temp workspaces accumulated
+# beside it. A suite must not be able to damage the settings it is testing.
+_TEST_SETTINGS_PATH: Path | None = None
+
+def settings_path() -> Path:
+    """Where settings are read and written right now."""
+    return _TEST_SETTINGS_PATH or SETTINGS_PATH
+
+def use_settings_file(path) -> None:
+    """Point this process at a different settings file. For tests only.
+
+    Deliberately not a general "override the config" switch: nothing in the app
+    calls it, so a running Addled cannot be redirected by anything but a test
+    that has imported this explicitly.
+    """
+    global _TEST_SETTINGS_PATH
+    _TEST_SETTINGS_PATH = Path(path) if path else None
+
 
 # ---- default settings --------------------------------------------------------
 
@@ -330,6 +356,14 @@ DEFAULT_SETTINGS: dict = {
     # can start/stop the processes; the bots themselves talk to the WS server.
     "bots": {
         "tokens": {},
+        # Which bridges a scheduled reminder should reach. Empty means any that
+        # is running — the right default for a single-bot setup, and the only
+        # behaviour that works before anyone visits Settings. Set it when more
+        # than one bridge is running, or a reminder is delivered once per bot.
+        "notify_platforms": [],
+        # Where the record of what each bridge exchanged lives. Empty means
+        # backend/memory/bot_history.
+        "history_dir": "",
     },
     "tools": {
         "rtk_enabled": True,
@@ -569,9 +603,10 @@ class _Config:
 
     def load(self):
         """Load settings from disk, or initialize defaults."""
-        if SETTINGS_PATH.exists():
+        source = settings_path()
+        if source.exists():
             try:
-                with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                with open(source, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
                 # Deep merge with defaults to fill any missing keys
                 self._data = _deep_merge(DEFAULT_SETTINGS, loaded)
@@ -642,15 +677,20 @@ class _Config:
 
         `os.replace` is atomic on Windows and POSIX: a reader sees either the
         old file or the new one, never half of either.
+
+        The path is re-read from the module each time rather than captured, so
+        `use_settings_file()` can redirect this process away from the real
+        settings.
         """
-        _MEMORY.mkdir(parents=True, exist_ok=True)
-        tmp = SETTINGS_PATH.with_suffix(".json.tmp")
+        target = settings_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".json.tmp")
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=2, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, SETTINGS_PATH)
+            os.replace(tmp, target)
         except OSError as e:
             log.warning("could not write settings: %s", e)
             try:
@@ -661,8 +701,8 @@ class _Config:
         # A copy of the settings that were replaced, so a bad save is
         # recoverable by hand rather than being simply gone.
         try:
-            if SETTINGS_PATH.exists():
-                shutil.copy2(SETTINGS_PATH, SETTINGS_PATH.with_suffix(".json.bak"))
+            if target.exists():
+                shutil.copy2(target, target.with_suffix(".json.bak"))
         except OSError:
             pass
         self._dirty = False

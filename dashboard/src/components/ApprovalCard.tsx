@@ -17,6 +17,8 @@ export interface ApprovalRequest {
   name: string;
   /** May "Always allow" be offered? The policy decides, not this component. */
   grantable?: boolean;
+  /** May "Allow for session" be offered? True for anything that can ask. */
+  session_grantable?: boolean;
   /** The command, when the thing being approved is a shell command. */
   command?: string;
 }
@@ -42,14 +44,22 @@ function describe(request: ApprovalRequest): string {
 }
 
 /**
- * A pending approval, rendered as three answers.
+ * A pending approval, rendered as up to four answers.
  *
  * **Allow once** answers this request only; the thing asks again next time.
  * **Always allow** writes a standing permission, so it does not ask again until
- * it is revoked from the skill or tool card. That button is absent when the
- * backend says the request is not grantable — which is how a destructive
- * shell command and `delete_file` stay out of reach, since the policy refuses
- * them on the way in as well.
+ * it is revoked from the skill or tool card.
+ * **Allow for session** writes one that lasts until Addled restarts.
+ *
+ * Which of the two grants is offered is the backend's decision, not this
+ * component's, and the distinction is not cosmetic. An action that is
+ * dangerous whatever you pass it — `delete_file` — can be remembered
+ * permanently, because the answer is about the action. One that is dangerous
+ * because of its *arguments* — `run_command`, whose gate judges the command
+ * text against a list of unrecoverable ones (`format`, `diskpart`, `rm -rf`) —
+ * cannot: a grant is keyed by name, so remembering it would allow every
+ * command the skill will ever carry, including the ones the gate exists to
+ * stop. That one gets the session answer instead, and it expires at restart.
  *
  * A button does not clear the card by itself. The parent removes it once the
  * backend confirms, so a request that had already expired (its window
@@ -60,6 +70,7 @@ export default function ApprovalCard({
   request,
   onAllow,
   onAlwaysAllow,
+  onAllowForSession,
   onDeny,
   busy,
   compact,
@@ -68,6 +79,7 @@ export default function ApprovalCard({
   request: ApprovalRequest;
   onAllow: () => void;
   onAlwaysAllow?: () => void;
+  onAllowForSession?: () => void;
   onDeny: () => void;
   busy?: boolean;
   compact?: boolean;
@@ -77,6 +89,10 @@ export default function ApprovalCard({
   const [localBusy, setLocalBusy] = useState(false);
   const pending = Boolean(busy) || localBusy;
   const grantable = Boolean(request.grantable) && Boolean(onAlwaysAllow);
+  // Offered whenever a permanent grant is not, so the card always has a real
+  // answer: "ask me every single time" is not one the user will keep reading.
+  const sessionGrantable =
+    Boolean(request.session_grantable ?? true) && Boolean(onAllowForSession);
 
   const run = (fn: () => void) => () => {
     if (pending) return;
@@ -96,11 +112,6 @@ export default function ApprovalCard({
           {request.command}
         </pre>
       )}
-      {!request.grantable && request.kind === 'action' && (
-        <p className="text-[10px] text-[#484f58] mt-1.5">
-          This one always asks first, so it cannot be remembered.
-        </p>
-      )}
       {error && <p className="text-xs text-[#f85149] mt-2">{error}</p>}
       <div className="flex flex-wrap gap-2 mt-3">
         <button
@@ -110,6 +121,16 @@ export default function ApprovalCard({
         >
           Allow once
         </button>
+        {sessionGrantable && (
+          <button
+            onClick={run(onAllowForSession!)}
+            disabled={pending}
+            title="Do not ask again for this run of Addled; the prompt returns when it restarts"
+            className="bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 border border-[#30363d] text-[#e8eaed] rounded-md px-3 py-1.5 text-xs font-medium"
+          >
+            Allow for session
+          </button>
+        )}
         {grantable && (
           <button
             onClick={run(onAlwaysAllow!)}
@@ -128,6 +149,12 @@ export default function ApprovalCard({
           Deny
         </button>
       </div>
+      {!grantable && sessionGrantable && (
+        <p className="text-[10px] text-[#484f58] mt-2">
+          This one judges each request on what it carries, so it can only be
+          allowed for this session.
+        </p>
+      )}
     </div>
   );
 }
