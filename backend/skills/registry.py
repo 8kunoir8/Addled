@@ -705,6 +705,74 @@ class SkillRegistry:
         }
         sop_tools = {"sop_lookup", "sop_list", "sop_save"}
 
+        # Intent -> the tools that serve it, matched on words a user actually
+        # types rather than on the tool's own name.
+        #
+        # This exists because the scoring above is lexical: a tool is found only
+        # if the question shares a word with its NAME or description. Measured
+        # with scripts/check_reachability.py, that left whole groups reachable
+        # only by typing the name:
+        #   "summarise this report"    -> no document reader at all
+        #   "open the website X"       -> not browser_navigate (name has neither word)
+        #   "what do you remember"     -> memory_SET (the writer), not memory_get
+        #   "grep for the word token"  -> word_read, because of the literal "word"
+        #
+        # Two rules keep this honest: a phrase only fires when the words are
+        # present, and a tool listed under an intent is a candidate — not a
+        # forced pick — so a genuinely better lexical match still wins.
+        intents: tuple[tuple[set[str], set[str]], ...] = (
+            # Documents: the words people use, not the extensions.
+            ({"document", "documents", "doc", "docx", "word", "report",
+              "letter", "essay", "write-up", "writeup"},
+             {"word_read", "word_create", "word_edit"}),
+            ({"spreadsheet", "spreadsheets", "excel", "xlsx", "xls", "workbook",
+              "sheet", "sheets", "cell", "cells", "numbers", "table", "tables"},
+             {"excel_read", "excel_write", "excel_sheets"}),
+            ({"presentation", "presentations", "powerpoint", "pptx", "slide",
+              "slides", "deck", "decks"},
+             {"pptx_read", "pptx_create", "pptx_add_slide"}),
+            ({"pdf", "pdfs"}, {"pdf_read", "pdf_create", "pdf_edit",
+                               "pdf_merge", "pdf_pages", "pdf_extract"}),
+            # "turn X into Y" is how conversion is asked for.
+            ({"convert", "conversion", "turn", "transform", "export"},
+             {"convert_to_pdf", "convert_from_pdf"}),
+            # Recall vs save: read and write are different asks, and the writer
+            # used to win the reader's question.
+            ({"remember", "recall", "memory", "memories", "know", "knew",
+              "remembered", "forget", "profile"},
+             {"memory_get", "memory_related", "memory_graph", "memory_files"}),
+            ({"save", "store", "note", "remember", "memorise", "memorize",
+              "preference", "preferences"},
+             {"memory_set"}),
+            # Browsing: "website", "link", "url" are not "browser_navigate".
+            ({"website", "websites", "site", "sites", "webpage", "webpages",
+              "url", "link", "links", "browse", "browser", "google", "online"},
+             {"browser_navigate", "browser_extract", "browser_click",
+              "browser_type", "browser_task", "web_fetch"}),
+            # Searching inside files, as distinct from finding files.
+            ({"grep", "contains", "containing", "mentions", "mentions",
+              "inside", "within", "occurrences", "usages"},
+             {"search_in_files"}),
+            ({"find", "locate", "which", "list"}, {"search_files", "list_dir"}),
+            # Windows and desktop.
+            ({"window", "windows", "app", "application", "applications",
+              "minimise", "minimize", "maximise", "maximize", "switch"},
+             {"list_windows", "focus_window", "resize_window", "close_window"}),
+            ({"desktop", "mouse", "cursor", "keyboard", "keystroke", "hotkey",
+              "shortcut"},
+             {"desktop_click", "desktop_type", "desktop_hotkey",
+              "desktop_scroll", "desktop_move_mouse", "desktop_drag"}),
+            # System settings.
+            ({"volume", "sound", "audio", "mute", "loud", "speaker"},
+             {"set_volume"}),
+            ({"brightness", "dim", "bright", "screen"}, {"set_brightness",
+                                                         "screenshot"}),
+            ({"clipboard", "paste", "copied"}, {"get_clipboard", "set_clipboard"}),
+            ({"code", "source", "function", "script", "python", "bug", "test",
+              "tests", "compile", "build", "refactor"},
+             {"code_read", "code_edit", "verify_code"}),
+        )
+
         terms = set(_significant_terms(query or ""))
         q_lower = (query or "").lower()
         asks_for_tools = bool(terms & {
@@ -714,6 +782,16 @@ class SkillRegistry:
         })
         asks_for_knowledge = bool(terms & knowledge_terms)
         asks_for_procedures = bool(terms & procedure_terms)
+
+        # Which intents this query fires, resolved once rather than per skill.
+        # 4.0 sits between a name overlap (3.0) and an exact name mention (5.0):
+        # an intent match should beat a stray shared word, but not override a
+        # tool the user named outright.
+        intent_hits: dict[str, float] = {}
+        for words, tools in intents:
+            if terms & words:
+                for tool in tools:
+                    intent_hits[tool] = max(intent_hits.get(tool, 0.0), 4.0)
 
         scores: dict[str, float] = {}
         for name, skill in enabled.items():
@@ -738,6 +816,11 @@ class SkillRegistry:
             if asks_for_procedures:
                 if name in sop_tools:
                     score += 6.0
+
+            # Plain-language intent: the words a user types for this job, which
+            # are usually not the words in the tool's own name.
+            if name in intent_hits:
+                score += intent_hits[name]
 
             # MCP domain-term matching: an MCP tool named
             # ``mcp__postgres__query`` should surface when the user asks about

@@ -54,10 +54,13 @@ launch.bat
 │           Electron Shell                │
 │  ┌───────────────┐  ┌────────────────┐  │
 │  │Next.js Dashboard│  │ Bot Bridges    │  │
-│  │13 pages        │  │Telegram/WA/    │  │
+│  │14 pages        │  │Telegram/WA/    │  │
 │  │Chat/Goals/Code │  │ Discord        │  │
 │  │Swarm/Browser/  │  │                │  │
 │  │Calendar/Bots/  │  │                │  │
+│  │Remote/Wiki/    │  │                │  │
+│  │Memory/Skills/  │  │                │  │
+│  │Procedures/     │  │                │  │
 │  │Settings        │  │                │  │
 │  └───────┬───────┘  └───────┬────────┘  │
 │          │ WebSocket         │ HTTP      │
@@ -89,7 +92,7 @@ launch.bat
 | Dashboard | Next.js 16, TypeScript, Tailwind CSS | ✅ Built |
 | Desktop Shell | Electron 28, system tray, auto-updater, backend auto-respawn | ✅ Built |
 | Bot Bridges | Node.js (grammY, Baileys, discord.js) | ✅ Built |
-| Communication | WebSocket JSON-RPC 2.0 (197 handlers) | ✅ Built |
+| Communication | WebSocket JSON-RPC 2.0 (203 handlers) | ✅ Built |
 
 ---
 
@@ -102,7 +105,7 @@ launch.bat
 Upload any animated GIF or a ZIP of per-state GIFs in Settings → Character and the floating character becomes that pet — all 12 agent states keep working on top (thinking/error/sleeping effects included). State clips map by file name (`idle.gif`, `thinking.gif`, …); skipped states fall back to `idle.gif`. Ships with the **Neon Panda** starter skin out of the box.
 
 ### 💬 AI Chat
-Full chat UI with streaming responses, markdown rendering, conversation history. **Attachments**: images are analyzed by the visual model (local Florence-2 or provider vision) and described to the main model; text files are inlined; drag & drop supported. Proactive insights arrive as 💡 messages in chat and bubbles on the character. Works with any configured AI provider. Supports skill-based tool calling across all providers.
+Full chat UI with streaming responses, markdown rendering, conversation history. **Attachments** — paste an image straight from the clipboard, paste text, drag & drop, or pick a file: images are analyzed by the visual model (local Florence-2 or provider vision) and described to the main model, text files are inlined, and document types are read by the backend. Pasted *text* stays in the box where you expect it, and a whole-file paste is treated as a paste rather than as something you typed. Proactive insights arrive as 💡 messages in chat and bubbles on the character. Works with any configured AI provider. Supports skill-based tool calling across all providers.
 
 ### 🔌 10 AI Providers
 | Provider | Type | Vision | Streaming |
@@ -300,8 +303,12 @@ Workspace folder binding with a real editor (tabs, syntax highlighting, save wit
 Edits are proposed as **anchored changes** — find the exact existing text, replace it — rather than by rewriting the whole file. Only what changed appears in the diff, untouched lines cannot drift, and there is no file-size ceiling to hit. Matching tolerates indentation and whitespace drift, and a change that would be ambiguous (the anchor appears twice) is **refused rather than guessed**.
 
 - **Plan first**: a multi-file request searches the project, names the files it believes are involved, and only then proposes edits, so a cross-file change is not guessed from the one open file.
-- **Verified**: after a plan is applied, Addled runs the project's **own** check — a `verify`/`test` script, a Makefile target, or the runner the folder layout implies — and reports whether it passed. It never invents a command; a project with no check is reported as unverified rather than given a green tick.
-- **Undo is git**: if the workspace is a repository, an applied plan leaves a commit describing what changed, so "undo the last change" is an ordinary `git revert` and your own log records what Addled did. It commits on top and never rewrites your history.
+- **Verified**: after a plan is applied, Addled runs the project's **own** check — a `verify`/`test` script, a Makefile target, or the runner the folder layout implies — and reports whether it passed. It never invents a command; a project with no check is reported as unverified rather than given a green tick. A project whose runner collects no tests says **"no tests found"** rather than borrowing the failure state, because "the tests did not run" and "the tests failed" are different facts.
+- **Undo is git**: if the workspace is a repository, an applied plan leaves a commit describing what changed, so "undo the last change" is an ordinary `git revert` and your own log records what Addled did. It commits on top and never rewrites your history. A folder that is not a repository still gets a `.bak` beside every file it wrote, and the Undo button restores from it — so the same change is reversible either way.
+- **Sessions**: work is grouped into named sessions in the sidebar, titled from your first request, pinnable and deletable. A session belongs to the folder it was started in, and binding a workspace reopens the session you were last working in there.
+- **The composer takes what you have**: paste a screenshot, drop a PDF or a document, name a file with `@`, or attach the lines you have selected in the editor. An image goes to the vision model, a text file is sent as content, and a document type is read by the backend.
+- **Right-click, where you already are**: on a file (open, attach to the prompt, copy path, reveal, add its folder as context), on a selection (explain, refactor, write tests, find the bug, document), and on the tree (new file, refresh, collapse, clear the filter).
+- **The Changes view** answers "what did Addled change here?" — the branch, the modified and untracked files, and the uncommitted diff — and can run the project's check on demand.
 - **Self-modification**: Addled can change its own source on request, but only as a staged proposal you approve after seeing the diff, with the files that decide what is permitted deliberately excluded. It takes effect after a restart, and every such change is recorded in the journal.
 
 ### 🐝 Agent Swarm
@@ -335,7 +342,7 @@ A persistent **mood & emotion engine** (valence + energy, decays over time) driv
 ### 📡 Remote access (Tailscale)
 Reach Addled from your phone or another machine, in a browser, over Tailscale — status, sign-in and `tailscale serve` sharing are all managed from the **Remote** page, which can also run the official Tailscale installer when you ask it to (nothing installs on its own).
 
-The WebSocket API has **no authentication of its own**, and several of its 197 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
+The WebSocket API has **no authentication of its own**, and several of its 203 methods can run shell commands or synthesise input. Rather than spread credential checks across all of them, remote access goes through a separate **gateway** that owns the whole remote surface:
 
 - It serves the login page and the dashboard, and only bridges a WebSocket to `127.0.0.1:9876` **after** validating a session. It binds loopback only; Tailscale terminates TLS and proxies to it, so the browser gets a real `https://<machine>.<tailnet>.ts.net` URL and `wss://` works without Addled handling a certificate.
 - The **password is scrypt-hashed** (`settings.json`), sessions are **in-memory only** (a restart logs everyone out), login attempts are **rate-limited per address**, and the session cookie is `HttpOnly` + `SameSite=Lax` (+ `Secure` over HTTPS).
@@ -391,7 +398,7 @@ Windows NSIS + portable installer via electron-builder. **Weekly auto-update** a
 **An upgrade keeps your setup.** Settings, memory, skills, tools, MCP servers and the swarm roster all live beside the install, and the installer deliberately ships **no copy** of any of them — an upgrade adds and replaces program files and has nothing to overwrite your data with. This is now enforced rather than assumed: a check reads the paths the backend *writes* out of the source and fails if any of them could be packaged, so a future store cannot start shipping by being added to one list and not another. Settings are also saved **atomically** (write to a temp file, then swap it in), so an upgrade landing mid-write cannot leave a truncated config behind.
 ---
 
-## WebSocket API (197 handlers)
+## WebSocket API (203 handlers)
 
 ### Core
 `chat.send` `action.execute` `action.approve` `action.deny` `action.pending` `approvals.list` `approvals.alwaysAllow` `approvals.revoke` `voice.speak` `voice.voices` `character.setState` `observer.status` `system.status` `system.getProviders` `settings.get` `settings.set` `guide.status` `models.routes` `models.catalog` `models.refresh` `guidelines.state` `guidelines.refresh` `mcp.list` `mcp.add` `mcp.update` `mcp.remove` `mcp.connect` `mcp.disconnect` `mcp.reload` `mcp.tools` `localLlm.status` `localLlm.installApprove` `localLlm.installDecline` `localLlm.start` `localLlm.stop` `localLlm.remove` `localLlm.installHfDeps` `hf.unload` `modelApi.status` `modelApi.start` `modelApi.stop`
@@ -462,7 +469,7 @@ Addled/
 │   ├── main.py              # Entry point + onboarding + single-instance lock + kill switch + voice
 │   ├── config.py            # Portable JSON settings
 │   ├── engine.py            # Async event loop + observer + insight pushes + goal tick
-│   ├── ws_server.py         # 197 JSON-RPC 2.0 handlers + server pushes
+│   ├── ws_server.py         # 203 JSON-RPC 2.0 handlers + server pushes
 │   ├── providers/           # 10 AI providers (base + registry + selector + router)
 │   │                        #   + live model catalog + local Florence-2 vision
 │   ├── mcp_client/          # MCP client (stdio + streamable HTTP) → tools as skills

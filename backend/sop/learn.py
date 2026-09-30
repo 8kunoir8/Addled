@@ -143,6 +143,11 @@ def record_run(category: str, tools_used, message: str = "",
         if not out.get("success"):
             return {"skipped": out.get("error") or "could not be saved"}
         store.record_use(out["sop"]["id"], success=True)
+        # Learning has no natural bound, and a store full of one-off procedures
+        # makes matching refuse tasks it would otherwise answer (two close
+        # procedures is an ambiguity, and refusing is the safe verdict). Pruning
+        # AFTER the insert keeps the cap enforced without blocking this write.
+        store.prune_learned()
         log.info("Learned a procedure for '%s': %s", resolved, title)
         return {"created": out["sop"]["id"], "category": resolved,
                 "title": title, "tools": trace, "reason": reason}

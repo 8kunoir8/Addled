@@ -8,8 +8,10 @@ import {
   type ApprovalRequest,
 } from '@/lib/approvalsStore';
 import ApprovalCard from '@/components/ApprovalCard';
-
-interface Attachment { name: string; kind: 'image' | 'text' | 'file'; data?: string; preview?: string; size?: number; }
+import {
+  filesFromPaste, filesToAttachments, releaseAttachment,
+  MAX_ATTACHMENTS, type Attachment,
+} from '@/lib/attachments';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -22,40 +24,6 @@ interface Message {
   source?: string;
   sourceLabel?: string;
   sourceIcon?: string;
-}
-
-const TEXT_EXTS = /\.(txt|md|json|csv|log|py|js|ts|tsx|jsx|html|css|xml|yaml|yml|ini|cfg|sh|bat|ps1|toml|sql)$/i;
-const MAX_ATTACHMENTS = 5;
-
-async function downscaleImage(file: File, maxSide = 1024): Promise<string> {
-  const url = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((res, rej) => {
-      const i = new Image();
-      i.onload = () => res(i);
-      i.onerror = () => rej(new Error('Could not read image'));
-      i.src = url;
-    });
-    let { width, height } = img;
-    const scale = Math.min(1, maxSide / Math.max(width, height));
-    width = Math.round(width * scale);
-    height = Math.round(height * scale);
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    canvas.getContext('2d')!.drawImage(img, 0, 0, width, height);
-    return canvas.toDataURL('image/jpeg', 0.85).split(',')[1] || '';
-  } catch {
-    // Canvas failed (rare) — send the raw file instead
-    return await new Promise<string>((res, rej) => {
-      const fr = new FileReader();
-      fr.onload = () => res((fr.result as string).split(',')[1] || '');
-      fr.onerror = () => rej(new Error('Could not read image'));
-      fr.readAsDataURL(file);
-    });
-  } finally {
-    URL.revokeObjectURL(url);
-  }
 }
 
 const GREETING: Message = {
@@ -256,28 +224,22 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleFiles = async (files: FileList | null) => {
+  /**
+   * Turn picked, dropped or pasted files into attachments.
+   *
+   * Delegates to `lib/attachments.ts`, which is where the cap, the image
+   * downscale and the text/binary decision live. This page used to carry its
+   * own copy of all three; keeping one implementation is what stops the Chat
+   * and Code composers accepting subtly different things.
+   */
+  const handleFiles = async (files: FileList | File[] | null) => {
     if (!files || !files.length) return;
     setProcessingFiles(true);
     try {
-      const next: Attachment[] = [];
-      for (const f of Array.from(files).slice(0, MAX_ATTACHMENTS)) {
-        if (f.type.startsWith('image/')) {
-          const preview = URL.createObjectURL(f);
-          const data = await downscaleImage(f);
-          next.push({ name: f.name, kind: 'image', data, preview });
-        } else if (TEXT_EXTS.test(f.name) || f.type.startsWith('text/')) {
-          if (f.size <= 1024 * 1024) {
-            const text = await f.text();
-            next.push({ name: f.name, kind: 'text', data: text.slice(0, 100000) });
-          } else {
-            next.push({ name: f.name, kind: 'file', size: f.size });
-          }
-        } else {
-          next.push({ name: f.name, kind: 'file', size: f.size });
-        }
+      const next = await filesToAttachments(files, attachments.length);
+      if (next.length) {
+        setAttachments(prev => [...prev, ...next].slice(0, MAX_ATTACHMENTS));
       }
-      setAttachments(prev => [...prev, ...next].slice(0, MAX_ATTACHMENTS));
     } catch {
       /* unreadable file — ignore */
     }
@@ -286,8 +248,9 @@ export default function ChatPage() {
 
   const removeAttachment = (idx: number) => {
     setAttachments(prev => {
-      const a = prev[idx];
-      if (a?.preview) URL.revokeObjectURL(a.preview);
+      // The shared helper revokes the thumbnail URL. Letting it go un-revoked
+      // leaks one object URL per removed screenshot for the life of the page.
+      releaseAttachment(prev[idx]);
       return prev.filter((_, i) => i !== idx);
     });
   };
@@ -317,6 +280,24 @@ export default function ChatPage() {
     setDragActive(false);
     if (isLoading || wsState !== 'connected') return;
     handleFiles(e.dataTransfer.files);
+  };
+
+  // ---- paste ----------------------------------------------------------------
+
+  /**
+   * A pasted image or file becomes an attachment; plain text is left to the
+   * textarea, which is what anyone pasting a sentence expects.
+   *
+   * The two arrive differently from the clipboard — a copied image sits in
+   * `items`, while a screenshot taken with the snipping tool can come through
+   * as a `files` entry — so `filesFromPaste` checks both rather than assuming.
+   */
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const { files } = filesFromPaste(e);
+    if (!files.length) return;   // ordinary text paste — let the textarea have it
+    e.preventDefault();
+    if (isLoading || wsState !== 'connected') return;
+    handleFiles(files);
   };
 
   const handleSend = async () => {
@@ -381,8 +362,8 @@ export default function ChatPage() {
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#0d1117]/85 border-2 border-dashed border-[#3380FF] rounded-lg pointer-events-none">
           <div className="text-center">
             <div className="text-3xl mb-2">⬇</div>
-            <p className="text-sm font-medium text-[#e8eaed]">Drop files to attach</p>
-            <p className="text-xs text-[#8b949e] mt-1">Images, text files, code — up to 5</p>
+            <p className="text-sm font-medium text-[#e8eaed]">Drop to attach</p>
+            <p className="text-xs text-[#8b949e] mt-1">Images, text, documents — or paste from the clipboard</p>
           </div>
         </div>
       )}
@@ -525,12 +506,12 @@ export default function ChatPage() {
         )}
         <div className="flex gap-2">
           <input ref={fileInputRef} type="file" multiple className="hidden"
-            accept="image/*,.txt,.md,.json,.csv,.log,.py,.js,.ts,.tsx,.jsx,.html,.css,.xml,.yaml,.yml,.ini,.cfg,.sh,.bat,.ps1,.toml,.sql"
+            accept="image/*,.txt,.md,.json,.csv,.log,.py,.js,.ts,.tsx,.jsx,.html,.css,.xml,.yaml,.yml,.ini,.cfg,.sh,.bat,.ps1,.toml,.sql,.pdf,.docx,.xlsx,.pptx"
             onChange={e => { handleFiles(e.target.files); e.target.value = ''; }} />
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={isLoading || wsState !== 'connected' || processingFiles}
-            title="Attach image or file"
+            title="Attach an image, text file or document"
             className="bg-[#161b22] border border-[#30363d] hover:border-[#484f58] disabled:opacity-50 rounded-lg px-3 py-2 text-sm text-[#8b949e] transition-colors"
           >
             {processingFiles ? '⟳' : '📎'}
@@ -539,6 +520,7 @@ export default function ChatPage() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             placeholder={wsState === 'connected' ? 'Message Addled...' : 'Connecting to Addled...'}
             disabled={wsState !== 'connected' || isLoading}
             rows={1}
@@ -552,7 +534,7 @@ export default function ChatPage() {
             {isLoading ? '...' : 'Send'}
           </button>
         </div>
-        <p className="text-[10px] text-[#484f58] mt-1.5">Images are analyzed by the visual model and described to the main model. Text files are sent as content.</p>
+        <p className="text-[10px] text-[#484f58] mt-1.5">Paste, drop or attach an image, text file or document. Images are analyzed by the visual model and described to the main model; text is sent as content.</p>
       </div>
     </div>
   );

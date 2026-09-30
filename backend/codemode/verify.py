@@ -227,6 +227,7 @@ async def run_verification(root: str | Path, command: str = "",
 
     output = out_b.decode("utf-8", errors="replace")
     ok = proc.returncode == 0
+    summary = _summarise(output)
     return {
         "ok": ok,
         "ran": True,
@@ -236,8 +237,37 @@ async def run_verification(root: str | Path, command: str = "",
         "exit_code": proc.returncode,
         "output": output[:OUTPUT_CAP],
         "truncated": len(output) > OUTPUT_CAP,
-        "summary": _summarise(output),
+        "summary": summary,
+        # A run that collected nothing exits non-zero, exactly like a run whose
+        # tests failed — and the two are not the same fact. Reported separately
+        # so a caller can say "no tests were found" instead of implying the code
+        # is broken, which is the worst possible confusion for a check whose
+        # whole job is telling those apart.
+        "noTests": (not ok) and _found_no_tests(output, summary),
     }
+
+def _found_no_tests(output: str, summary: dict) -> bool:
+    """Whether a non-zero run collected zero tests rather than failing them.
+
+    Only ever consulted for a run that already failed, so a genuine pass can
+    never be relabelled. Names the specific phrasings the common runners use,
+    because guessing from "summary is empty" alone would also match a runner
+    whose output this parser simply does not understand.
+    """
+    if any(summary.get(k) for k in ("passed", "failed", "errors")):
+        return False
+    if summary.get("total") == 0:
+        return True
+    text = output.lower()
+    markers = (
+        "no tests ran",            # pytest
+        "ran 0 tests",             # unittest
+        "no tests found",          # jest / vitest / go
+        "no test files found",     # vitest
+        "0 tests",                 # generic
+        "collected 0 items",       # pytest -q
+    )
+    return any(m in text for m in markers)
 
 def verdict_line(result: dict) -> str:
     """One line a user or a model can read at a glance."""
@@ -250,5 +280,11 @@ def verdict_line(result: dict) -> str:
         return f"Verified — `{result['command']}` passed ({counts})."
     if result.get("timedOut"):
         return f"Not verified — `{result['command']}` timed out."
+    # Distinct from a failure, and the distinction is the point: a project whose
+    # tests do not run is not a project whose tests fail.
+    if result.get("noTests"):
+        return (f"Not verified — `{result['command']}` ran but found no tests. "
+                f"It exits non-zero when it collects nothing, so this is not a "
+                f"test failure.")
     return (f"Not verified — `{result['command']}` failed with exit code "
             f"{result.get('exit_code')} ({counts}).")

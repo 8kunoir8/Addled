@@ -1245,6 +1245,14 @@ async def _run_chat_pipeline_inner(
             model=route_model,
             tools=tools,
             reply_directive=reply_lang,
+            # A turn the caller said not to record must not be learned either.
+            # Those flags mean "this is my own internal call, not something the
+            # user asked for" — the Code page's planner is the case that matters
+            # (it makes two calls per request that the user never sees), and
+            # learning from them filled the store with recipes titled after
+            # internal prompts. `record` may be a set naming what to keep, so
+            # only an explicit falsy value disables learning.
+            learn=bool(record),
         )
 
         response_text = result.get("response", "")
@@ -3000,6 +3008,28 @@ def _register_default_handlers():
         wp = str(params.get("workspaceId") or "")
         instruction = str(params.get("instruction") or "").strip()
         context_folders = [str(f) for f in (params.get("contextFolders") or [])]
+        # @-mentions and an attached editor selection. Same kind of hint as the
+        # folders: it steers WHERE the planner looks, and it is deliberately not
+        # a scope change — a path named here is still only writable if it is
+        # inside the workspace, because every write goes through
+        # `resolve_in_workspace` regardless of what this hint said.
+        context_files: list[str] = []
+        for entry in (params.get("contextFiles") or []):
+            if isinstance(entry, dict):
+                path = str(entry.get("path") or "").strip()
+                if not path:
+                    continue
+                try:
+                    start = int(entry.get("from") or 0)
+                    end = int(entry.get("to") or 0)
+                except (TypeError, ValueError):
+                    start = end = 0
+                # A range is only meaningful when both ends are real line
+                # numbers; an attachment with neither is just a file mention.
+                context_files.append(
+                    f"{path} (lines {start}-{end})" if start and end else path)
+            elif entry:
+                context_files.append(str(entry))
 
         if not wp:
             return {"status": "error", "message": "Bind a workspace first.",
@@ -3016,8 +3046,46 @@ def _register_default_handlers():
         # pointed rather than scanning the whole tree blindly.
         hint = ""
         if context_folders:
-            hint = ("\n\nThe user pointed at these folders — start there:\n"
-                    + "\n".join(f"- {f}" for f in context_folders))
+            hint += ("\n\nThe user pointed at these folders — start there:\n"
+                     + "\n".join(f"- {f}" for f in context_folders))
+        if context_files:
+            # Named files and attached selections. Said as "start from", not
+            # "change these": the planner's job is to find every file that must
+            # change, and a mention is a starting point rather than the answer.
+            hint += ("\n\nThe user named these files — start from them, and still "
+                     "check whether anything else must change:\n"
+                     + "\n".join(f"- {f}" for f in context_files))
+
+        # Attachments: a pasted screenshot of an error, a dropped PDF spec, a
+        # stack trace in a text file. Routed through the same helper the chat
+        # uses, so an image goes to the vision model and a document is read —
+        # rather than each surface inventing its own handling.
+        #
+        # A failure here must not fail the plan: the request text is still the
+        # request, and refusing to plan because a screenshot could not be
+        # described would be worse than planning without it.
+        attachments = params.get("attachments") or []
+        if attachments:
+            try:
+                # The active provider is passed so a vision-capable one is used
+                # directly; when it is not (or is unavailable) the helper falls
+                # back to the local visual model on its own.
+                from backend.providers.registry import get_provider
+                try:
+                    provider_for_att = get_provider()
+                except Exception:  # noqa: BLE001
+                    provider_for_att = None
+                notes = await _analyze_attachments(
+                    provider_for_att, attachments, vision_model=None)
+                if notes:
+                    hint += ("\n\nAttached by the user:\n"
+                             + "\n".join(notes))
+            except Exception as e:  # noqa: BLE001
+                log.debug("Could not analyse code attachments: %s", e)
+                names = [str((a or {}).get("name") or "file")
+                         for a in attachments[:5]]
+                hint += ("\n\nThe user attached files that could not be read: "
+                         + ", ".join(names))
 
         # ---- call 1: FIND --------------------------------------------------
         # Free-form prose and tools. No JSON is asked for here, so the tool

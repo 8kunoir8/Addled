@@ -22,6 +22,7 @@ Run from the project root:
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -556,6 +557,16 @@ async def run():
     if os.path.exists(page):
         with open(page, encoding="utf-8", errors="replace") as fh:
             ui = fh.read()
+        # Prose assertions run against a whitespace-collapsed copy.
+        #
+        # JSX wraps long sentences across lines and re-indents them, so a phrase
+        # searched in the raw source changes meaning depending on how the author
+        # happened to format it. That is a test that fails for the wrong reason:
+        # rewrapping a paragraph broke "cannot run other tools" while the
+        # sentence was still there and still said exactly that. Identifier and
+        # expression checks below still use the raw text, where spacing IS
+        # meaningful.
+        ui_flat = " ".join(ui.split())
         check("the page warns when a plan names many files",
               "MANY_FILES" in ui
               and "plan.steps.length > MANY_FILES" in ui,
@@ -587,11 +598,11 @@ async def run():
               "cancelRef" in ui and "cancelRef.current" in ui,
               "without this a long run cannot be stopped")
         check("a cancel lists the diffs that did arrive",
-              "Cancelled" in ui and "diff" in ui,
+              "Cancelled" in ui_flat and "diff" in ui_flat,
               "work already done should not be thrown away")
         check("cancel does not treat an interrupted diff as ready",
               "status: 'pending', message: 'Cancelled'" in ui.replace('"', "'")
-              or "Cancelled" in ui,
+              or "Cancelled" in ui_flat,
               "a diff generated after the cancel was never reviewed")
 
         # Two buttons both labelled "Cancel" — one threw the plan away, the
@@ -612,7 +623,7 @@ async def run():
               "Number(r?.concurrency) || 1" in ui,
               "a missing field must be the slow-but-safe answer")
         check("a single-generation provider is described as one at a time",
-              "one at a time" in ui,
+              "one at a time" in ui_flat,
               "the wait should be explained, not hidden")
 
         # Lazy diffs: the bulk path is for small plans only.
@@ -633,17 +644,15 @@ async def run():
         # The composer disappearing was the "chat area is not shown" report: a
         # failed bind left `bound` false, and the panel was gated on it.
         #
-        # Strip JSX comments first, then count render sites. Without the strip,
-        # the fix's own comment — which quotes `{bound && askPanel}` to explain
-        # what changed — matched and reported a bug that was already fixed.
-        import re as _re3
-        code_only = _re3.sub(r"\{/\*.*?\*/\}", "", ui, flags=_re3.DOTALL)
-        render_sites = _re3.findall(r"\{[^{}]*askPanel\}", code_only)
-        check("the composer renders in both states, ungated on bind",
-              len(render_sites) == 2
-              and all("bound &&" not in s for s in render_sites),
-              f"render sites: {render_sites} — a failed bind used to remove the "
-              f"whole message area, so the symptom looked like a layout bug")
+        # The page was later rebuilt around a single composer that is rendered
+        # UNCONDITIONALLY, which is a stronger version of the same fix — there
+        # is no gate left to get wrong. Asserted as such rather than by counting
+        # render sites, which only described the old two-state layout.
+        check("the composer is not gated on a bound workspace",
+              re.search(r"\{\s*bound\s*&&\s*[A-Za-z]*[Cc]omposer", ui) is None
+              and re.search(r"\{\s*bound\s*&&\s*askPanel", ui) is None,
+              "a failed bind used to remove the whole message area, so the "
+              "symptom looked like a layout bug")
         check("a bind failure is shown beside the composer",
               "bindError" in ui and "pick another folder" in ui,
               "the error was only in the tree header, far from what it disabled")
@@ -659,7 +668,8 @@ async def run():
         # recall or chat history. A request needing a web search, an MCP tool or
         # a second file works in Chat and not here.
         check("the composer states what it can and cannot do",
-              "cannot run other tools" in ui and "Reads and searches" in ui,
+              "cannot run other tools" in ui_flat
+              and "Reads and searches" in ui_flat,
               "it looks identical to the chat box but is much narrower")
         check("and points at Chat for the wider toolbox",
               'href="/chat"' in ui,

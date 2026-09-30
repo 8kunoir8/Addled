@@ -354,6 +354,30 @@ async function createWindow() {
           return;
         }
 
+        // Next's static export writes a route's RSC payload to
+        //   <route>/__next.<route>/__PAGE__.txt
+        // but the client REQUESTS it as
+        //   <route>/__next.<route>.__PAGE__.txt
+        // — dot-joined, not slash-joined. The root route happens to have the
+        // dot form (__next.__PAGE__.txt) so it always worked, and only
+        // sub-routes 404'd. The visible effect was not a broken page: it was
+        // every sidebar prefetch failing, which silently downgrades Next's
+        // client-side navigation to a full page load.
+        //
+        // Mapped explicitly rather than by rewriting every dot, because a real
+        // filename may legitimately contain one.
+        if (!fs.existsSync(filePath)) {
+          const dotRsc = /^(.*\/)?(__next\.[^/]+)\.(__PAGE__|_full|_tree)\.txt$/
+            .exec(urlPath);
+          if (dotRsc) {
+            const candidate = path.resolve(
+              root, '.' + (dotRsc[1] || '/') + dotRsc[2] + '/' + dotRsc[3] + '.txt');
+            if (isInside(candidate) && fs.existsSync(candidate)) {
+              filePath = candidate;
+            }
+          }
+        }
+
         if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
           // trailing-slash export → dir/index.html; else Next puts file.html
           // at the top level (e.g. /settings → settings.html)

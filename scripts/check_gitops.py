@@ -97,6 +97,46 @@ def run():
         check("status lists an untracked file", "c.py" in st.get("untracked", []),
               str(st))
 
+        # A MODIFIED tracked file, which is the case that was broken.
+        #
+        # `git status --porcelain` pads the status to a fixed two columns, so a
+        # file modified only in the working tree reports as `" M name"` — the
+        # LEADING SPACE IS A STATUS COLUMN, not indentation. Stripping the whole
+        # output (which `_run` used to do) turned that into `"M name"`, shifted
+        # every field one place left, and made the path come back with its first
+        # two characters missing: `app.py` was reported as `pp.py`. It only ever
+        # bit the FIRST line, which is why it survived every other test here.
+        (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+        st_m = gitops.status(repo)
+        check("a working-tree-modified file is listed as changed",
+              "a.py" in st_m.get("changed", []),
+              f"changed={st_m.get('changed')!r} — a leading-space status "
+              f"(' M a.py') was being stripped to 'M a.py'")
+        check("no reported path lost its first characters",
+              all(not (len(p) < 4) for p in st_m.get("changed", [])),
+              f"changed={st_m.get('changed')!r}")
+        # The same shape for an index-only change (`M ` — trailing space), so
+        # both columns are exercised rather than only the one that broke.
+        _git(repo, "add", "a.py")
+        st_i = gitops.status(repo)
+        check("a staged-only change is also listed correctly",
+              "a.py" in st_i.get("changed", []),
+              f"changed={st_i.get('changed')!r}")
+        _git(repo, "reset", "-q")
+        _git(repo, "checkout", "--", "a.py")
+
+        # The diff must be git's own text, not a trimmed approximation: the page
+        # renders these lines verbatim and a stripped first line would show
+        # something git never printed.
+        (repo / "a.py").write_text("x = 7\n", encoding="utf-8")
+        d0 = gitops.diff(repo)
+        check("a diff keeps git's own first line",
+              d0.lstrip().startswith("diff --git"), repr(d0[:60]))
+        check("a diff is not stripped at the front",
+              not d0.startswith("\n") and d0 == d0.rstrip("\r\n"),
+              repr(d0[:40]))
+        _git(repo, "checkout", "--", "a.py")
+
         # ---- revert -----------------------------------------------------
         before = (repo / "a.py").read_text(encoding="utf-8")
         rev = gitops.revert_commit(repo, com["sha"])

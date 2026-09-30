@@ -39,12 +39,22 @@ log = logging.getLogger("addled.codemode.git")
 # command gets, but still bounded so a hung git cannot hang a code turn.
 _TIMEOUT = 20
 
-def _run(repo: str | Path, *args: str) -> tuple[bool, str]:
+def _run(repo: str | Path, *args: str,
+         raw: bool = False) -> tuple[bool, str]:
     """Run `git <args>` in `repo`. Returns (ok, output).
 
     Never raises: a missing git binary, a permission problem and a non-repo
     directory all come back as (False, reason), because every caller treats git
     as optional.
+
+    `raw=True` keeps the output exactly as git wrote it. That matters because
+    the default strips it, and `git status --porcelain` uses a FIXED TWO-COLUMN
+    status field — a leading space is the "unchanged in the index" column, not
+    padding. Stripping turned `" M app.py"` into `"M app.py"`, which shifted
+    every field by one and reported the file as `"pp.py"`: the first two
+    characters of the path, gone, and only ever on the first line. Only the
+    callers that parse fixed columns need this; everything else wants the
+    trimmed text.
     """
     try:
         proc = subprocess.run(
@@ -60,7 +70,11 @@ def _run(repo: str | Path, *args: str) -> tuple[bool, str]:
         return False, str(e)
     if proc.returncode != 0:
         return False, (proc.stderr or proc.stdout or "").strip()
-    return True, (proc.stdout or "").strip()
+    out = proc.stdout or ""
+    if raw:
+        # Trailing newlines only; the LEADING whitespace is data.
+        return True, out.rstrip("\r\n")
+    return True, out.strip()
 
 def available() -> bool:
     """Whether a usable git is on PATH."""
@@ -83,15 +97,26 @@ def status(path: str | Path) -> dict:
     """A short summary of what is uncommitted, for the UI to show."""
     if not is_repo(path):
         return {"isRepo": False, "available": available()}
-    ok, out = _run(path, "status", "--porcelain")
+    # `raw=True`: the porcelain format is `XY<space>path` with a FIXED-width
+    # two-character status field, so the leading space is data. Trimming it made
+    # `" M app.py"` parse as `"M app.py"` and the path come back as `"pp.py"`.
+    ok, out = _run(path, "status", "--porcelain", raw=True)
     if not ok:
         return {"isRepo": True, "error": out}
     changed, untracked = [], []
     for line in out.splitlines():
         if not line.strip():
             continue
-        code, _, name = line[:2], line[2:3], line[3:]
-        (untracked if code == "??" else changed).append(name.strip())
+        # Renames are reported as `old -> new`; the NEW name is the one that
+        # exists now, so that is what the user should be shown and what a later
+        # `git restore`/`read` needs.
+        name = line[3:]
+        if " -> " in name:
+            name = name.rsplit(" -> ", 1)[-1]
+        name = name.strip().strip('"')
+        if not name:
+            continue
+        (untracked if line[:2] == "??" else changed).append(name)
     branch_ok, branch = _run(path, "rev-parse", "--abbrev-ref", "HEAD")
     return {
         "isRepo": True,
@@ -170,7 +195,10 @@ def diff(path: str | Path, files: list[str] | None = None,
         args.append("--cached")
     if files:
         args.extend(["--", *files])
-    ok, out = _run(path, *args)
+    # `raw=True` because a diff's leading whitespace is content: a stripped
+    # leading blank line or indentation would show the user a diff that is not
+    # the one git produced, and the page renders these lines verbatim.
+    ok, out = _run(path, *args, raw=True)
     return out if ok else ""
 
 def restore(path: str | Path, files: list[str]) -> dict:

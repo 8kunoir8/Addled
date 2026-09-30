@@ -149,3 +149,109 @@ export interface AppSettings {
     show_character_state: boolean;
   };
 }
+
+// Code page -----------------------------------------------------------------
+// These mirror what `backend/ws_server.py` actually returns. The Code page used
+// to type every one of these as `any` and read only the fields it needed, which
+// is how it came to discard the `git` and `verify` results the backend was
+// already computing — an untyped response cannot go visibly unused.
+
+/** `code.git.status` — mirrors `backend/codemode/gitops.py:status`. */
+export interface CodeGitStatus {
+  isRepo: boolean;
+  /** Whether a `git` binary was found at all. False on a machine without git. */
+  available?: boolean;
+  branch?: string;
+  changed?: string[];
+  untracked?: string[];
+  clean?: boolean;
+  error?: string;
+}
+
+/** `code.git.diff` — `{ diff }` around `gitops.diff`. */
+export interface CodeGitDiff {
+  diff: string;
+  error?: string;
+}
+
+/** `code.git.revert` — note `success`, not `ok`; the ws layer renames it. */
+export interface CodeGitRevert {
+  success: boolean;
+  /** The new inverse commit's sha, so the undo is itself revertible. */
+  sha?: string;
+  error?: string;
+}
+
+/**
+ * `code.verify` / the `verify` field of `code.applyPlan` — mirrors
+ * `backend/codemode/verify.py:run_verification` plus `verdict_line`.
+ */
+export interface CodeVerifyResult {
+  ok: boolean;
+  /** False when no check could be detected, which is not the same as passing. */
+  ran: boolean;
+  command?: string;
+  kind?: string;
+  reason?: string;
+  /**
+   * True when the check RAN but collected no tests.
+   *
+   * Different from a failure: most runners exit non-zero when they find
+   * nothing, so without this the UI would tell the user their code is broken
+   * when in fact there was simply nothing to run.
+   */
+  noTests?: boolean;
+  /** A ready-to-render sentence from `verdict_line`. */
+  verdict?: string;
+  output?: string;
+}
+
+/** One file that `code.applyPlan` actually wrote. */
+export interface CodeAppliedFile {
+  index: number;
+  filePath: string;
+  created?: boolean;
+  /** The `.bak` beside the file, when a backup was kept. */
+  backup?: string;
+}
+
+/** A file that was refused, or never reached because an earlier step failed. */
+export interface CodeSkippedFile {
+  index: number;
+  filePath: string;
+  reason: string;
+}
+
+/**
+ * `code.git` inside a `code.applyPlan` response: whether Addled committed the
+ * change, and which commit, so the UI can offer "undo this" and name what
+ * `git log` will show.
+ */
+export interface CodeGitCommitInfo {
+  used: boolean;
+  sha?: string;
+  reason?: string;
+}
+
+/** `code.applyPlan` — mirrors `code_apply_plan` in `ws_server.py`. */
+export interface CodeApplyPlanResult {
+  applied: CodeAppliedFile[];
+  skipped: CodeSkippedFile[];
+  failed: { index: number; filePath: string; reason: string } | null;
+  error?: string;
+  count?: number;
+  /** Already returned by the backend; the page must not ignore it. */
+  git?: CodeGitCommitInfo;
+  verify?: CodeVerifyResult;
+}
+
+/** `code.apply` — the single-file variant, which reports the same two fields. */
+export interface CodeApplyResult {
+  success: boolean;
+  created?: boolean;
+  backup?: string;
+  error?: string;
+  git?: CodeGitCommitInfo;
+  verify?: CodeVerifyResult;
+}
+

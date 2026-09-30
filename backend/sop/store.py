@@ -30,6 +30,24 @@ MAX_TOOLS = 24
 # The stored "why". Kept short because it is read back on every match and
 # injected into the prompt alongside the steps.
 MAX_REASON_CHARS = 300
+# A guard is a precondition that must hold before a procedure's destructive step
+# runs — "the target already exists", "the output is not the source". They are
+# checked by code, not injected as advice, so a small number is enough and each
+# one has to be machine-readable.
+MAX_GUARDS = 8
+MAX_GUARD_CHARS = 200
+# Learned procedures are capped. Seeding is bounded and the user's own entries
+# are deliberate, but LEARNING has no natural limit: it writes one procedure per
+# distinct successful task, so a long-lived install accumulates them forever.
+# That is not just clutter — matching refuses when two procedures are too close
+# to call, so a store full of near-duplicates makes the matcher refuse tasks it
+# would otherwise have answered. Observed live: six procedures left by a test
+# run went on to outscore the built-ins and caused real tasks to be refused.
+#
+# The cap applies to `source: "learned"` only. Seeds are never pruned (they are
+# the built-ins) and neither are manual entries (the user typed them), so a user
+# who writes their own procedures can exceed this without losing any.
+MAX_LEARNED = 200
 
 CATEGORY_RE = re.compile(r"[^a-z0-9_ -]+")
 
@@ -123,6 +141,28 @@ def _clean_tools(tools) -> list[str]:
             break
     return out
 
+def _clean_guards(guards) -> list[str]:
+    """Preconditions attached to a procedure.
+
+    A guard is prose for a human to read and a marker for code to act on, so it
+    is stored as written rather than parsed here — enforcement lives at the point
+    a destructive step would run, and this only has to keep them clean and
+    bounded. A newline-separated string is accepted because that is how one
+    arrives from the skill interface.
+    """
+    if isinstance(guards, str):
+        guards = [g.strip() for g in guards.split("\n")]
+    if not isinstance(guards, (list, tuple)):
+        return []
+    out = []
+    for guard in guards:
+        text = str(guard or "").strip()
+        if text and text not in out:
+            out.append(text[:MAX_GUARD_CHARS])
+        if len(out) >= MAX_GUARDS:
+            break
+    return out
+
 
 def _clean_sop(raw: dict, existing: dict | None = None) -> dict:
     existing = existing or {}
@@ -134,12 +174,15 @@ def _clean_sop(raw: dict, existing: dict | None = None) -> dict:
                          else existing.get("steps"))
     tools = _clean_tools(raw.get("tools") if "tools" in raw
                          else existing.get("tools"))
+    guards = _clean_guards(raw.get("guards") if "guards" in raw
+                           else existing.get("guards"))
     sop = {
         "id": str(existing.get("id") or raw.get("id") or uuid.uuid4().hex[:12]),
         "category": category,
         "title": title[:MAX_TITLE_CHARS],
         "steps": steps,
         "tools": tools,
+        "guards": guards,
         # Why this route was chosen, taken from the context the turn ran with.
         # Empty for seeds and for anything learned before this field existed;
         # `_clean_sop` keeps them loadable rather than rejecting the file.
@@ -168,7 +211,7 @@ def _clean_sop(raw: dict, existing: dict | None = None) -> dict:
 
 
 def _empty() -> dict:
-    return {"version": VERSION, "sops": []}
+    return {"version": VERSION, "sops": [], "removed_seeds": []}
 
 
 def load() -> dict:
@@ -196,8 +239,20 @@ def load() -> dict:
             continue
         if "reason" not in raw:
             raw = {**raw, "reason": ""}
+        if "guards" not in raw:
+            # Records written before guards existed. Defaulted here as well as
+            # in `_clean_sop` because that only runs on the way IN, and an
+            # existing store never passes through it.
+            raw = {**raw, "guards": []}
         sops.append(raw)
-    return {"version": VERSION, "sops": sops}
+    # Carried through explicitly: `removed_seeds` records which seeds the user
+    # deleted, and dropping it here would let them all come back on the next
+    # start — the top-up would silently undo a deliberate deletion.
+    removed = data.get("removed_seeds")
+    if not isinstance(removed, list):
+        removed = []
+    return {"version": VERSION, "sops": sops,
+            "removed_seeds": [str(k) for k in removed]}
 
 
 def save(data: dict) -> None:
@@ -205,7 +260,8 @@ def save(data: dict) -> None:
     file = path()
     try:
         file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": VERSION, "sops": list(data.get("sops") or [])}
+        payload = {"version": VERSION, "sops": list(data.get("sops") or []),
+                   "removed_seeds": list(data.get("removed_seeds") or [])}
         tmp = file.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                        encoding="utf-8")
@@ -312,11 +368,98 @@ def _trim(sops: list[dict], category: str) -> None:
 def delete(sop_id: str) -> bool:
     data = load()
     before = len(data["sops"])
+    gone = next((s for s in data["sops"] if s.get("id") == sop_id), None)
     data["sops"] = [s for s in data["sops"] if s.get("id") != sop_id]
     if len(data["sops"]) == before:
         return False
+    # Remember the deletion by TITLE, not just the id.
+    #
+    # Seeds are topped up on every start now, so a deleted one would otherwise
+    # come straight back — an instruction the user gave and the app ignored. The
+    # id is not enough to suppress that: a re-seed mints a fresh id, which is why
+    # the record is keyed on category+title, the same pair seeding matches on.
+    if gone and str(gone.get("source") or "") == "seed":
+        key = f"{gone.get('category')}//{str(gone.get('title') or '').lower()}"
+        removed = data.setdefault("removed_seeds", [])
+        if key not in removed:
+            removed.append(key)
     save(data)
     return True
+
+def removed_seed_keys() -> set[str]:
+    """Seeds the user has deleted, which must not be re-added."""
+    try:
+        data = load()
+    except Exception:  # noqa: BLE001
+        return set()
+    return {str(k) for k in (data.get("removed_seeds") or [])}
+
+def tombstone_seed(category: str, title: str) -> bool:
+    """Record a seed as not-to-be-seeded, without deleting anything.
+
+    `delete` can only tombstone a procedure it is removing, which is no use for
+    a built-in that a later version simply stopped shipping: there is nothing to
+    remove on a fresh install, and on an old one the removal and the record
+    should not be forced to happen together. Returns whether the record was new.
+    """
+    try:
+        data = load()
+        key = seed_key(category, title)
+        removed = data.setdefault("removed_seeds", [])
+        if key in removed:
+            return False
+        removed.append(key)
+        save(data)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.debug("Could not tombstone seed %s/%s: %s", category, title, e)
+        return False
+
+def seed_key(category: str, title: str) -> str:
+    return f"{clean_category(category)}//{str(title or '').lower()}"
+
+def prune_learned(limit: int = MAX_LEARNED) -> int:
+    """Drop the least useful learned procedures beyond `limit`. Returns how many.
+
+    Ranked by a use ratio shrunk toward 0.5, so a procedure that has worked
+    consistently outranks one that succeeded once, and then by recency. A
+    procedure that was learned and never applied is the cheapest thing to lose,
+    and that is exactly what a run that was recorded once and never repeated
+    leaves behind.
+
+    Only `source: "learned"` is considered. Seeds and anything the user wrote by
+    hand are exempt, so this can never remove a built-in or the user's own work.
+    """
+    try:
+        data = load()
+        learned = [s for s in data["sops"] if s.get("source") == "learned"]
+        if len(learned) <= limit:
+            return 0
+
+        def keeper_rank(sop: dict) -> tuple[float, str]:
+            uses = int(sop.get("uses") or 0)
+            wins = int(sop.get("successes") or 0)
+            ratio = (wins + 1.0) / (uses + 2.0) if uses else 0.5
+            # Weighted by how often it has actually been used, so a 100%-of-2
+            # recipe does not outrank a 90%-of-50 one.
+            return (ratio * (1.0 + min(uses, 20) / 20.0),
+                    str(sop.get("updated") or sop.get("created") or ""))
+
+        ranked = sorted(learned, key=keeper_rank, reverse=True)
+        keep_ids = {str(s.get("id")) for s in ranked[:limit]}
+        before = len(data["sops"])
+        data["sops"] = [s for s in data["sops"]
+                        if s.get("source") != "learned"
+                        or str(s.get("id")) in keep_ids]
+        dropped = before - len(data["sops"])
+        if dropped:
+            save(data)
+            log.info("Pruned %d learned procedure(s) over the cap of %d",
+                     dropped, limit)
+        return dropped
+    except Exception as e:  # noqa: BLE001
+        log.debug("Could not prune learned procedures: %s", e)
+        return 0
 
 
 def record_use(sop_id: str, success: bool = True) -> None:

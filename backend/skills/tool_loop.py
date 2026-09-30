@@ -211,6 +211,7 @@ async def chat_with_tools(
     model: str | None = None,
     tools: list[str] | None = None,
     reply_directive: str = "",
+    learn: bool = True,
 ) -> dict:
     """
     Run a chat completion with automatic tool execution.
@@ -235,6 +236,16 @@ async def chat_with_tools(
     same message and is thousands of tokens of English, which is enough to make
     a small model answer in English whatever the system prompt said. See
     backend/language.py.
+
+    ``learn=False`` stops this turn from being recorded as a procedure.
+    A caller that runs the model for its OWN reasons must use it: the Code
+    page's planner makes two internal calls (search, then plan) that the user
+    never sees, and every one of them used to be learned as if it were a task
+    the user had asked for. The result was a store slowly filling with recipes
+    titled after prompts like "do something", which then competed with the real
+    built-ins when matching. `record=False` on the pipeline already stops the
+    history, memory and journal writes; this is the same switch for learning,
+    which lives here and so could not see that flag.
     """
     provider_id = getattr(provider, "provider_id", "unknown")
     uses_native = (
@@ -314,7 +325,8 @@ async def chat_with_tools(
                     hint += "\n\nWhat you wrote was:\n" + unreadable[0][:400]
                     full_messages.append({"role": "user", "content": hint})
                     continue
-                _learn_procedure(messages, all_tool_results, system_prompt)
+                if learn:
+                    _learn_procedure(messages, all_tool_results, system_prompt)
                 return {
                     "response": ("I tried to call a tool for that, but the "
                                  "call could not be read, so nothing ran — "
@@ -325,8 +337,9 @@ async def chat_with_tools(
                     "tool_results": all_tool_results,
                     "unreadable": unreadable,
                 }
-            _learn_procedure(messages, all_tool_results
-                             or result.get("tool_results", []), system_prompt)
+            if learn:
+                _learn_procedure(messages, all_tool_results
+                                 or result.get("tool_results", []), system_prompt)
             return {
                 "response": result.get("response", ""),
                 "tokens": result.get("tokens", 0),
@@ -451,8 +464,9 @@ async def chat_with_tools(
     # Round cap reached: force one final answer from the gathered results.
     final = await _final_answer(tool_results if tool_results else [])
     if final is not None:
-        _learn_procedure(messages, all_tool_results or tool_results,
-                         system_prompt)
+        if learn:
+            _learn_procedure(messages, all_tool_results or tool_results,
+                             system_prompt)
         return final
 
     return {

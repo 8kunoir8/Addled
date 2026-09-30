@@ -122,6 +122,44 @@ async def run():
         s3 = verify._summarise("no counts here")
         check("an unparseable summary yields no counts", s3 == {}, str(s3))
 
+        # ---- "ran but found nothing" is not "the tests failed" -------------
+        #
+        # Most runners exit non-zero when they collect no tests, so a check that
+        # only looked at the exit code would tell the user their change broke
+        # the tests when the project simply has none. The Code page renders the
+        # verdict directly, so the wording is asserted, not just the flag.
+        empty_proj = tmp / "empty_tests"
+        (empty_proj / "tests").mkdir(parents=True)
+        (empty_proj / "tests" / "test_none.py").write_text(
+            "import unittest\n", encoding="utf-8")
+        det_e = verify.detect_command(empty_proj)
+        if det_e.get("command"):
+            res_e = await verify.run_verification(
+                empty_proj, command=det_e["command"])
+            if res_e.get("ran") and not res_e.get("ok"):
+                check("a run that collects nothing is flagged",
+                      res_e.get("noTests") is True, str(res_e)[:300])
+                line = verify.verdict_line(res_e)
+                check("and the verdict says 'no tests', not 'failed'",
+                      "no tests" in line.lower(), line)
+                check("and it does not claim a test failure",
+                      "failed with exit code" not in line.lower(), line)
+            else:
+                print("  (empty project unexpectedly passed; nothing to assert)")
+        else:
+            print("  (no runner detected for an empty project; skipped)")
+
+        # A genuine failure must NOT be labelled "no tests", or the distinction
+        # would be worse than useless.
+        fake = {"ran": True, "ok": False, "command": "pytest",
+                "exit_code": 1, "summary": {"failed": 2}}
+        check("a real failure is not labelled 'no tests'",
+              "no tests" not in verify.verdict_line(fake).lower(),
+              verify.verdict_line(fake))
+        check("a passing run is never flagged as no-tests",
+              verify._found_no_tests("3 passed in 0.2s", {"passed": 3}) is False,
+              "a pass must be unreachable by the no-tests path")
+
         # ---- explicit command overrides detection --------------------------
         res = await verify.run_verification(
             empty, command='node -e "process.exit(0)"')
