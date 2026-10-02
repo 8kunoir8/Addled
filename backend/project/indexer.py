@@ -14,7 +14,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.project.indexer")
 
-STATE_PATH = Path(__file__).resolve().parent.parent / "memory" / "integrations" \
+from backend import app_paths
+
+STATE_PATH = app_paths.subdir("integrations") \
     / "project_index_state.json"
 
 CODE_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".md",

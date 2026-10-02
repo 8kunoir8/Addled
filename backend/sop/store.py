@@ -65,7 +65,8 @@ def base_dir() -> Path:
         custom = ""
     if custom:
         return Path(custom)
-    return Path(__file__).resolve().parent.parent / "memory" / "sop"
+    from backend import app_paths
+    return app_paths.subdir("sop")
 
 
 def path() -> Path:

@@ -29,7 +29,9 @@ from backend.skills.registry import SkillDefinition, skill_registry
 
 log = logging.getLogger("addled.forge")
 
-FORGE_DIR = Path(__file__).parent.parent / "memory" / "forged_skills"
+from backend import app_paths
+
+FORGE_DIR = app_paths.subdir("forged_skills")
 FORGE_DIR.mkdir(parents=True, exist_ok=True)
 
 

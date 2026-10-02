@@ -29,10 +29,12 @@ class EgressMonitor:
         if self._log_path is not None:
             return self._log_path
         try:
-            from backend.config import config
-            data_dir = config.data_dir if hasattr(config, "data_dir") else \
-                pathlib.Path(__file__).resolve().parent.parent / "memory"
-            path = pathlib.Path(data_dir) / "egress.jsonl"
+            # `app_paths` is the one authority on where writable state lives.
+            # This used to prefer a `config.data_dir` attribute that was never
+            # defined and otherwise fell back to the install-local `memory/`,
+            # which is denied under `Program Files`.
+            from backend import app_paths
+            path = app_paths.MEMORY_DIR / "egress.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
             self._log_path = path
             return path

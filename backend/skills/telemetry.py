@@ -9,7 +9,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.skills.telemetry")
 
-TELEMETRY_PATH = Path(__file__).resolve().parent.parent / "memory" \
+from backend import app_paths
+
+TELEMETRY_PATH = app_paths.MEMORY_DIR \
     / "integrations" / "skill_telemetry.json"
 
 

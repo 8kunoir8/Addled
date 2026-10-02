@@ -44,7 +44,8 @@ def _dir() -> Path:
             return Path(os.path.expandvars(os.path.expanduser(custom)))
     except Exception as e:  # noqa: BLE001
         log.debug("could not read bots.history_dir: %s", e)
-    return Path(__file__).resolve().parent.parent / "memory" / "bot_history"
+    from backend import app_paths
+    return app_paths.subdir("bot_history")
 
 def _file() -> Path:
     return _dir() / "history.json"

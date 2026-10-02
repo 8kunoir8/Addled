@@ -14,7 +14,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.reflection")
 
-STATE_PATH = Path(__file__).resolve().parent.parent / "memory" \
+from backend import app_paths
+
+STATE_PATH = app_paths.MEMORY_DIR \
     / "integrations" / "reflection_state.json"
 
 

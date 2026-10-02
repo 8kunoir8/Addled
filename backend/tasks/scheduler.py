@@ -20,7 +20,9 @@ from backend.tasks.store import task_store
 
 log = logging.getLogger("addled.tasks.scheduler")
 
-STATE_PATH = Path(__file__).resolve().parent.parent / "memory" / "integrations" \
+from backend import app_paths
+
+STATE_PATH = app_paths.subdir("integrations") \
     / "scheduler_state.json"
 
 MISSED_GRACE_S = 300  # beyond this, missed-policy applies

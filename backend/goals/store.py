@@ -12,7 +12,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.goals.store")
 
-STORE_DIR = Path(__file__).parent.parent / "memory" / "goals"
+from backend import app_paths
+
+STORE_DIR = app_paths.subdir("goals")
 
 
 class GoalStore:

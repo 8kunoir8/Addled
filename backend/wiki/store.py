@@ -49,7 +49,8 @@ def base_dir() -> Path:
         custom = ""
     if custom:
         return Path(custom)
-    return Path(__file__).resolve().parent.parent / "memory" / "wiki"
+    from backend import app_paths
+    return app_paths.subdir("wiki")
 
 
 def pages_dir() -> Path:

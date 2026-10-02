@@ -15,7 +15,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.project.patterns")
 
-STATE_PATH = Path(__file__).resolve().parent.parent / "memory" / "integrations" \
+from backend import app_paths
+
+STATE_PATH = app_paths.subdir("integrations") \
     / "patterns_state.json"
 
 WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",

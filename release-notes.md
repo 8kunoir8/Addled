@@ -1,3 +1,68 @@
+# Addled 1.0.28
+
+**The backend could not start when Addled was installed to `C:\Program Files`.**
+This release fixes that. If 1.0.27 left you with a character that says "Backend
+not running", this is the fix.
+
+## The bug
+
+Every writable thing the app owns — its log, `settings.json`, the memory
+databases, the wiki, downloaded models, learned skills — was written **beside the
+code**, in `backend/memory/`. That only works when the install directory is
+writable, which it was while the installer placed Addled in your own user folder.
+
+If you chose (or the installer defaulted to) `C:\Program Files`, that is an
+administrator-only location, and the backend died on its first act:
+
+```
+PermissionError: [Errno 13] Permission denied:
+'C:\Program Files\Addled\resources\backend\memory\addled.log'
+```
+
+Nothing in the UI said why. The dashboard showed **Backend not running** and the
+status dot went red, which looks like a broken install rather than a permissions
+problem.
+
+## The fix
+
+One module — `backend/app_paths.py` — now decides where Addled's data lives, and
+nineteen separate files that each computed their own `memory/` path use it.
+
+- **Writable install → unchanged.** If the install directory can be written,
+data stays exactly where it has always been. Existing portable and per-user
+installs are not moved.
+- **Read-only install → falls back to your user folder.**
+`%LOCALAPPDATA%\Addled` on Windows, `~/.local/share/addled` elsewhere, and the
+startup log names which one it chose:
+
+```
+Data: C:\Users\you\AppData\Local\Addled (portable=False)
+```
+
+- **Your existing data is brought across.** An install that upgrades from
+"writes beside itself" finds its old `memory/` copied into the new location once,
+on first run. Nothing is deleted, existing files are never overwritten, and an
+interrupted copy simply runs again next time — so a downgrade still finds the
+original.
+- **The writability test is a real write, not `os.access`.** On Windows
+`os.access` reports `Program Files` as writable because the denial comes from an
+ACL it does not consult. A test write is the only answer that is true.
+- **`ADDLED_DATA_DIR`** overrides the whole thing if you want Addled's state
+somewhere specific.
+
+## Verified
+
+- Reproduced the failure by making an install directory write-denied, then
+  confirmed the fixed backend starts from it and writes its log and settings to
+  the fallback location.
+- `scripts/check_data_dir.py` is new and covers the resolver, the real-write
+  probe, the fallback, the override, migration (including "do not overwrite" and
+  "run twice"), and a guard that no module starts computing its own `memory/`
+  path again.
+- `scripts/check_all.py` runs 69 suites, all green.
+
+---
+
 # Addled 1.0.27
 
 The dashboard becomes a **frameless bubble window** — no OS title bar, no menu —

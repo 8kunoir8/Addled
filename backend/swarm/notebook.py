@@ -61,7 +61,9 @@ def _lock_for(path: Path) -> threading.Lock:
             _locks[key] = lock
         return lock
 
-_DIR = Path(__file__).resolve().parent.parent / "memory" / "swarm" / "notebooks"
+from backend import app_paths
+
+_DIR = app_paths.subdir("swarm", "notebooks")
 
 # How many entries one notebook keeps verbatim before the oldest are folded
 # into the summary. Chosen to be more than a normal run produces, so the fold

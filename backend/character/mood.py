@@ -20,7 +20,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.mood")
 
-MOOD_PATH = Path(__file__).resolve().parent.parent / "memory" / "mood.json"
+from backend import app_paths
+
+MOOD_PATH = app_paths.MEMORY_DIR / "mood.json"
 
 
 def _mood_name(valence: float, energy: float) -> str:

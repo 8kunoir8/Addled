@@ -60,6 +60,7 @@ SUITES = [
     "check_decision_surfaces.py",
     "check_bubble_state.py",
     "check_open_question.py",
+    "check_data_dir.py",
     "check_anchored.py",
     "check_gitops.py",
     "check_session.py",

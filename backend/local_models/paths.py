@@ -1,9 +1,11 @@
 """
 Filesystem locations for Addled's on-demand local models.
 
-Everything lives under ``backend/memory/models/`` so the app stays portable —
-in the installed app that resolves to
-``<install>\\resources\\backend\\memory\\models\\``.
+Everything lives under the app's writable data directory, so the app stays
+portable when it can be, and falls back to the user's own folder when it is
+installed somewhere it cannot write (a per-machine install under
+``Program Files``). `backend.app_paths` decides which; this module only derives
+from its answer, and must not compute a path of its own.
 """
 
 from __future__ import annotations
@@ -12,9 +14,9 @@ import shutil
 import socket
 from pathlib import Path
 
-from backend.config import SETTINGS_PATH, config
+from backend.app_paths import MEMORY_DIR
+from backend.config import config
 
-MEMORY_DIR = SETTINGS_PATH.parent
 MODELS_DIR = MEMORY_DIR / "models"
 LLAMAFILE_DIR = MODELS_DIR / "llamafile"
 HF_HOME_DIR = MODELS_DIR / "hf"

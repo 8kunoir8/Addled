@@ -1,8 +1,10 @@
 """
 Addled — portable JSON settings facade.
 
-Reads/writes backend/memory/settings.json.
-No registry, no system paths. Fully portable.
+Reads/writes the app's settings file. Which file that is comes from
+`backend.app_paths`, not from this module: the app can be installed somewhere it
+cannot write (a per-machine install under ``Program Files``), so "beside
+ourselves" is a preference, not a guarantee.
 
 Default provider: DeepSeek (https://api.deepseek.com).
 """
@@ -17,17 +19,26 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from backend import app_paths
+
 log = logging.getLogger("addled.config")
 
 # ---- root resolution ---------------------------------------------------------
 
-if getattr(sys, "frozen", False):
-    _ROOT = Path(sys.executable).parent
-else:
-    _ROOT = Path(__file__).parent  # backend/
+# The writable data directory, chosen by `app_paths` (its docstring has the
+# rule). Historically this was always the install-local `memory/`, which worked
+# only because the installer was per-user.
+_MEMORY = app_paths.MEMORY_DIR
 
-_MEMORY = _ROOT / "memory"
-_MEMORY.mkdir(parents=True, exist_ok=True)
+
+def memory_dir() -> Path:
+    """Where Addled's own state lives, right now.
+
+    A function as well as the module constant, so a caller can ask after a test
+    has redirected `ADDLED_DATA_DIR` rather than reading a stale import.
+    """
+    return app_paths.MEMORY_DIR
+
 
 SETTINGS_PATH = _MEMORY / "settings.json"
 

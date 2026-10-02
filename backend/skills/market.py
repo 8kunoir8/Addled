@@ -35,7 +35,9 @@ from backend.skills.registry import SkillDefinition, skill_registry
 
 log = logging.getLogger("addled.market")
 
-MARKET_DIR = Path(__file__).parent.parent / "memory" / "market_skills"
+from backend import app_paths
+
+MARKET_DIR = app_paths.subdir("market_skills")
 MAX_SKILL_MD = 1024 * 1024
 MAX_SCRIPT = 1024 * 1024
 MAX_FILES = 20

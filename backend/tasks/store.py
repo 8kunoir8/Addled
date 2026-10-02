@@ -13,7 +13,9 @@ log = logging.getLogger("addled.tasks.store")
 
 _now = time.time  # module-level alias: avoids class-body field shadowing
 
-STORE_PATH = Path(__file__).resolve().parent.parent / "memory" / "integrations" \
+from backend import app_paths
+
+STORE_PATH = app_paths.subdir("integrations") \
     / "scheduled_tasks.json"
 
 

@@ -41,7 +41,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.swarm.roster")
 
-_DIR = Path(__file__).resolve().parent.parent / "memory" / "swarm"
+from backend import app_paths
+
+_DIR = app_paths.subdir("swarm")
 ROSTER_PATH = _DIR / "roster.json"
 FEEDBACK_DIR = _DIR / "feedback"
 

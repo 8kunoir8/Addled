@@ -50,7 +50,14 @@ if str(_PROJECT_ROOT) not in sys.path:
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
-os.environ["ADDLED_DATA_DIR"] = str(_BACKEND_ROOT / "memory")
+# `backend.app_paths` decides where writable state lives and publishes the
+# choice as ADDLED_DATA_DIR for child processes. Imported before anything reads
+# a path, because every store resolves through it.
+#
+# This replaced a one-liner that set ADDLED_DATA_DIR to `<backend>/memory`,
+# which was only correct for a per-user install: under `Program Files` the
+# backend could not create its own log file and died before the window appeared.
+from backend import app_paths  # noqa: E402
 
 if getattr(sys, "frozen", False):
     _EXE_DIR = Path(sys.executable).parent
@@ -63,7 +70,7 @@ if getattr(sys, "frozen", False):
 def _setup_logging():
     import logging
     from logging.handlers import RotatingFileHandler
-    log_dir = _BACKEND_ROOT / "memory"
+    log_dir = app_paths.MEMORY_DIR
     log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -84,6 +91,13 @@ def _setup_logging():
 # ---- main -------------------------------------------------------------------
 
 def main():
+    # Bring an install-local `memory/` across before anything reads it, so an
+    # upgrade from a per-user install does not look like a first run.
+    try:
+        app_paths.migrate()
+    except Exception as e:  # noqa: BLE001 - never block startup on migration
+        print(f"[Addled] migration skipped: {e}", file=sys.stderr)
+
     _setup_logging()
     import logging
     log = logging.getLogger("addled")
@@ -95,6 +109,10 @@ def main():
 
     log.info("=== Addled starting (python %s) ===", sys.version.split()[0])
     log.info("Root: %s", _BACKEND_ROOT)
+    # Named at startup because it is the first thing to check when a store looks
+    # empty after an upgrade, and the second when the backend will not start.
+    log.info("Data: %s (portable=%s)", app_paths.DATA_DIR,
+             app_paths.describe()["portable"])
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -357,7 +375,7 @@ def main():
             if in_quiet_hours():
                 return
             state_path = (
-                Path(__file__).resolve().parent / "memory" / "integrations"
+                app_paths.subdir("integrations")
                 / "initiative_state.json")
             today = _t.strftime("%Y-%m-%d")
             try:

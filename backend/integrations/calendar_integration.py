@@ -13,7 +13,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.integrations.calendar")
 
-DATA_DIR = Path(__file__).parent.parent / "memory" / "integrations"
+from backend import app_paths
+
+DATA_DIR = app_paths.subdir("integrations")
 CALENDAR_FILE = DATA_DIR / "calendar_events.json"
 
 

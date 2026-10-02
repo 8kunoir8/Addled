@@ -44,7 +44,9 @@ from pathlib import Path
 log = logging.getLogger("addled.selfmod")
 
 # Staged proposals live here, next to the memory they are recorded in.
-STAGE_DIR = Path(__file__).resolve().parent.parent / "memory" / "selfmod"
+from backend import app_paths
+
+STAGE_DIR = app_paths.subdir("selfmod")
 
 # Paths that may never be self-edited, whatever the instruction says. These are
 # the files that decide what is permitted, or that load everything else — a

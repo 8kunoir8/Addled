@@ -28,7 +28,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.swarm.checkpoints")
 
-_DIR = Path(__file__).resolve().parent.parent / "memory" / "swarm" / "checkpoints"
+from backend import app_paths
+
+_DIR = app_paths.subdir("swarm", "checkpoints")
 
 # How many finished checkpoints are kept. A resumable one is removed once it
 # completes, so this is a bound on the abandoned ones — the flows that were
