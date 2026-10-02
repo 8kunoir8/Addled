@@ -18,6 +18,22 @@ export interface SystemStatus {
   uptime: number;
 }
 
+// Hugging Face (Local) readiness, from localLlm.status -> .hf
+// `deps_ready` covers torch/transformers (enough to chat). `vision_ready`
+// additionally covers einops/timm, which Florence-2 imports at call time —
+// the two can differ, and the UI must not conflate them.
+export interface HfStatus {
+  model_id: string;
+  deps_ready: boolean;
+  error: string;
+  vision_ready: boolean;
+  vision_error: string;
+  vision_missing: string[];
+  downloaded: boolean;
+  root: string;
+  installing: boolean;
+}
+
 export interface Provider {
   id: string;
   name: string;

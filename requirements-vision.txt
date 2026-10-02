@@ -1,0 +1,26 @@
+# Optional: local vision (Florence-2 captioning of screenshots and photos).
+#
+# Deliberately NOT part of requirements-core.txt. The bundled interpreter
+# ships inside the installer, so anything listed there is downloaded by every
+# user — and this block is ~400 MB of torch. Addled runs fine without it:
+# `backend/providers/hf_vision.py` degrades to "no local vision" and cloud
+# providers keep working.
+#
+# Installed on demand by the Settings button (Providers -> Local AI ->
+# Install vision support), which reads THIS file rather than a hardcoded list
+# so the two cannot drift. See `backend/local_llm/manager.py::install_hf_deps`.
+#
+# Installing by hand has one rule: the interpreter runs with `-s`, so user
+# site-packages are invisible to it. Install into the app's own tree:
+#
+#   python.exe -s -m pip install --target "<app>\resources\python\Lib\site-packages" -r requirements-vision.txt
+#
+# einops and timm are not optional details: Florence-2's remote code imports
+# both at call time, so a torch+transformers-only install fails on the first
+# image with "requires einops, timm".
+torch>=2.2.0
+transformers>=4.38.0
+einops>=0.7.0
+timm>=0.9.16
+sentencepiece>=0.1.99
+safetensors>=0.4.2

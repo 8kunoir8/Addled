@@ -103,8 +103,10 @@ echo   dependencies are bundled - no Python install
 echo   needed on the target PC.
 echo.
 echo   Optional extras ^(install on the target PC^):
-echo   - Local vision: torch + transformers ^(~400 MB, model
-echo     downloads on first use^)
+echo   - Local vision: torch + transformers + einops + timm
+echo     ^(~400 MB, model downloads on first use^). Install from
+echo     Settings - Providers - Local AI; the list lives in
+echo     requirements-vision.txt.
 echo   - Browser automation: pip install playwright ^&^&
 echo     playwright install chromium
 echo  ==========================================

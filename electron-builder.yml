@@ -111,6 +111,13 @@ extraResources:
     to: launch.bat
   - from: requirements.txt
     to: requirements.txt
+  # Shipped so the "Install vision support" button can install a declared set
+  # rather than a hardcoded list that drifts from the repository. The bundled
+  # interpreter excludes this block on purpose (~400 MB of torch), so the file
+  # arriving without its packages installed is the intended state — the button
+  # reads it and installs on demand.
+  - from: requirements-vision.txt
+    to: requirements-vision.txt
   - from: python-bundle
     to: python
     filter: ['**/*']

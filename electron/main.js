@@ -305,6 +305,24 @@ async function createWindow() {
     minHeight: 600,
     title: 'Addled',
     icon: path.join(__dirname, 'icons', 'icon.png'),
+    // The window is a bubble, not a window with a title bar. `frame: false`
+    // removes the OS chrome and, with it, the only thing that could drag or
+    // resize the window — so the dashboard draws a header and owns both
+    // (`bubble-header` in dashboard/src/app/layout.tsx is the drag region).
+    // Resizing still comes from the OS edges, which Electron keeps.
+    //
+    // The window stays OPAQUE on purpose. `transparent: true` would let the
+    // rounded corners show the desktop through, but it also brings resize
+    // flicker, shadow artefacts and per-compositor differences for a gain that
+    // is mostly cosmetic — the bubble reads as a bubble because of the radius
+    // and the shadow, both of which can be drawn inside an opaque window. It
+    // can be switched on later by adding `transparent: true` here and
+    // `background: transparent` in globals.css.
+    frame: false,
+    // No menu, and no Alt-to-reveal either. The menu was Electron's stock
+    // template (File/Edit/View/Window/Help) — nothing in it was Addled's — and
+    // it cannot appear over a frameless window even if it were kept.
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -313,6 +331,11 @@ async function createWindow() {
     show: false,
     backgroundColor: '#0d1117',
   });
+
+  // The default menu is installed by Electron, not by this file, so leaving it
+  // unset is what put File/Edit/View/Window/Help on every window. Removing it
+  // here is the whole fix; there is no custom menu to rebuild.
+  Menu.setApplicationMenu(null);
 
   // Load dashboard — static files in production, dev server in dev
   if (isDev) {
@@ -549,6 +572,42 @@ function setupIPC() {
   ipcMain.handle('show-save-dialog', async (event, options) => {
     return dialog.showSaveDialog(mainWindow, options);
   });
+
+  // ─── Window controls ───────────────────────────────────────────────────────
+  //
+  // With `frame: false` the OS draws no title bar, so there are no minimise,
+  // maximise or close buttons anywhere unless the dashboard provides them and
+  // reaches back through these handlers. Without them the window could not be
+  // closed at all except from the tray.
+  //
+  // Every handler guards on `mainWindow` because the window is destroyed on
+  // quit while a renderer may still be finishing a click.
+  ipcMain.handle('window-minimise', () => {
+    mainWindow?.minimize();
+  });
+
+  ipcMain.handle('window-toggle-maximise', () => {
+    if (!mainWindow) return false;
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize();
+    } else {
+      mainWindow.maximize();
+    }
+    return mainWindow.isMaximized();
+  });
+
+  // Deliberately `close()`, NOT `app.quit()`.
+  //
+  // `mainWindow.on('close')` already intercepts this and hides to the tray
+  // unless `app.isQuitting` is set, which is the behaviour the window had
+  // before the frame was removed. Calling `app.quit()` here would bypass that
+  // guard, so the custom ✕ would quietly become "exit Addled" and the tray
+  // icon would stop being a way to keep it running.
+  ipcMain.handle('window-close', () => {
+    mainWindow?.close();
+  });
+
+  ipcMain.handle('window-is-maximised', () => Boolean(mainWindow?.isMaximized()));
 }
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────

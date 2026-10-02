@@ -42,6 +42,8 @@ import subprocess
 import sys
 import time
 
+from pathlib import Path
+
 from backend.config import config
 from backend.local_models import paths
 from backend.local_models.downloader import DownloadCancelled, download, has_space
@@ -72,6 +74,55 @@ def default_slots() -> int:
     """
     return DEFAULT_SLOTS
 
+
+def _vision_requirements() -> Path | None:
+    """Locate requirements-vision.txt, in either the dev or installed layout.
+
+    The installed app keeps `backend/` under `resources/` while
+    `requirements-vision.txt` sits at the package root, one level up — so a
+    single relative guess would miss one of the two layouts. Returns None when
+    absent, which makes the caller fall back to its built-in list rather than
+    installing nothing.
+    """
+    here = Path(__file__).resolve()
+    candidates = [
+        # dev tree: <repo>/requirements-vision.txt from <repo>/backend/local_llm/
+        here.parents[3] / "requirements-vision.txt",
+        # installed: <app>/resources/requirements-vision.txt
+        here.parents[2] / "requirements-vision.txt",
+        # installed, if backend/ were nested one deeper
+        here.parents[1] / "requirements-vision.txt",
+        Path.cwd() / "requirements-vision.txt",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+def _app_site_packages() -> str | None:
+    """The site-packages directory this interpreter actually imports from.
+
+    Deliberately NOT ``site.getusersitepackages()``. The app runs with ``-s``,
+    so user site-packages are invisible to it; installing there is the bug this
+    helper exists to avoid. Derived from the running interpreter (rather than
+    hard-coded) so it stays correct if the bundle moves.
+
+    Returns None when no known layout exists, so the caller falls back to pip's
+    default scheme instead of guessing wrong.
+    """
+    exe = Path(sys.executable).resolve()
+    py = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    candidates = [
+        # bundled/embedded interpreter on Windows
+        exe.parent / "Lib" / "site-packages",
+        # posix-style layouts
+        exe.parent / "lib" / py / "site-packages",
+        exe.parent.parent / "lib" / py / "site-packages",
+    ]
+    for path in candidates:
+        if path.is_dir():
+            return str(path)
+    return None
 
 class LocalLlmManager:
     """Singleton owner of the llamafile server + weights."""
@@ -310,7 +361,8 @@ class LocalLlmManager:
     def hf_status(self) -> dict:
         """Optional Hugging Face (Local) provider readiness."""
         from backend.providers.huggingface_local_provider import (
-            deps_available, models_root, snapshot_present,
+            VISION_DEPS, deps_available, models_root, missing_deps,
+            snapshot_present, vision_deps_available,
         )
         from backend.config import config as app_config
         configured_root = app_config.get(
@@ -321,10 +373,17 @@ class LocalLlmManager:
         if self._hf_deps_cache is None:
             self._hf_deps_cache = deps_available()
         deps_ok, reason = self._hf_deps_cache
+        # Vision needs einops/timm on top of the base pair. Reported separately
+        # so the panel can say "chat is ready, images are not" instead of
+        # declaring everything fine and failing on the first photo.
+        vision_ok, vision_reason = vision_deps_available()
         return {
             "model_id": model_id,
             "deps_ready": deps_ok,
             "error": reason,
+            "vision_ready": vision_ok,
+            "vision_error": vision_reason,
+            "vision_missing": missing_deps(*VISION_DEPS),
             "downloaded": snapshot_present(model_id, configured_root),
             "root": models_root(configured_root),
             "installing": self._hf_deps_installing,
@@ -811,17 +870,52 @@ class LocalLlmManager:
     # ---- optional Hugging Face (Local) dependencies --------------------------
 
     async def install_hf_deps(self) -> dict:
-        """pip install torch + transformers for the HF (Local) provider."""
+        """Install the optional local-model stack into the app's own Python.
+
+        Three things matter here and all three were wrong before:
+
+        1. WHERE. The app runs its interpreter with ``-s`` (user site-packages
+           disabled). A plain ``pip install`` writes to the *user* site —
+           ``%APPDATA%\\Python\\Python3xx\\site-packages`` — which ``-s``
+           excludes. So the install "succeeded" and the app still could not
+           import a thing, forever. ``--target`` pins the package directory to
+           this interpreter's own site-packages, which ``-s`` does search.
+
+        2. WHAT. Florence-2's remote code imports ``einops`` and ``timm`` at
+           call time. Installing only torch/transformers left local vision
+           broken with "requires einops, timm" on the first image.
+
+        3. WHICH LIST. The package list now comes from
+           ``requirements-vision.txt`` when present, so this and the shipped
+           requirements cannot drift apart again. The literal below stays as a
+           fallback for the case where only ``backend/`` was deployed without
+           the repository files beside it, which the install layout allows.
+        """
         if self._hf_deps_installing:
             return {"ok": False, "error": "Already installing."}
         self._hf_deps_installing = True
         self._hf_deps_cache = None
-        packages = ["torch", "transformers", "accelerate"]
+        req_file = _vision_requirements()
+        if req_file is not None:
+            install_args = ["-r", str(req_file)]
+            detail = f"vision stack from {req_file.name}"
+        else:
+            install_args = ["torch", "transformers", "accelerate", "einops", "timm"]
+            detail = " ".join(install_args)
+            log.warning("requirements-vision.txt not found; using the built-in list")
         self._broadcast("local.hfProgress",
-                        {"phase": "installing", "detail": " ".join(packages)})
+                        {"phase": "installing", "detail": detail})
         try:
+            target = _app_site_packages()
+            argv = [sys.executable, "-s", "-m", "pip", "install", "--upgrade"]
+            if target:
+                # --target ignores already-present deps, so an existing torch is
+                # reused instead of re-downloaded (~2.5 GB saved).
+                argv += ["--target", target, "--no-warn-script-location"]
+            argv += install_args
+            log.info("Installing optional deps into %s", target or "(default scheme)")
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-s", "-m", "pip", "install", "--upgrade", *packages,
+                *argv,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 creationflags=CREATE_NO_WINDOW,
             )

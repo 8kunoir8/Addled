@@ -47,6 +47,35 @@ def transcribe_file(path: str) -> dict:
     target = Path(str(path or "")).expanduser()
     if not target.is_file():
         return {"success": False, "error": f"No such file: {target}"}
+
+    # Two different problems reach ffmpeg as the SAME message — "[Errno
+    # 541478725] End of file" — and neither is really "end of file":
+    #
+    #   * a 0-byte file (a recording that captured nothing), and
+    #   * bytes that are not a media container at all (a corrupt download, a
+    #     mislabelled attachment, a text file renamed .ogg).
+    #
+    # Verified: 16 bytes of b"not audio at all" and an empty file both produce
+    # that identical errno. Reporting it verbatim sends you hunting a decoder
+    # bug that does not exist, so both cases are named here instead. The size
+    # check has to come first — there is nothing to sniff in 0 bytes.
+    try:
+        size = target.stat().st_size
+    except OSError as e:  # noqa: BLE001
+        return {"success": False, "error": f"could not read {target.name}: {e}"}
+    if size == 0:
+        return {"success": False,
+                "error": (f"{target.name} is empty (0 bytes) — there is no "
+                          "audio to transcribe. The recording captured "
+                          "nothing.")}
+
+    if not _looks_like_media(target):
+        return {"success": False,
+                "error": (f"{target.name} is not audio or video this can "
+                          f"decode ({size} bytes, no recognisable media "
+                          "header). The file may be corrupt, or named for "
+                          "audio while holding something else.")}
+
     try:
         from backend.config import config
         size = config.get("voice", "stt_model", default="tiny") or "tiny"
@@ -75,6 +104,45 @@ def transcribe_file(path: str) -> dict:
         log.warning("file transcription failed for %s: %s", target, e)
         return {"success": False, "error": f"could not transcribe: {e}"}
 
+
+# Real media containers start with one of these. ffmpeg sniffs the same way;
+# doing it here means a mislabelled file is reported as mislabelled instead of
+# as a decoder error. Only headers are listed, so an unusual but valid file
+# still passes through to ffmpeg, which remains the final authority.
+_MEDIA_MAGIC = (
+    b"OggS",           # Ogg / Opus / Vorbis  (WhatsApp and Telegram voice notes)
+    b"\x1a\x45\xdf\xa3",  # Matroska / WebM     (Ogg-adjacent "video note" case)
+    b"fLaC",           # FLAC
+    b"RIFF",           # WAV / AVI
+    b"ID3",            # MP3 with an ID3 tag
+    b"\xff\xfb",       # MP3 frame sync (no tag)
+    b"\xff\xf3",       # MP3 frame sync variant
+    b"\xff\xf2",       # MP3 frame sync variant
+    b"ADIF",           # AAC (ADIF)
+    b"#!AMR",          # AMR narrowband
+    b"#!AMR-WB",       # AMR wideband
+    b"MThd",           # MIDI
+)
+# ISO base media (MP4 / M4A / MOV / 3GP): the size field, then 'ftyp'.
+# Checked separately because 'ftyp' is not at offset 0.
+_ISOBMFF_BRANDS = (b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide")
+
+def _looks_like_media(path) -> bool:
+    """Whether the first bytes look like a container ffmpeg can open.
+
+    Deliberately permissive: a false positive costs nothing (ffmpeg still
+    decides), while a false negative would reject audio we could have read.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return True  # unreadable here; let ffmpeg produce the real error
+    if head.startswith(_MEDIA_MAGIC):
+        return True
+    if head[4:8] in _ISOBMFF_BRANDS:
+        return True
+    return False
 
 def _contains_wake_word(text: str, wake_word: str) -> bool:
     words = {w.strip(",.!?") for w in (text or "").lower().split()}

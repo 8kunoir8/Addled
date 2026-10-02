@@ -311,6 +311,70 @@ def main() -> int:
           any(p.startswith("!") and "__pycache__" in p for p in patterns),
           "no __pycache__ exclusion")
 
+    # ---- a declared build target must have config to build it -------------
+    #
+    # `package.json` had `"build:all": "electron-builder --win --mac --linux"`
+    # while `electron-builder.yml` defined only `win:`. electron-builder has no
+    # targets for the other two, so the script produced a Windows build and
+    # reported success — the flags read as "these platforms are supported" and
+    # nothing contradicted them. A release script that quietly ignores half its
+    # own arguments is worse than one that fails, so this ties the two together:
+    # every platform flag a build script passes must have a matching section.
+    #
+    # It also catches the reverse, which is the reason it reads the npm scripts
+    # rather than the yml alone: a `linux:` section added while no script passes
+    # `--linux` is dead configuration that no build ever exercises.
+    import json as _json
+
+    # A malformed manifest is reported, not thrown. This suite exists to say
+    # what is wrong in words — a stack trace from the check itself reads as the
+    # check being broken, and hides the actual fault (unparseable JSON) behind
+    # a traceback about `json.loads`.
+    try:
+        package = _json.loads(read("package.json"))
+    except _json.JSONDecodeError as e:
+        check("package.json is valid JSON", False,
+              f"{e.msg} at line {e.lineno} column {e.colno}")
+        package = {}
+    check("package.json declares scripts",
+          isinstance(package.get("scripts"), dict) and bool(package["scripts"]),
+          "no scripts block — the build has no entry points")
+    # electron-builder's own key for each CLI flag.
+    SECTION_FOR_FLAG = {"--win": "win", "--mac": "mac", "--linux": "linux"}
+    config_sections = {
+        line.split(":", 1)[0].strip()
+        for line in yaml_text.splitlines()
+        # Top-level keys only: a nested `linux:` under another key would not
+        # make electron-builder treat the platform as configured.
+        if line and not line[0].isspace() and line.rstrip().endswith(":")
+    }
+    build_scripts = {name: cmd for name, cmd in package.get("scripts", {}).items()
+                     if "electron-builder" in cmd}
+
+    check("the packaging config is asserted against the build scripts",
+          bool(build_scripts),
+          "no npm script runs electron-builder — has the build moved?")
+
+    for name, command in sorted(build_scripts.items()):
+        passed = [flag for flag in SECTION_FOR_FLAG if flag in command]
+        if not passed:
+            # No platform flag: electron-builder builds for the host, so the
+            # host's section is the one that has to exist.
+            passed = ["--win"] if os.name == "nt" else []
+        for flag in passed:
+            section = SECTION_FOR_FLAG[flag]
+            check(f"'{name}' passes {flag}, so the config defines '{section}:'",
+                  section in config_sections,
+                  f"electron-builder has no '{section}:' section, so {flag} "
+                  f"builds nothing — remove the flag or add the section")
+
+    for flag, section in sorted(SECTION_FOR_FLAG.items()):
+        if section not in config_sections:
+            continue
+        check(f"the config's '{section}:' section has a script that builds it",
+              any(flag in command for command in build_scripts.values()),
+              f"'{section}:' is configured but no npm script passes {flag}, "
+              f"so nothing ever builds it")
     shipped = shipped_backend_files(patterns)
     check("the backend tree ships its code",
           "ws_server.py" in shipped, f"{len(shipped)} files matched")

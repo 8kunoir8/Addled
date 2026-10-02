@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useWS } from '@/lib/useWS';
 import { APP_VERSION } from '@/lib/guide-content';
+import type { HfStatus } from '@/lib/ws-types';
 import GuideSection from './guide-section';
 
 type SettingsData = Record<string, any>;
@@ -882,7 +883,7 @@ function ProvidersSection({ settings, update, saving, status }: any) {
   const models:string[]=((cat?.models&&cat.models.length)
     ?cat.models
     :activeCfg?.models)||[];
-  const hf=llmStatus?.hf||null;
+  const hf: HfStatus | null = llmStatus?.hf || null;
   const llmPct=typeof llmStatus?.progress==='number'?llmStatus.progress:0;
   const sizeGb=((llm.size_mb||2400)/1024).toFixed(1);
   const btn='px-3 py-1.5 rounded text-xs font-medium border border-[#30363d] hover:border-[#484f58] text-[#e8eaed] disabled:opacity-40';
@@ -1022,17 +1023,30 @@ function ProvidersSection({ settings, update, saving, status }: any) {
     <div className="mt-3 rounded-lg border border-[#30363d] p-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-[#e8eaed]">🤗 Hugging Face (Local)</p>
-        <span className="text-[10px] text-[#8b949e]">{hf?.deps_ready?'● ready':'— needs torch'}</span>
+        <span className="text-[10px] text-[#8b949e]">
+          {!hf?.deps_ready
+            ? '— needs torch'
+            : hf?.vision_ready === false
+              ? '● chat ready · ○ images need deps'
+              : '● ready'}
+        </span>
       </div>
       <p className="mt-1 text-[11px] text-[#8b949e]">
         Runs <span className="font-mono break-all">{hf?.model_id||builtin?.huggingface?.default_model||''}</span> in-process.
         {hf?.downloaded?' Model is downloaded.':' Model downloads on first use.'}
       </p>
       {hf&&!hf.deps_ready&&<p className="mt-1 text-[10px] text-[#d29922] break-words">{hf.error||'torch + transformers are required.'}</p>}
+      {/* Vision has its own requirements (einops/timm) on top of torch. Saying
+          "ready" while every image silently fails is the bug this reports. */}
+      {hf&&hf.deps_ready&&hf.vision_ready===false&&(
+        <p className="mt-1 text-[10px] text-[#d29922] break-words">
+          {hf.vision_error||'Local vision needs einops and timm.'}
+        </p>
+      )}
       <div className="mt-2 flex flex-wrap gap-2">
-        {hf&&!hf.deps_ready&&
+        {hf&&(!hf.deps_ready||hf.vision_ready===false)&&
           <button disabled={busy!==null||wsState!=='connected'} onClick={()=>act('localLlm.installHfDeps','hf')} className={btnPrimary}>
-            {busy==='hf'?'⏳ installing…':'⬇ Install torch + transformers'}
+            {busy==='hf'?'⏳ installing…':(hf.deps_ready?'⬇ Install vision support (einops + timm)':'⬇ Install torch + transformers')}
           </button>}
         <button disabled={busy!==null} onClick={()=>act('hf.unload','unload')} className={btn}>Free RAM</button>
       </div>

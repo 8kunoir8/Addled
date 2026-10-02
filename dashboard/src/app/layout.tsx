@@ -8,7 +8,12 @@ import {
   getApprovals, addApproval, addApprovals, subscribeApprovals,
   subscribeApprovalErrors, makeAnswers, type ApprovalRequest,
 } from '@/lib/approvalsStore';
+import {
+  addQuestion, removeQuestion, setQuestions, subscribeQuestions,
+  subscribeQuestionErrors, makeQuestionAnswers, type QuestionRequest,
+} from '@/lib/questionsStore';
 import ApprovalCard from '@/components/ApprovalCard';
+import QuestionCard from '@/components/QuestionCard';
 import "./globals.css";
 
 const NAV_ITEMS = [
@@ -45,13 +50,15 @@ const STATE_LABELS: Record<string, string> = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { state: wsState, characterState, send, onNotification } = useWS();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [desktopPrompt, setDesktopPrompt] = useState(false);
   const [browserPrompt, setBrowserPrompt] = useState<string | null>(null);
   const [localPrompt, setLocalPrompt] = useState<any>(null);
   const [localProgress, setLocalProgress] = useState<any>(null);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>(getApprovals);
   const [approvalErrors, setApprovalErrors] =
+    useState<Record<string, string>>({});
+  const [questions, setQuestionsState] = useState<QuestionRequest[]>([]);
+  const [questionErrors, setQuestionErrors] =
     useState<Record<string, string>>({});
 
   // Desktop-control permission request from the backend
@@ -79,6 +86,40 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
   useEffect(() => subscribeApprovals(setApprovals), []);
   useEffect(() => subscribeApprovalErrors(setApprovalErrors), []);
+  useEffect(() => subscribeQuestions(setQuestionsState), []);
+  useEffect(() => subscribeQuestionErrors(setQuestionErrors), []);
+
+  // The model is asking the user something.
+  //
+  // Owned by the layout for the same reason as approvals: it is the only
+  // component always mounted, and `onNotification` keeps ONE handler per
+  // method, so a page-level subscriber would be replaced the moment another
+  // page mounted and a question raised in that gap would be lost.
+  useEffect(() => onNotification('question.ask', (p: any) => {
+    if (!p?.question_id) return;
+    addQuestion({
+      question_id: p.question_id,
+      question: p.question || '',
+      options: Array.isArray(p.options) ? p.options : [],
+      context: p.context || '',
+      source: p.source || '',
+      conversation: p.conversation || '',
+      ttl: p.ttl || '',
+      created: p.created,
+    });
+  }), [onNotification]);
+
+  // A question answered on another surface stops showing here, so the same
+  // question is never offered twice.
+  useEffect(() => onNotification('question.settled', (p: any) => {
+    if (p?.question_id) removeQuestion(p.question_id);
+  }), [onNotification]);
+
+  // Answer a question the same way the chat page does, so the two surfaces
+  // cannot drift: `makeQuestionAnswers` is the one place that decides what is
+  // sent, that the card is dropped only once the backend confirms, and that
+  // answering resumes the work the question was blocking.
+  const answerQuestion = makeQuestionAnswers(send);
 
   // Answer a request the same way the chat card does, so the two surfaces
   // cannot drift: `makeAnswers` in the store is the one place that decides what
@@ -100,6 +141,25 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         addApprovals(restored);
       } catch {
         /* nothing pending, or an older backend without the method */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [wsState, send]);
+
+  // Questions are recovered the same way, and additionally *replace* the list
+  // rather than merging into it: the backend is the authority on what is still
+  // open, so a question it has already expired must disappear from the screen
+  // instead of lingering as a card whose only possible answer is "too late".
+  useEffect(() => {
+    if (wsState !== 'connected') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await send('questions.list', {});
+        if (cancelled) return;
+        setQuestions(r?.questions || []);
+      } catch {
+        /* no questions waiting, or an older backend without the method */
       }
     })();
     return () => { cancelled = true; };
@@ -152,49 +212,45 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className="dark">
       <body className="flex h-screen overflow-hidden">
-        <aside className={`sidebar flex flex-col transition-all duration-200 ${sidebarCollapsed ? 'w-14' : 'w-[220px]'}`}>
-          <div className="flex items-center gap-2 px-3 py-3 border-b border-[#30363d]">
-            <button
-              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="text-lg hover:bg-[#21262d] rounded p-1 transition-colors"
-            >
-              △
-            </button>
-            {!sidebarCollapsed && <span className="font-semibold text-sm">Addled</span>}
+        {/* The window is frameless, so this shell IS the window chrome: one
+            rounded surface holds the header, the rail and the page. */}
+        <div className="bubble-shell flex flex-col w-full h-full">
+          <WindowHeader
+            wsStatusColor={wsStatusColor}
+            wsState={wsState}
+            characterState={characterState}
+          />
+          <div className="flex flex-1 min-h-0">
+            <nav className="rail flex flex-col py-2 shrink-0" aria-label="Sections">
+              <div className="flex-1 overflow-y-auto overflow-x-hidden">
+                {NAV_ITEMS.map((item) => {
+                  const isActive = pathname === item.href || pathname?.startsWith(item.href + '/');
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      title={item.label}
+                      className={`rail-nav-item flex items-center gap-3 px-3 py-2 mx-1.5 my-0.5 text-sm ${isActive ? 'active' : ''}`}
+                    >
+                      <span className="text-base shrink-0 w-5 text-center">{item.icon}</span>
+                      <span className="rail-label">{item.label}</span>
+                    </Link>
+                  );
+                })}
+              </div>
+              <div className="border-t border-[#30363d] px-3 pt-2 pb-1 shrink-0">
+                <div className="flex items-center gap-2 text-xs text-[#8b949e]">
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${wsStatusColor}`} />
+                  <span className="rail-label">
+                    {STATE_LABELS[characterState] || characterState || 'Disconnected'}
+                  </span>
+                </div>
+              </div>
+            </nav>
+            <main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+              {children}
+            </main>
           </div>
-          <nav className="flex-1 py-2 overflow-y-auto">
-            {NAV_ITEMS.map((item) => {
-              const isActive = pathname === item.href || pathname?.startsWith(item.href + '/');
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`sidebar-nav-item flex items-center gap-3 px-3 py-2 mx-1 rounded-md text-sm ${isActive ? 'active' : ''}`}
-                >
-                  <span className="text-base">{item.icon}</span>
-                  {!sidebarCollapsed && <span>{item.label}</span>}
-                </Link>
-              );
-            })}
-          </nav>
-          <div className="border-t border-[#30363d] p-3">
-            <div className="flex items-center gap-2 text-xs text-[#8b949e]">
-              <span className={`w-2 h-2 rounded-full ${wsStatusColor}`} />
-              {!sidebarCollapsed && (
-                <span>{STATE_LABELS[characterState] || characterState || 'Disconnected'}</span>
-              )}
-            </div>
-            {!sidebarCollapsed && wsState === 'disconnected' && (
-              <p className="text-[10px] text-[#f85149] mt-1 leading-tight">
-                Backend not running.<br/>
-                Start it: <code className="text-[#58a6ff]">python backend/main.py</code>
-              </p>
-            )}
-          </div>
-        </aside>
-        <main className="flex-1 overflow-hidden flex flex-col">
-          {children}
-        </main>
 
         {/* Permission request, for pages that are not the chat.
             The chat renders its own copy in the message stream, next to the
@@ -216,6 +272,31 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             {approvals.length > 3 && (
               <p className="text-[10px] text-[#8b949e] text-right">
                 +{approvals.length - 3} more waiting
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* A question the model asked, for pages that are not the chat.
+            Same rule as approvals: the chat renders its own copy in the message
+            stream beside the turn that asked, so showing this there too would
+            ask twice. Rendered for every page because a question raised from a
+            background turn has no page of its own to appear on. */}
+        {pathname !== '/chat' && questions.length > 0 && (
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm">
+            {questions.slice(0, 2).map((q) => (
+              <QuestionCard
+                key={q.question_id}
+                question={q}
+                compact
+                error={questionErrors[q.question_id]}
+                onAnswer={answerQuestion(q).answer}
+                onDismiss={answerQuestion(q).dismiss}
+              />
+            ))}
+            {questions.length > 2 && (
+              <p className="text-[10px] text-[#8b949e] text-right">
+                +{questions.length - 2} more waiting
               </p>
             )}
           </div>
@@ -316,7 +397,100 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             )}
           </div>
         )}
+        </div>
       </body>
     </html>
+  );
+}
+
+/**
+ * The window's title bar, drawn by us because the window is frameless.
+ *
+ * It replaces the OS title bar AND Electron's default application menu, both of
+ * which the window used to inherit: `electron-builder`/Electron gave every
+ * window a File/Edit/View/Window/Help menu because nothing called
+ * `Menu.setApplicationMenu`. None of those items were Addled's — they were
+ * Electron's stock template — so the header carries only what this app actually
+ * needs, and the menu is removed in `electron/main.js`.
+ *
+ * The header is the drag region, which is why `-webkit-app-region: drag` is on
+ * `.bubble-header` and every control inside opts out with `no-drag`: without
+ * that, the buttons would be dead, because Electron routes a press inside a
+ * drag region to the window move instead of the button.
+ */
+function WindowHeader({
+  wsStatusColor, wsState, characterState,
+}: {
+  wsStatusColor: string;
+  wsState: string;
+  characterState?: string;
+}) {
+  const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
+  // Absent when this runs in a plain browser (`npm run dev` for the dashboard
+  // alone, or the Next dev server), where there is no frameless window to
+  // control. The buttons then do nothing rather than throwing.
+  const minimise = () => api?.minimiseWindow?.();
+  const maximise = () => api?.toggleMaximiseWindow?.();
+  const close = () => api?.closeWindow?.();
+
+  // Deliberately NOT a second title bar.
+  //
+  // Every page under `app/*/page.tsx` already renders its own `<h1>` and its own
+  // connection state at the top of `<main>` (chat, memory, wiki, skills, goals,
+  // bots, browser, calendar, swarm, remote all do). Putting the same words here
+  // as well printed each page's name twice, one above the other — which is what
+  // the first version of this header did. So this bar carries only what the
+  // pages cannot: the app's identity, and the window controls, which exist
+  // nowhere else because the window has no OS frame.
+  //
+  // The state dot and character state stay because they are *window*-level — a
+  // glance from any page — and are not repeated per page the way the title is.
+  return (
+    <div className="bubble-header flex items-center gap-2 px-3 shrink-0">
+      <span className="text-sm">⬡</span>
+      <span className="font-semibold text-sm">Addled</span>
+
+      {/* Only when something is wrong. A permanent "Connected" here was noise
+          the pages already report, but a failure has to be visible from
+          anywhere — a disconnected app looks identical to an idle one
+          otherwise. */}
+      {wsState !== 'connected' && (
+        <span className="text-[11px] text-[#f85149]">
+          {wsState === 'connecting' ? 'Connecting…'
+            : <>Backend not running · <code className="text-[#58a6ff]">python backend/main.py</code></>}
+        </span>
+      )}
+
+      {/* Pushes the window controls to the right edge. */}
+      <span className="flex-1" />
+
+      <span className={`w-2 h-2 rounded-full ${wsStatusColor}`} />
+      <span className="text-[11px] text-[#8b949e] mr-1">
+        {STATE_LABELS[characterState || ''] || characterState || ''}
+      </span>
+
+      <button className="win-btn" onClick={minimise} title="Minimise" aria-label="Minimise">
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <rect x="1" y="4.5" width="8" height="1" fill="currentColor" />
+        </svg>
+      </button>
+      <button className="win-btn" onClick={maximise} title="Maximise" aria-label="Maximise">
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <rect x="1.5" y="1.5" width="7" height="7" fill="none"
+                stroke="currentColor" strokeWidth="1" />
+        </svg>
+      </button>
+      {/* Hides to the tray, it does not quit — the same thing the window's own
+          close button did before the frame was removed (`mainWindow.on('close')`
+          in electron/main.js hides unless `app.isQuitting`). Routing this to
+          `app.quit()` would have silently turned "close" into "exit", losing the
+          tray behaviour. */}
+      <button className="win-btn win-btn-close" onClick={close} title="Close to tray" aria-label="Close">
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="M1.5 1.5 L8.5 8.5 M8.5 1.5 L1.5 8.5"
+                stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+        </svg>
+      </button>
+    </div>
   );
 }

@@ -12,6 +12,26 @@
   --success: #3fb950;
   --warning: #d29922;
   --border: #30363d;
+
+  /* Bubble shell. The window is frameless (`frame: false` in electron/main.js),
+     so this file is what gives it its shape: the OS no longer draws the
+     rounded corners, the border or the shadow, and a square frameless window
+     reads as a broken title bar rather than as a bubble. Kept as tokens
+     because the shell, the header and the rail all need to agree on them. */
+  --bubble-radius: 14px;
+  --bubble-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  --header-height: 38px;
+  --rail-width: 52px;
+  --rail-width-expanded: 168px;
+}
+
+/* Nothing in a frameless window may rely on the OS for chrome. The page must
+   fill the window exactly, or the transparent margins around a rounded
+   container would show the desktop through as a dead border. */
+html, body {
+  height: 100%;
+  margin: 0;
+  background: transparent;
 }
 
 body {
@@ -20,24 +40,109 @@ body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
-.sidebar {
+/* ── The bubble itself ──────────────────────────────────────────────────────
+   One rounded surface holds the whole app: header, rail and page. The outer
+   element is the rounded, clipped box; everything inside is square and is
+   trimmed by this overflow, which is what keeps the rail's full-height
+   background from squaring off the rounded corner underneath it. */
+.bubble-shell {
+  border-radius: var(--bubble-radius);
+  border: 1px solid var(--border);
+  box-shadow: var(--bubble-shadow);
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+/* ── Draggable header ───────────────────────────────────────────────────────
+   With `frame: false` there is no title bar to drag, so the header replaces
+   it. Electron only honours `-webkit-app-region` on the element itself, and
+   any interactive child sitting inside a drag region must opt back out with
+   `no-drag` or its click is swallowed by the window drag. */
+.bubble-header {
+  height: var(--header-height);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.bubble-header button,
+.bubble-header a,
+.bubble-header input,
+.bubble-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* A window button that stays quiet until pointed at. Deliberately not red on
+   the close button by default: a permanently red ✕ makes a window that hides
+   to the tray (which this one does) look like it destroys work. */
+.win-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.win-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.win-btn-close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ── Navigation rail ────────────────────────────────────────────────────────
+   Icon-only at rest so the page keeps its width, and it widens on hover so
+   the 13 labels stay readable without a click. The width is animated rather
+   than the labels being hidden, because a hover-only tooltip cannot be read
+   at a glance the way a sliding label can. */
+.rail {
+  width: var(--rail-width);
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
+  transition: width 0.16s ease;
+  overflow: hidden;
 }
 
-.sidebar-nav-item {
+.rail:hover,
+.rail:focus-within {
+  width: var(--rail-width-expanded);
+}
+
+/* Labels are in the DOM at all times (so screen readers and the hover-expand
+   both work) and are hidden only while the rail is collapsed. `overflow:
+   hidden` on the rail plus `white-space: nowrap` here is what stops a long
+   label from wrapping to two lines mid-animation. */
+.rail-label {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.rail:not(:hover):not(:focus-within) .rail-label {
+  width: 0;
+  opacity: 0;
+}
+
+.rail-nav-item {
   color: var(--text-secondary);
-  transition: all 0.15s ease;
+  border-radius: 8px;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
-.sidebar-nav-item:hover {
+.rail-nav-item:hover {
   color: var(--text-primary);
   background: var(--bg-tertiary);
 }
 
-.sidebar-nav-item.active {
+.rail-nav-item.active {
   color: var(--accent);
-  background: rgba(51, 128, 255, 0.1);
+  background: rgba(51, 128, 255, 0.12);
 }
 
 .chat-bubble-user {

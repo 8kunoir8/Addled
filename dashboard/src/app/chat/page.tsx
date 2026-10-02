@@ -8,6 +8,11 @@ import {
   type ApprovalRequest,
 } from '@/lib/approvalsStore';
 import ApprovalCard from '@/components/ApprovalCard';
+import QuestionCard from '@/components/QuestionCard';
+import {
+  subscribeQuestions, subscribeQuestionErrors, makeQuestionAnswers, questionsFor,
+  type QuestionRequest,
+} from '@/lib/questionsStore';
 import {
   filesFromPaste, filesToAttachments, releaseAttachment,
   MAX_ATTACHMENTS, type Attachment,
@@ -63,6 +68,14 @@ export default function ChatPage() {
   });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // The current slow step ("Looking at photo.png…"), or '' when idle.
+  const [activity, setActivity] = useState('');
+  // Questions waiting on this page. The list is kept so the component re-renders
+  // when one arrives; what is RENDERED is filtered by `questionsFor` below, so
+  // a question raised in another conversation never reaches this page's cards.
+  const [, setQuestions] = useState<QuestionRequest[]>([]);
+  const [questionErrors, setQuestionErrors] =
+    useState<Record<string, string>>({});
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [processingFiles, setProcessingFiles] = useState(false);
   const [dragActive, setDragActive] = useState(false);
@@ -207,6 +220,25 @@ export default function ChatPage() {
     if (params) setUsage(params);
   }), [onNotification]);
 
+  // What a slow attachment step is doing right now.
+  //
+  // Local vision costs ~8s of CPU per image plus a ~16s one-time model load,
+  // and transcription is seconds more. Without this the composer simply froze
+  // for half a minute, which reads as a hang - and a turn ending with the
+  // model apologising about "vision being unavailable" could not be told apart
+  // from vision actually being unavailable. Cleared when the reply lands.
+  useEffect(() => onNotification('chat.activity', (params: any) => {
+    if (params?.what) setActivity(String(params.what));
+  }), [onNotification]);
+
+  useEffect(() => subscribeQuestions(setQuestions), []);
+  useEffect(() => subscribeQuestionErrors(setQuestionErrors), []);
+
+  // Answering from this page has to reach the backend the same way answering
+  // from anywhere else does, so the store owns what is sent and this only
+  // passes the call through.
+  const answerQuestion = makeQuestionAnswers(send);
+
   // Permission requests are owned by the layout (it is always mounted, and
   // `onNotification` only keeps one handler per method) and published through
   // a store, so this page reads them rather than subscribing itself.
@@ -341,6 +373,9 @@ export default function ChatPage() {
       applyReply(`Error: ${err.message}`);
     } finally {
       setIsLoading(false);
+      // The last activity notice arrives before the reply, so clearing it here
+      // (not in the handler) keeps it from outliving the turn it described.
+      setActivity('');
     }
   };
 
@@ -442,6 +477,24 @@ export default function ChatPage() {
             />
           </div>
         ))}
+        {/* Questions the model asked. Like approvals these are not messages —
+            the backend owns them, and they disappear once answered, whether the
+            answer came from here or from the card on another page.
+            Filtered to this page's own conversation: a question raised in a
+            Telegram thread would render here with buttons whose resume targets
+            that thread, offering the user a card they cannot really act on.
+            `questionsFor` is the one place that decides what "belongs here"
+            means, so this cannot drift from the store's own rule. */}
+        {questionsFor('dashboard').map((q) => (
+          <div key={q.question_id} className="flex justify-start">
+            <QuestionCard
+              question={q}
+              error={questionErrors[q.question_id]}
+              onAnswer={answerQuestion(q).answer}
+              onDismiss={answerQuestion(q).dismiss}
+            />
+          </div>
+        ))}
         <div ref={messagesEndRef} />
       </div>
 
@@ -486,6 +539,16 @@ export default function ChatPage() {
                 🧠 {a.type === 'facts' ? 'memory' : a.type === 'timeline' ? 'timeline' : 'recall'} · {a.text.slice(0, 60)}…
               </span>
             ))}
+          </div>
+        )}
+        {activity && (
+          <div className="mb-2 flex items-center gap-2 text-[11px] text-[#d29922]"
+            role="status" aria-live="polite">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#d29922] animate-pulse" />
+            <span>{activity}</span>
+            <span className="text-[#8b949e]">
+              This can take up to a minute on a local model.
+            </span>
           </div>
         )}
         {attachments.length > 0 && (

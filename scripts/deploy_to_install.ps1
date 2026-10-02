@@ -171,6 +171,21 @@ if (-not $BackendOnly) {
     Invoke-Sync -From $out -To $dash -ExtraArgs @()
 }
 
+# Top-level requirement files. The installer ships these through
+# electron-builder's extraResources, so an installed app gets them; the deploy
+# did not copy them at all, which meant a dev install diverged from what a user
+# receives. That matters once code reads them: `install_hf_deps` resolves
+# requirements-vision.txt to install the declared vision set, and without the
+# file it silently fell back to a hardcoded list — the exact drift the file
+# exists to prevent.
+foreach ($reqName in @('requirements.txt', 'requirements-vision.txt')) {
+    $reqFrom = Join-Path $repo $reqName
+    if (Test-Path $reqFrom) {
+        Copy-Item -Path $reqFrom -Destination (Join-Path $resources $reqName) -Force
+        Write-Host "Deployed $reqName" -ForegroundColor Cyan
+    }
+}
+
 if ($WithSkills) {
     # Market skills are gitignored user data, so the backend sync above leaves
     # them behind by design. That is right for a normal deploy and wrong when

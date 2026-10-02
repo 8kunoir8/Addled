@@ -64,6 +64,93 @@ async function answerApproval(ws, verb, approvalId) {
     : `⚠️ ${r?.error || 'It is no longer waiting.'}`;
 }
 
+// A question the model asked, described for the channel. Shares its wording
+// with the dashboard card so the same prompt reads the same everywhere.
+function questionPrompt(q) {
+  const lines = ['❓ **Addled needs to know**', '', String(q?.question || '').slice(0, 900)];
+  if (q?.context) lines.push('', `_${String(q.context).slice(0, 200)}_`);
+  if (q?.ttl) lines.push('', `_Waiting for ${q.ttl}. It carries on when you answer._`);
+  return lines.join('\n');
+}
+
+// Buttons for a question's choices, or null when it is open-ended.
+//
+// The option *index* travels, not its text: Discord allows 100 characters where
+// Telegram allows 64, but an option can be longer than either, and a truncated
+// label would ask the user to choose between two identical stubs. The bridge
+// holds the wording from the same reply, so the index is enough.
+function questionRows(q) {
+  const options = Array.isArray(q?.options) ? q.options.filter((o) => String(o).trim()) : [];
+  if (!q?.question_id || options.length === 0) return [];
+  const id = String(q.question_id).slice(0, 80);
+  const rows = [];
+  // Discord allows five buttons per row, so six choices become two rows.
+  for (let i = 0; i < Math.min(options.length, 6); i += 5) {
+    const row = new ActionRowBuilder();
+    options.slice(i, i + 5).forEach((label, offset) => {
+      row.addComponents(new ButtonBuilder()
+        .setCustomId(`qa:${id}:${i + offset}`)
+        .setLabel(String(label).slice(0, 80))
+        .setStyle(ButtonStyle.Primary));
+    });
+    rows.push(row);
+  }
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`qs:${id}`).setLabel('Skip')
+      .setStyle(ButtonStyle.Secondary)));
+  return rows;
+}
+
+// Which question this channel was last shown buttons for, and what they said.
+// An open-ended question has no buttons, so its answer arrives as ordinary
+// text — without this the bot could not tell an answer from a new instruction.
+const openQuestions = new Map();
+
+function rememberQuestion(channelId, q) {
+  if (!q?.question_id) return;
+  openQuestions.set(String(channelId), {
+    question_id: q.question_id,
+    question: q.question || '',
+    options: Array.isArray(q.options) ? q.options : [],
+  });
+}
+
+function takeQuestion(channelId) {
+  const key = String(channelId);
+  const held = openQuestions.get(key) || null;
+  openQuestions.delete(key);
+  return held;
+}
+
+// Answering resumes the work the question was blocking, exactly as the
+// dashboard does: settle it, then send the answer as the next turn.
+//
+// The `chat.send` belongs HERE and not in the caller. Sending only
+// `question.answer` settles the question without the model ever learning the
+// answer — it asked, the user answered, and the work stayed stopped. Keeping
+// both calls in one function is what makes that impossible to half-do.
+async function answerQuestion(ws, conversation, question, answer, reply) {
+  const settled = await ws.send('question.answer',
+    { question_id: question.question_id, answer,
+      source: 'discord', conversation: String(conversation || '') });
+  if (!settled?.success) return settled;
+  const asked = question.question ? `"${question.question}"` : 'a question';
+  const resumed = await ws.send('chat.send', {
+    message:
+      `Answering your question ${asked}: ${answer}\n\n` +
+      `This is my answer to the question you asked. Continue the task you were ` +
+      `working on when you asked it, using this.`,
+    source: 'discord',
+    conversation: String(conversation || ''),
+  });
+  const text = resumed?.response || 'No response';
+  if (typeof reply === 'function') await reply(text);
+  // `settled` is what callers branch on, and success means the QUESTION was
+  // answered — the resume is a follow-up whose failure must not be reported as
+  // a refused answer, or the question would be re-armed with a dead id.
+  return settled;
+}
+
 async function main() {
   if (!DISCORD_TOKEN) {
     console.error('[Discord] DISCORD_BOT_TOKEN environment variable is required.');
@@ -119,12 +206,70 @@ async function main() {
     // for anything that was not a chat-input command, which would have made an
     // approval button do nothing at all.
     if (interaction.isButton()) {
-      const [verb, approvalId] = String(interaction.customId || '').split(':');
-      if (!approvalId || !['ap', 'al', 'dn'].includes(verb)) return;
+      const [verb, refA, refB] = String(interaction.customId || '').split(':');
+      const channelId = String(interaction.channelId || '');
       // Reply inside Discord's 3-second window, then edit with the outcome.
       await interaction.deferUpdate().catch(() => {});
+
+      // A tap on a question's choice, or its Skip. Handled before the approval
+      // verbs, which would reject these as unknown.
+      if (verb === 'qa' || verb === 'qs') {
+        const held = openQuestions.get(channelId);
+        if (!held || held.question_id !== refA) {
+          await interaction.editReply({
+            content: '⚠️ That question is no longer open here.', components: [],
+          }).catch(() => {});
+          return;
+        }
+        const label = verb === 'qs' ? null : (held.options[Number(refB)] ?? '');
+        try {
+          if (verb === 'qs') {
+            const r = await ws.send('question.dismiss',
+              { question_id: refA, source: 'discord',
+                conversation: channelId });
+            takeQuestion(channelId);
+            await interaction.editReply({
+              content: r?.success ? '⏭️ Skipped.'
+                : `⚠️ ${r?.error || 'It is no longer open.'}`,
+              components: [],
+            });
+          } else {
+            if (!label) {
+              await interaction.editReply({
+                content: '⚠️ That choice is not available.', components: [],
+              }).catch(() => {});
+              return;
+            }
+            await interaction.editReply({ content: `✍️ ${label}`, components: [] });
+            const settled = await answerQuestion(ws, channelId, held, label,
+              (msg) => interaction.followUp(msg));
+            if (!settled?.success) {
+              // Only claim success when the backend said so. "✅ Answered" for
+              // a refused answer tells the user the work resumed when it did
+              // not. The question goes back so the tap can be retried.
+              rememberQuestion(channelId, held);
+              await interaction.editReply({
+                content: `⚠️ ${settled?.error || 'That question is no longer open.'}`,
+                components: [],
+              }).catch(() => {});
+            } else {
+              takeQuestion(channelId);
+              await interaction.editReply({
+                content: `✅ Answered: ${label}`, components: [],
+              }).catch(() => {});
+            }
+          }
+        } catch (e) {
+          await interaction.editReply({
+            content: `⚠️ Failed: ${e.message}`, components: [],
+          }).catch(() => {});
+        }
+        return;
+      }
+
+      if (!refA || !['ap', 'al', 'dn'].includes(verb)) return;
       try {
-        const outcome = await answerApproval(ws, verb, approvalId);
+        const outcome = await answerApproval(ws, verb, refA);
         await interaction.editReply({ content: outcome, components: [] });
       } catch (e) {
         await interaction.editReply({
@@ -161,7 +306,12 @@ async function main() {
           const response = r?.response || 'No response';
           clearInterval(ticker);
           const pending = Array.isArray(r?.pendingApprovals) ? r.pendingApprovals : [];
-          const row = approvalRow(pending);
+          const questions = Array.isArray(r?.pendingQuestions) ? r.pendingQuestions : [];
+          // A question is shown as its own message below, so the approval row
+          // is not attached to the reply when a question is waiting: the reply
+          // already restates the question, and two sets of buttons for two
+          // different decisions in one channel invites answering the wrong one.
+          const row = questions.length ? null : approvalRow(pending);
           if (response.length <= 2000) {
             await interaction.editReply(row
               ? { content: response, components: [row] }
@@ -176,6 +326,13 @@ async function main() {
           if (row) {
             await interaction.followUp({
               content: approvalPrompt(pending[0]), components: [row],
+            });
+          }
+          if (questions.length) {
+            const q = questions[0];
+            rememberQuestion(interaction.channelId, q);
+            await interaction.followUp({
+              content: questionPrompt(q), components: questionRows(q),
             });
           }
         } catch (e) {
@@ -242,6 +399,46 @@ async function main() {
       return;
     }
 
+    // An open question with no choices takes its answer as ordinary text, so
+    // this comes BEFORE the turn is sent: otherwise the answer would be handled
+    // as a fresh instruction while the question sat unanswered.
+    const open = openQuestions.get(String(msg.channelId || ''));
+    if (open) {
+      takeQuestion(msg.channelId);
+      await msg.channel.sendTyping();
+      try {
+        const settled = await answerQuestion(ws, msg.channelId, open, text,
+          (m) => msg.reply(m));
+        if (!settled?.success) {
+          // Refused — expired, or answered elsewhere. The message must NOT be
+          // dropped: it is a turn the user meant to send, so it is forwarded as
+          // one. Doing nothing is the worst outcome, because nothing on screen
+          // says anything went wrong.
+          await msg.reply(`⚠️ ${settled?.error || 'That question is no longer open.'}`
+            + '\nSending your message as a normal request instead…');
+          await handleTurn(msg, text);
+        }
+      } catch (e) {
+        // A thrown failure is the same case: keep the question so it can be
+        // retried, rather than losing it with the user's text.
+        rememberQuestion(msg.channelId, open);
+        await msg.reply(`\u26A0\uFE0F Could not send that: ${e.message}`);
+      }
+      return;
+    }
+
+    await handleTurn(msg, text);
+  });
+
+  /**
+   * One ordinary turn, from a mention or a DM.
+   *
+   * Extracted so the two callers that need it — the normal path and the
+   * "answer was refused, forward the message instead" path — share one
+   * implementation. A second copy would drift, and the fallback is exactly the
+   * path least likely to be exercised by hand.
+   */
+  async function handleTurn(msg, text) {
     await msg.channel.sendTyping();
     try {
       const r = await ws.send('chat.send', {
@@ -251,7 +448,8 @@ async function main() {
       });
       const response = r?.response || 'No response';
       const pending = Array.isArray(r?.pendingApprovals) ? r.pendingApprovals : [];
-      const row = approvalRow(pending);
+      const questions = Array.isArray(r?.pendingQuestions) ? r.pendingQuestions : [];
+      const row = questions.length ? null : approvalRow(pending);
       if (response.length <= 2000) {
         await msg.reply(row
           ? { content: response, components: [row] }
@@ -268,10 +466,17 @@ async function main() {
           content: approvalPrompt(pending[0]), components: [row],
         });
       }
+      if (questions.length) {
+        const q = questions[0];
+        rememberQuestion(msg.channelId, q);
+        await msg.channel.send({
+          content: questionPrompt(q), components: questionRows(q),
+        });
+      }
     } catch (e) {
       await msg.reply(`\u2757 Addled: ${e.message}`);
     }
-  });
+  }
 
   // Login
   await client.login(DISCORD_TOKEN);

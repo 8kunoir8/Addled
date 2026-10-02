@@ -128,6 +128,49 @@ def main() -> int:
         return 1
     log(f"import check: {r.stdout.strip()}")
 
+    # ── 5b. Assert the vision stack is ABSENT, and that the app says so ───
+    # The bundle intentionally omits torch/transformers/einops/timm (~400 MB);
+    # the app installs them on demand. That intent is only safe if two things
+    # hold, and both have silently broken before:
+    #   (a) the requirements-vision.txt list ships, since the install button
+    #       reads it instead of a hardcoded list; and
+    #   (b) `vision_deps_available()` reports NOT ready in the bundle, so the
+    #       UI shows the button rather than claiming images work.
+    # Checking absence also guards the reverse mistake: if someone adds the
+    # heavy block to requirements-core.txt by accident, the installer balloons
+    # and this fails by name.
+    vision_req = ROOT / "requirements-vision.txt"
+    if not vision_req.is_file():
+        log("ERROR: requirements-vision.txt is missing - the install button "
+            "would fall back to a hardcoded list")
+        return 1
+    for pkg in ("einops", "timm"):
+        if pkg not in vision_req.read_text(encoding="utf-8"):
+            log(f"ERROR: requirements-vision.txt does not list {pkg} - "
+                "Florence-2 cannot load without it")
+            return 1
+    log("vision requirements list present and complete")
+
+    absence = (
+        "import importlib.util as u, sys;"
+        "heavy=[m for m in ('torch','transformers','einops','timm') if u.find_spec(m)];"
+        "print('unexpectedly bundled: ' + ','.join(heavy)) if heavy else "
+        "print('vision-stack-absent-as-intended')"
+    )
+    r2 = subprocess.run(
+        [str(py), "-s", "-c", absence],
+        capture_output=True, text=True, env=ISOLATED_ENV,
+    )
+    if r2.returncode != 0:
+        log(f"vision absence check FAILED:\n{r2.stdout}\n{r2.stderr}")
+        return 1
+    if "unexpectedly bundled" in r2.stdout:
+        log(f"ERROR: the bundle now contains part of the vision stack ({r2.stdout.strip()}). "
+            "Either requirements-core.txt grew ~400 MB, or the check and the "
+            "reality disagree.")
+        return 1
+    log(f"vision check: {r2.stdout.strip()}")
+
     COMPLETE_MARK.write_text(PY_VERSION, encoding="utf-8")
     size_mb = sum(f.stat().st_size for f in BUNDLE.rglob("*") if f.is_file()) // 1024 // 1024
     log(f"bundle complete: {size_mb} MB in {BUNDLE.name}")

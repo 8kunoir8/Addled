@@ -233,11 +233,97 @@ def run_payload_test():
           str(len(payload["kokoro"])))
 
 
+def run_empty_audio_tests():
+    """A recording with nothing to read must say which kind of nothing.
+
+    Live log evidence:
+        file transcription failed for ...\\tmpbvs4z4gn.ogg:
+        [Errno 541478725] End of file
+    That message is misleading. ffmpeg returns the SAME errno for a 0-byte
+    file and for bytes that are not a container at all (verified: 16 bytes of
+    b"not audio at all" gives it too). Reported verbatim it reads as a decoder
+    fault, so each case is named here instead.
+
+    The second half matters just as much: the guard must not reject real
+    audio. It checks container headers only, so every format the app can
+    receive still reaches the model.
+    """
+    import tempfile
+    from pathlib import Path
+    from backend.voice.stt import _looks_like_media, transcribe_file
+
+    # ---- real containers must pass the guard ----------------------------
+    containers = {
+        "Ogg/Opus (WhatsApp voice note)": b"OggS\x00\x02\x00\x00",
+        "WebM/Matroska": b"\x1a\x45\xdf\xa3\x01\x00\x00\x00",
+        "MP4/M4A": b"\x00\x00\x00\x20ftypM4A ",
+        "WAV": b"RIFF\x24\x00\x00\x00WAVEfmt ",
+        "MP3 (ID3)": b"ID3\x03\x00\x00\x00",
+        "MP3 (bare frame)": b"\xff\xfb\x90\x00",
+        "FLAC": b"fLaC\x00\x00\x00\x22",
+        "AMR": b"#!AMR\x0a\x00",
+    }
+    for label, head in containers.items():
+        fd, p = tempfile.mkstemp(suffix=".bin")
+        os.write(fd, head)
+        os.close(fd)
+        try:
+            check(f"the guard accepts {label}", _looks_like_media(p))
+        finally:
+            os.unlink(p)
+
+    # ---- non-media must be rejected -------------------------------------
+    for label, head in {"text named .ogg": b"not audio at all",
+                        "JSON": b'{"a":1}',
+                        "PNG": b"\x89PNG\r\n\x1a\n"}.items():
+        fd, p = tempfile.mkstemp(suffix=".ogg")
+        os.write(fd, head)
+        os.close(fd)
+        try:
+            check(f"the guard rejects {label}", not _looks_like_media(p))
+        finally:
+            os.unlink(p)
+
+    # ---- the two failures must be distinguishable -----------------------
+    fd, empty = tempfile.mkstemp(suffix=".ogg")
+    os.close(fd)
+    try:
+        r_empty = transcribe_file(empty)
+    finally:
+        os.unlink(empty)
+    empty_err = r_empty.get("error") or ""
+    check("an empty recording fails", r_empty.get("success") is False)
+    check("and says it is empty", "empty (0 bytes)" in empty_err, empty_err[:70])
+    check("and does not leak an ffmpeg errno", "541478725" not in empty_err)
+
+    fd, junk = tempfile.mkstemp(suffix=".ogg")
+    os.write(fd, b"not audio at all")
+    os.close(fd)
+    try:
+        r_junk = transcribe_file(junk)
+    finally:
+        os.unlink(junk)
+    junk_err = r_junk.get("error") or ""
+    check("undecodable bytes fail", r_junk.get("success") is False)
+    check("and are named as undecodable, not as a decoder fault",
+          "not audio or video" in junk_err, junk_err[:70])
+    check("and report the byte count", "16 bytes" in junk_err, junk_err[:70])
+    check("and do not leak an ffmpeg errno", "541478725" not in junk_err)
+    check("the two causes are distinguishable", empty_err != junk_err)
+
+    # ---- a missing file is a third, separate message --------------------
+    missing = transcribe_file(
+        str(Path(tempfile.gettempdir()) / "definitely_absent_clip.ogg"))
+    check("a missing file says it is missing",
+          "no such file" in (missing.get("error") or "").lower(),
+          str(missing.get("error"))[:70])
+
 def main():
     run_kokoro_tests()
     run_edge_tests()
     run_payload_test()
     run_selection_tests()
+    run_empty_audio_tests()
     print()
     print(f"{'FAIL' if fails else 'PASS'}: {len(fails)} failure(s)")
     for f in fails:

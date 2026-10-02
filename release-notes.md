@@ -1,3 +1,74 @@
+# Addled 1.0.27
+
+The dashboard becomes a **frameless bubble window** — no OS title bar, no menu —
+and a question the model asks can now be answered from the character instead of
+only from the dashboard.
+
+## The dashboard is a bubble now
+
+The window no longer wears an operating-system title bar or Electron's stock
+File/Edit/View/Window/Help menu. It is a rounded, framed-in-software surface with
+its own header: the app name, the character-state dot at a glance, and
+**minimise / maximise / close** on the right.
+
+- **Drag by the header, resize by the edges.** With no frame there is no title
+  bar to drag, so the header is the drag region; the window still resizes from
+  its edges because a frameless window keeps `WS_THICKFRAME`.
+- **The ✕ hides to the tray**, exactly as the old close button did. It does not
+  quit, so the character and any running work survive.
+- **An icon rail instead of a tall sidebar.** The 13 sections sit in a 52-pixel
+  rail that widens on hover to show its labels, giving the page back its width.
+- **No repeated titles.** Every page already draws its own title and connection
+  state, so the window header carries only what the pages cannot — the app's
+  identity, the window controls, and a warning when the backend is down.
+
+### A note on this one
+
+The window chrome lives in `electron/main.js`, which is packed inside
+`resources/app.asar` — so this change is visible only after the installer runs,
+not from a backend or dashboard deploy. That is why it arrives in a release.
+
+## Answering a question from the character
+
+When the model needs a decision it cannot reasonably guess, it asks rather than
+silently picking. That question already reached the character's bubble; now the
+character can be *answered* there.
+
+- **Type at the character while a question is up and your words answer it**,
+  instead of starting a new request. The prompt box says which question is being
+  answered, so the input is never ambiguous.
+- **The answer settles the question and resumes the work.** The turn that was
+  waiting on the decision continues, so nothing stops at the question.
+- **A permission prompt is not answerable this way, on purpose.** A free-text
+  reply to "may I run this?" is not something the backend accepts, so a message
+  typed during an approval is still an ordinary request — and a refused answer
+  says why rather than being swallowed.
+
+## Fixed
+
+- **The window no longer shows a page title twice.** The first version of the
+  bubble header printed each page's name and connection state above the copy the
+  page already draws, so "Chat" appeared twice, stacked.
+- **`package.json` advertised build targets that did not exist.** It carried
+  `"build:all": "electron-builder --win --mac --linux"` while the packaging
+  configuration defined only `win:`, so `--mac` and `--linux` built nothing and
+  reported success. The script is gone, and `check_packaging.py` now fails if a
+  build script passes a platform flag the config cannot build — and, the other
+  way, if a configured platform has no script that builds it.
+- **`check_packaging.py` reported a broken manifest as a stack trace.** A
+  malformed `package.json` crashed the check instead of naming the problem; it now
+  reports the JSON error with its line and column.
+- **The character prompt can answer the question on screen**, covered by
+  `check_open_question.py` so a permission prompt is never mistaken for one.
+
+## Notes
+
+- `check_ask_user.py`, `check_open_question.py` and `check_decision_surfaces.py`
+  cover the question lifecycle; `scripts/check_all.py` runs 68 suites.
+- Windows: NSIS installer and portable build, both x64.
+
+---
+
 # Addled 1.0.26
 
 A large release: the Code page is rebuilt around sessions and review, the chat

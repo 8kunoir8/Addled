@@ -20,6 +20,23 @@ log = logging.getLogger("addled.tool_loop")
 NATIVE_TOOL_PROVIDERS = {"openai", "deepseek", "gemini", "openrouter"}
 MAX_TOOL_ROUNDS = 8
 
+def current_turn() -> dict:
+    """Which conversation the running turn belongs to.
+
+    A thin read of `backend.chat_context`, which already carries the origin for
+    the approval gate. `ask_user` needs the same fact for the same reason — the
+    card has to reach the chat that asked, and an answer must not arrive from
+    somewhere else — so it reads the existing ContextVar rather than keeping a
+    second copy that could disagree with the first.
+    """
+    try:
+        from backend import chat_context
+        return chat_context.origin()
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read the turn origin: %s", e)
+        return {}
+
+
 
 async def execute_skill(name: str, params: dict, provider=None) -> dict:
     """Execute a skill by name, recording usage/failure telemetry."""
@@ -420,6 +437,39 @@ async def chat_with_tools(
                             "asked for one."),
             })
             continue
+
+        # A question is the end of the turn, not a step in it.
+        #
+        # `ask_user` queues the question and returns success, so without this
+        # the loop would carry on and hand the result back to the model, which
+        # would then answer its own question or narrate a wait that nobody is
+        # holding. The turn stops here: the card is on screen, and the user's
+        # answer arrives as the next turn. Returning early is also what keeps
+        # the transcript honest — nothing after a question has happened yet.
+        asked = [tr for tr in tool_results
+                 if (tr.get("result") or {}).get("requires_answer")]
+        if asked:
+            first = (asked[0].get("result") or {})
+            question = str(first.get("question") or "").strip()
+            options = first.get("options") or []
+            ttl = str(first.get("ttl") or "a few minutes")
+            if options:
+                shown = "; ".join(str(o) for o in options[:6])
+                body = f"\n\n{shown}"
+            else:
+                body = ""
+            return {
+                "response": (f"{question}{body}\n\n"
+                             f"I'll carry on when you answer — the question "
+                             f"stays open for {ttl}."),
+                "tokens": 0,
+                "tool_rounds": rounds,
+                "tool_results": tool_results,
+                # Read by the pipeline so the turn is recorded as waiting on an
+                # answer rather than as a completed exchange.
+                "awaiting_answer": True,
+                "question_id": first.get("question_id"),
+            }
 
         # A permission request is not a failure, and must not be reported as one.
         #

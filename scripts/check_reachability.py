@@ -155,6 +155,12 @@ PHRASINGS: dict[str, list[str]] = {
     "task_schedule": ["remind me to call mum at 5pm", "schedule a task for tomorrow"],
     "task_list": ["what reminders do I have", "list my scheduled tasks"],
     "task_cancel": ["cancel that reminder"],
+    # The awkward one: `ask_user` is called when the model is UNSURE, so there
+    # is no user phrasing that asks for it. These are the situations where the
+    # model needs it, which is the closest honest equivalent — the check wants
+    # to know it can be offered, not that a user would request it by name.
+    "ask_user": ["which file did you mean", "I am not sure what you mean",
+                 "can you clarify", "ask me a question"],
 }
 
 

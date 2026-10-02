@@ -562,6 +562,10 @@ def main():
 
     class _UIBridge(QObject):
         reply = pyqtSignal(str)
+        # A decision, emitted from the WS loop and rendered on the Qt thread.
+        # `object` rather than a typed payload because Qt needs the type at
+        # class-definition time and this is a plain dict of label/callback.
+        decision = pyqtSignal(object)
 
     bridge = _UIBridge()
 
@@ -576,6 +580,160 @@ def main():
         bubble.show_message(text, char_widget.frameGeometry().center())
 
     bridge.reply.connect(_show_reply)  # thread-safe: emit from WS loop → Qt queue
+
+    def _show_decision(payload: dict):
+        """Put a prompt on the bubble, with buttons that answer it.
+
+        A permission request or a question used to reach the character as plain
+        text, and the user had to go and find the dashboard to act on it. The
+        anchor is re-read here rather than captured, so the bubble lands on the
+        character wherever it has been dragged to since.
+
+        `record` rides alongside the display fields: it is what the character
+        prompt needs to ANSWER the question rather than only show it. Without
+        it, clicking the character and typing sent a brand-new request and the
+        question expired unanswered.
+        """
+        try:
+            bubble.show_decision(
+                str(payload.get("title") or "Addled"),
+                str(payload.get("text") or ""),
+                payload.get("buttons") or [],
+                char_widget.frameGeometry().center(),
+                closable=bool(payload.get("closable", True)),
+                payload=payload.get("record") or {},
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not show a decision on the bubble: %s", e)
+
+    bridge.decision.connect(_show_decision)
+
+    # What the floating character should do when a decision is raised.
+    #
+    # Two broadcast methods carry a decision, and they are handled here rather
+    # than each call site reaching for the bubble: the character is not a
+    # WebSocket client, so this notifier is its only way to hear one, and a
+    # prompt that appears on the chat page but not on the character is the gap
+    # this closes.
+    def _on_ui_notification(method: str, params: dict) -> None:
+        try:
+            if method == "action.approvalRequest":
+                approval_id = str(params.get("approval_id") or "")
+                if not approval_id:
+                    return
+                name = str(params.get("name") or params.get("action_type")
+                           or "an action")
+                kind = str(params.get("kind") or "action")
+                command = str(params.get("command") or "")
+
+                def answer(method: str):
+                    """Answer on the character's behalf, on the WS loop."""
+                    def _go():
+                        async def _send():
+                            r = await get_server().call(method,
+                                                        {"approvalId": approval_id})
+                            if not r.get("success"):
+                                log.warning("bubble approval failed: %s",
+                                            r.get("error"))
+                        asyncio.run_coroutine_threadsafe(_send(), _ws_loop)
+                    return _go
+
+                text = f'The {kind} "{name}" needs your permission before it runs.'
+                if command:
+                    text += f"\n\n{command[:200]}"
+                buttons = [
+                    {"label": "Allow once", "callback": answer("action.approve")},
+                    {"label": "Deny", "callback": answer("action.deny"),
+                     "danger": True},
+                ]
+                bridge.decision.emit({
+                    "title": "🔐 Permission needed",
+                    "text": text,
+                    "buttons": buttons,
+                    # A gated action can be answered from the dashboard later,
+                    # so leaving it is legitimate — the request stays queued.
+                    "closable": True,
+                })
+            elif method == "question.ask":
+                question_id = str(params.get("question_id") or "")
+                options = params.get("options") or []
+                if not question_id:
+                    return
+                question_text = str(params.get("question") or "")
+                text = question_text
+                if params.get("context"):
+                    text += f"\n\n{params['context']}"
+
+                # The record the answer needs, carried with the card so both
+                # ways of answering — a button here and typing at the character
+                # — send the same thing.
+                record = {
+                    "question_id": question_id,
+                    "question": question_text,
+                    "source": str(params.get("source") or ""),
+                    "conversation": str(params.get("conversation") or ""),
+                    "options": list(options),
+                }
+                buttons = []
+                # Only the first three choices get a button: four plus the way
+                # out is the most that stays readable above a small character.
+                for option in options[:3]:
+                    buttons.append({
+                        "label": str(option)[:32],
+                        "callback": (lambda choice=option: asyncio
+                                     .run_coroutine_threadsafe(
+                                         _answer_question(record, str(choice)),
+                                         _ws_loop)),
+                    })
+                bridge.decision.emit({
+                    "title": "❓ Addled needs to know",
+                    "text": text,
+                    "buttons": buttons,
+                    "record": record,
+                    # An open-ended question has no buttons, but it is still
+                    # answerable from here: click the character and type. The
+                    # prompt names the question so it is clear what is being
+                    # answered.
+                    "closable": True,
+                })
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not raise a bubble decision: %s", e)
+
+    async def _answer_question(record: dict, answer: str) -> dict:
+        """Settle a question and resume the work it was blocking.
+
+        One helper for both ways of answering on this surface — a bubble button
+        and typing at the character. Sending only `question.answer` settles the
+        question and tells the model nothing: it asked, the user answered, and
+        the turn it was blocking never continues. Keeping both calls here is
+        what stops the two paths drifting into that.
+        """
+        settled = await get_server().call("question.answer", {
+            "question_id": record.get("question_id"),
+            "answer": answer,
+            "source": record.get("source") or "character",
+            "conversation": record.get("conversation") or "",
+        })
+        if not settled.get("success"):
+            log.warning("character question not answered: %s",
+                        settled.get("error"))
+            return settled
+        asked = (f'"{record.get("question")}"' if record.get("question")
+                 else "a question")
+        await get_server().call("chat.send", {
+            "message":
+                f"Answering your question {asked}: {answer}\n\n"
+                "This is my answer to the question you asked. Continue the task "
+                "you were working on when you asked it, using this.",
+            "source": record.get("source") or "character",
+            "conversation": record.get("conversation") or None,
+        })
+        return settled
+
+    try:
+        get_server().set_ui_notifier(_on_ui_notification)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not attach the bubble notifier: %s", e)
 
     async def _handle_prompt(text: str):
         get_server().broadcast_nowait("chat.push", {"role": "user", "content": text})
@@ -598,15 +756,47 @@ def main():
                     engine.sig_agent_state.emit("idle")
 
     def _on_prompt():
-        text, ok = QInputDialog.getText(char_widget, "Ask Addled",
-                                        "What would you like to know?")
-        if ok and text.strip():
-            # Show a "thinking" bubble right away, anchored to the character
-            bubble.show_thinking(char_widget.frameGeometry().center())
-            try:
-                asyncio.run_coroutine_threadsafe(_handle_prompt(text.strip()), _ws_loop)
-            except Exception as e:
-                log.warning("Prompt dispatch failed: %s", e)
+        """Left-click on the character: type something at Addled.
+
+        **When a question is open, this is the answer to it.** Clicking the
+        character and typing is the obvious thing to try while the bubble is
+        asking something, and it used to send a brand-new request instead: the
+        text went to a fresh turn, the question stayed open, and it expired
+        while the user believed they had answered it — a message that goes
+        nowhere with nothing saying so.
+
+        The open question is read from the bubble rather than from the queue,
+        because the bubble is what the user is looking at: if it is showing a
+        question, that is the one being answered.
+        """
+        held = bubble.open_question()
+        if held:
+            title = "Answer Addled"
+            # The question itself is the prompt, so what is being answered is
+            # visible while typing rather than remembered from a card that has
+            # since been covered.
+            prompt = (held.get("question") or "Your answer?").strip()
+            if len(prompt) > 300:
+                prompt = prompt[:300] + "…"
+        else:
+            title = "Ask Addled"
+            prompt = "What would you like to know?"
+
+        text, ok = QInputDialog.getText(char_widget, title, prompt)
+        if not (ok and text.strip()):
+            return
+        answer = text.strip()
+
+        bubble.show_thinking(char_widget.frameGeometry().center())
+        try:
+            if held:
+                asyncio.run_coroutine_threadsafe(
+                    _answer_question(held, answer), _ws_loop)
+            else:
+                asyncio.run_coroutine_threadsafe(
+                    _handle_prompt(answer), _ws_loop)
+        except Exception as e:
+            log.warning("Prompt dispatch failed: %s", e)
 
     char_widget.set_interaction_callbacks(on_ask=_on_prompt)
 

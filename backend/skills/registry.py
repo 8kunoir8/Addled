@@ -1069,6 +1069,85 @@ class SkillRegistry:
         self._register_guideline_skills()
         self._register_memory_skills()
         self._register_swarm_skills()
+        self._register_clarification_skills()
+
+    def _register_clarification_skills(self):
+        """Asking the user a question, when the request genuinely cannot be read.
+
+        One skill, and it is deliberately narrow. The failure mode of a cheap
+        `ask_user` is worse than the ambiguity it solves: a model that finds
+        asking easy stops making reasonable assumptions, and the user ends up
+        answering more questions than they would have typed instructions. The
+        description below is the main lever for that — it says when *not* to
+        call this as much as when to.
+        """
+        async def ask_user(params: dict) -> dict:
+            from backend.questions import pending
+            from backend.skills import tool_loop
+
+            question = params.get("question") or params.get("ask") or ""
+            options = params.get("options") or []
+            if isinstance(options, str):
+                # A model sometimes sends one string instead of a list. Taking
+                # it would make the card show one choice with no way to pick a
+                # different one, so it is treated as a single option.
+                options = [options]
+            if not isinstance(options, list):
+                options = []
+
+            ctx = tool_loop.current_turn()
+            result = pending.ask(
+                question,
+                options=options,
+                source=ctx.get("source") or "",
+                conversation=ctx.get("conversation") or "",
+                context=params.get("context") or "",
+            )
+            # The marker `tool_loop` stops on. Set only for a queued question:
+            # a refusal (unattended, duplicate, too long) must NOT end the turn,
+            # because there is no card and nothing for the user to answer. The
+            # model has to read the refusal and carry on, which is exactly what
+            # the refusal text tells it to do.
+            if result.get("success"):
+                result["requires_answer"] = True
+            return result
+
+        self.register(SkillDefinition(
+            "ask_user",
+            "Ask the user a question when you genuinely cannot tell what they "
+            "meant, and guessing wrong would waste real work.\n\n"
+            "Use it for a decision only they can make: which of two files with "
+            "the same name, which account or recipient, which of two readings "
+            "of a contradictory request, or a choice between approaches with "
+            "different trade-offs.\n\n"
+            "Do NOT use it to be cautious. If a reasonable default exists, take "
+            "it and say what you assumed — a user correcting one line is faster "
+            "than answering a question. Do not ask permission to proceed, do "
+            "not ask what you could discover by reading or searching, and do "
+            "not ask for information already in the conversation.\n\n"
+            "The question goes to the user's dashboard as a card and your turn "
+            "ends there; their answer arrives as the next message. Never call "
+            "this and then carry on as if it had been answered.\n\n"
+            "Pass `options` when there are a few concrete choices — they are "
+            "shown as buttons and are much faster to answer than free text. "
+            "Leave it out when the answer is open-ended.",
+            {"type": "object", "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question, one sentence, as short as it "
+                                   "can be while still being unambiguous."},
+                "options": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Up to six concrete choices, when the "
+                                   "decision is between known answers. Omit "
+                                   "for an open-ended question."},
+                "context": {
+                    "type": "string",
+                    "description": "Optional: one line on why you are asking, "
+                                   "so the user understands what it blocks."},
+            }, "required": ["question"]},
+            ask_user, "system",
+        ))
 
     def _register_swarm_skills(self):
         """Tools a swarm agent uses to coordinate with its peers.

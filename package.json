@@ -1,6 +1,6 @@
 {
   "name": "addled",
-  "version": "1.0.26",
+  "version": "1.0.27",
   "description": "Addled — AI Desktop Buddy with Full Dashboard",
   "author": "Kunoir",
   "main": "electron/main.js",
@@ -9,7 +9,6 @@
     "dev:backend": "cd backend && python main.py",
     "dev:dashboard": "cd dashboard && npm run dev",
     "build:win": "electron-builder --win",
-    "build:all": "electron-builder --win --mac --linux",
     "postinstall": "cd dashboard && npm install"
   },
   "dependencies": {

@@ -27,6 +27,17 @@ INSTALL_HINT = (
 
 GENERATE_TIMEOUT_S = 600
 
+# Packages that must be importable WITH -s for the local models to actually
+# run. transformers alone is not enough: Florence-2's remote code (and timm's
+# model registry) import einops and timm at call time, so a machine can pass a
+# torch+transformers check and still fail on the first image with "requires
+# einops, timm".
+BASE_DEPS = ("torch", "transformers")
+# What local vision needs on TOP of BASE_DEPS. Kept as a superset so
+# vision_deps_available() needs one call, not two, and so "is this in the
+# vision set?" is answerable without knowing the split.
+VISION_DEPS = BASE_DEPS + ("einops", "timm")
+
 _lock = threading.Lock()
 _state: dict = {"key": None, "tokenizer": None, "model": None, "device": None}
 _load_error: str | None = None
@@ -56,14 +67,49 @@ def prepare_env(configured_root: str = "") -> str:
     return root
 
 
+def missing_deps(*names: str) -> list[str]:
+    """Which of ``names`` cannot be imported RIGHT NOW (respecting ``-s``).
+
+    Uses find_spec rather than import so the check is cheap and does not pay
+    the cost of importing torch.
+    """
+    import importlib.util
+
+    absent: list[str] = []
+    for name in names:
+        try:
+            if importlib.util.find_spec(name) is None:
+                absent.append(name)
+        except (ImportError, ValueError):
+            absent.append(name)
+    return absent
+
 def deps_available() -> tuple[bool, str]:
-    """Return (ok, reason) for the optional torch/transformers dependency."""
-    try:
-        import torch  # noqa: F401
-        import transformers  # noqa: F401
-        return True, ""
-    except Exception as exc:
-        return False, f"{INSTALL_HINT} ({exc})"
+    """Return (ok, reason) for the optional torch/transformers dependency.
+
+    This is the BASE pair only — the Local AI provider needs just these. Vision
+    has a larger requirement; see ``vision_deps_available``.
+    """
+    absent = missing_deps(*BASE_DEPS)
+    if absent:
+        return False, f"{INSTALL_HINT} (missing: {', '.join(absent)})"
+    return True, ""
+
+def vision_deps_available() -> tuple[bool, str]:
+    """Return (ok, reason) for the full local-vision stack.
+
+    Florence-2 loads torch and transformers, then its remote code imports
+    einops and timm. Checking only the first pair is what let the app report
+    "ready" while every image failed with "requires einops, timm".
+    """
+    absent = missing_deps(*VISION_DEPS)
+    if absent:
+        return False, (
+            "Local vision (Florence-2) needs "
+            + ", ".join(absent)
+            + ". Install from Settings — Providers — Local AI."
+        )
+    return True, ""
 
 
 def snapshot_present(model_id: str, configured_root: str = "") -> bool:

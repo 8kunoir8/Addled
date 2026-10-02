@@ -29,6 +29,18 @@ cd ..
 npx electron .
 ```
 
+> **The dashboard must be running before Electron.** In development the Electron
+> shell loads `http://localhost:3000` and shows nothing until that server answers
+> — the window is created but stays hidden, so a missing dashboard looks like a
+> crash. Start step 3 first, then step 4.
+>
+> Electron in development also spawns the backend with whatever `python` is on
+> `PATH`, not the bundled interpreter. If that Python lacks the app's packages
+> you will see `ModuleNotFoundError: No module named 'PyQt6'` and the backend
+> will restart five times and give up; the window still opens, but the pages
+> report *Backend not running*. Use the packaged build, or point `PATH` at
+> `python-bundle\python.exe`, if you want the full stack in development.
+
 Or use the one-click launcher:
 ```bash
 launch.bat
@@ -36,9 +48,13 @@ launch.bat
 
 > **Self-contained installer**: `build.bat` bundles Python 3.14.7 + all core
 > dependencies — no Python install needed on the target PC.
-> Optional extras: local vision (`torch` + `transformers`, ~400 MB) and
-> browser automation (Playwright + Chromium, ~150 MB) — both installable from
-> the app itself (Settings → Browser for Playwright).
+> Optional extras: local vision (`torch` + `transformers` + `einops` + `timm`,
+> ~400 MB) and browser automation (Playwright + Chromium, ~150 MB) — both
+> installable from the app itself (Settings → Local AI for vision, Settings →
+> Browser for Playwright). Vision is installed on demand rather than bundled,
+> because 400 MB of torch on every download is a steep price for an offline
+> fallback most setups never need. The exact package list lives in
+> `requirements-vision.txt`, which the app reads so the two cannot drift.
 > The **local AI model** (llamafile + Qwen3-8B-Q4_K_M, ~5.03 GB) is downloaded on demand
 > after you approve it — never bundled.
 > Voice models are fetched by `scripts/fetch_voice_models.py` (~650 MB:
@@ -101,6 +117,20 @@ launch.bat
 ### 🎭 Floating Character
 12 animation states (idle, listening, observing, thinking, has_suggestion, acting, speaking, sleeping, blocked, error, working, dreaming) — all fully wired to real agent activity (thinking while the LLM works, speaking during TTS, acting during action execution, error on failures, blocked under privacy guard). 6 vector shapes, cursor gaze tracking, breathing/stretch animations, glow effects, mood tinting, progress ring, 7 particle types. **Chat-bubble replies** pop above the character when you click it.
 
+**Prompts on the character are clickable.** A permission request or a question appears on the bubble with its own buttons, so the surface that is always on screen is one you can answer on rather than one that tells you to go and find the dashboard. A decision bubble takes an amber border and **does not auto-dismiss or close on a click** — a prompt that fades away on its own leaves the work behind it blocked and the reason unseen. Ordinary replies keep their usual read-then-fade behaviour.
+
+**Ask an open question and the answer goes back to the work.** When the model needs a decision it cannot guess — which file, which reading, which of two approaches — it asks instead of assuming, and the question appears both on the character and on the dashboard. Typing at the character while a question is up **answers that question** rather than starting a new request, and the prompt box says what is being answered. Answering settles the question and resumes the turn that was waiting on it, so the work continues instead of stopping at the question. A permission prompt is deliberately *not* answerable this way: a free-text reply to "may I run this?" is not something the backend accepts, so a message typed during an approval is still an ordinary request.
+
+### 🪟 Bubble window (frameless dashboard)
+
+The dashboard is a **frameless, rounded window** rather than a normal application window: no OS title bar and no File/Edit/View/Window/Help menu. The shell draws its own 38-pixel header — the app name, the character-state dot, and **minimise / maximise / close** controls — and that header is the drag handle.
+
+- **Close means hide.** The ✕ sends the window to the tray, exactly as the system close button did before the frame was removed, so the character and any running work stay alive.
+- **Still resizable.** `frame: false` removes the OS chrome but keeps `WS_THICKFRAME`, so the window resizes from its edges.
+- **An icon rail, not a tall sidebar.** The 13 sections sit in a 52-pixel rail that widens on hover to reveal its labels, so the page keeps the width.
+- **No duplicated titles.** The header carries only what the pages cannot — the app's identity and the window controls. Each page still shows its own title and connection state, so nothing is printed twice.
+- **Close still means hide.** A frameless window has no OS close button, so the header's ✕ is wired to the same path the frame used: it hides to the tray and does not quit.
+
 ### 🦊 Sprite Skins (codex-pet style)
 Upload any animated GIF or a ZIP of per-state GIFs in Settings → Character and the floating character becomes that pet — all 12 agent states keep working on top (thinking/error/sleeping effects included). State clips map by file name (`idle.gif`, `thinking.gif`, …); skipped states fall back to `idle.gif`. Ships with the **Neon Panda** starter skin out of the box.
 
@@ -129,6 +159,17 @@ interrupted. Decline and Addled falls back to **OpenRouter**
 (`nvidia/nemotron-3-ultra-550b-a55b:free`) — paste a key in Settings → Providers.
 `Hugging Face (Local)` runs any Hugging Face chat model in-process with
 `transformers` (optional install from Settings).
+
+**Local vision is a second, separate install.** Florence-2 captioning needs
+`torch`, `transformers`, `einops` and `timm` — the last two are imported by
+Florence-2's own code the moment it loads, so a torch-and-transformers-only
+install fails on the first image. Settings → Providers → Local AI reports the
+two capabilities apart, because they genuinely differ: *chat ready · images
+need deps* means text works and only the vision stack is outstanding. The
+button installs from `requirements-vision.txt` into the app's own
+site-packages — the bundled interpreter runs with `-s`, so user
+site-packages are invisible to it and installing there would silently do
+nothing.
 
 **Runs only when you use it**: the local server never preloads at launch. It starts
 when *Addled Local* is the selected provider (Settings → Providers → *Start
@@ -329,6 +370,8 @@ Local calendar with Google Calendar OAuth sync — and a **tick-driven task sche
 ### 🤖 Bot Bridges
 Telegram (grammY with 6 commands), WhatsApp (Baileys multi-device with QR pairing), Discord (discord.js with 5 slash commands). All forward messages to Addled's chat. Scheduler notifications broadcast as `bot.notify` events for bridge push integration.
 
+**Text, photos and voice notes.** Send any of them and the reply comes back in the same chat. A photo goes through the visual model and a voice note is transcribed locally by whisper, so the answer is about what is *in* the media rather than an acknowledgement that a file arrived. A caption on a photo is treated as the question. Media is capped (10 MB image, 12 MB audio) with a refusal that names the actual size, and a file that cannot be read says so instead of answering as if nothing was sent.
+
 The bots are **two-way**, not just a way to talk to Addled: the agent can also reach *out*
 through them. `send_message` sends to a contact or chat on any connected bridge,
 `chat_history` reads back a conversation, and `task_schedule` queues a message to be
@@ -378,6 +421,10 @@ Two things worth calling out:
 - **Interactive sessions.** For work a one-shot command cannot do — a `cd` that sticks, an env var the next command reads, a REPL, an open ssh — `session_open` starts a real shell that keeps its state, and `session_send` types into it. Market script arguments are passed as an **argv list, never folded into a shell string**, so an argument containing PowerShell metacharacters is data rather than code.
 - **Standing permission, granted from whichever surface asked.** An approval prompt carries its own **Always allow** button, so a skill or tool you trust stops asking from that point on without you going to Settings. Grants are per *kind* (skill vs tool), so allowing `read_file` never silently allows a forged skill by the same name. **Destructive names are refused inside the grant call itself** — not by a caller that remembers to check — so `delete_file` cannot be made standing no matter which surface offers the button. Installed market skills are bound to a **digest fingerprint**: if the script behind a granted skill later changes, the grant stops matching and Addled asks again.
 - **The answer belongs to the chat that asked.** Telegram, Discord, WhatsApp and the dashboard all share one approval queue, so a bare "yes" is ambiguous. Every queued approval records its **origin** (source + conversation), and an answer must name a request raised *in that same chat* — otherwise a reply in one bot cannot release an action requested by another. Resolving an approval clears its origin, so the map tracks only what is genuinely outstanding.
+- **It can ask you a question, and you can answer it wherever you are.** `ask_user` is for the case a turn genuinely cannot resolve — which of two same-named files, which account, which of three readings of a short request. It is deliberately narrow and its description says when *not* to use it: a model that finds asking cheap stops making reasonable assumptions. The question appears as a card with buttons for its choices (or a text box when there is nothing to choose between), on the chat page, the Code page, **the floating character**, and **all three bots**. Answering **resumes the work** — the turn that asked has ended, and the answer arrives as the next turn carrying what you said.
+  - **The turn does not block.** A question ends it, exactly like an approval, because holding a turn open is the behaviour that was already removed once: a local model routinely outlived the wait and the app looked hung.
+  - **Only where someone can answer.** Scheduled tasks, swarm desks and voice turns have nobody watching, so they are refused and told to decide, state their assumption and carry on. The rule is derived from the source list, so a new source cannot land in a gap.
+  - **A question expires** (10 minutes by default) and the next turn is *told* it went unanswered rather than silently forgetting — otherwise the model just asks again. A repeated question is refused too, including one reworded, because a looping model otherwise replaces your answer with a second card.
 - **Swarm agents keep their own notebooks.** Each agent in a swarm writes a per-agent **notebook** after every step rather than at the end of a flow, because a run killed mid-way is exactly the case it exists for. Entries are capped; the overflow is **folded into a standing summary** rather than dropped, so detail degrades from verbatim to compressed instead of vanishing. Agents hand each other a **digest**, not the raw log, and can search their own history with `swarm.notebookSearch` — a long-running role keeps its memory across restarts without flooding its peers.
 - **Method skills, not just tools.** The desks that write code and check it carry a *method*, not only a toolset: the coder desk gets test-driven development and systematic debugging, the reviewer gets the code-review pair, and QA gets verification-before-completion plus the webapp-testing toolkit. These were installed as market skills and mapped onto each role, so an agent is told **how** to work rather than only what it may call.
 

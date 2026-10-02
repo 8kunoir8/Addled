@@ -1,9 +1,10 @@
 // Addled — WhatsApp Bot Bridge
 // Forwards messages between WhatsApp and the Addled Python backend via Baileys.
 
-const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const { AddledWSClient } = require('./shared/ws-client');
+const { toAttachment, describe } = require('./shared/media');
 const path = require('path');
 const fs = require('fs');
 
@@ -48,6 +49,122 @@ function approvalPrompt(req) {
     : 'Reply "yes" to allow once, or "no" to deny.';
   lines.push('', answers);
   return lines.join('\n');
+}
+
+// A question the model asked. Without buttons the choices have to be numbered,
+// and the number is the answer — see `classifyQuestionReply`.
+function questionPrompt(q) {
+  const lines = ['❓ Addled needs to know', '', String(q?.question || '').slice(0, 900)];
+  if (q?.context) lines.push('', String(q.context).slice(0, 200));
+  const options = Array.isArray(q?.options) ? q.options.filter((o) => String(o).trim()) : [];
+  if (options.length) {
+    lines.push('');
+    options.slice(0, 6).forEach((label, i) => lines.push(`${i + 1}. ${label}`));
+    lines.push('', 'Reply with the number, or type your own answer.');
+  } else {
+    lines.push('', 'Reply with your answer.');
+  }
+  if (q?.ttl) lines.push('', `Waiting for ${q.ttl}. It carries on when you answer.`);
+  return lines.join('\n');
+}
+
+// Which question this chat was last shown, and what its choices were.
+//
+// Separate from `waiting`, which holds approvals: an approval is answered with
+// one of three fixed words while a question is answered with a number or with
+// free text, and sharing one map meant a "yes" could be read as an answer to a
+// question that was never about yes or no.
+const openQuestions = new Map();
+
+function rememberQuestion(chatId, q) {
+  if (!q?.question_id) return;
+  openQuestions.set(String(chatId), {
+    question_id: q.question_id,
+    question: q.question || '',
+    options: Array.isArray(q.options) ? q.options : [],
+  });
+}
+
+function takeQuestion(chatId) {
+  const key = String(chatId);
+  const held = openQuestions.get(key) || null;
+  openQuestions.delete(key);
+  return held;
+}
+
+// Turn a reply into an answer: the number of a choice, or the text itself.
+//
+// A bare number is only read as a choice when the question actually offered
+// that many — otherwise "2" in reply to an open question would be swallowed as
+// an option that does not exist. Anything else is the answer verbatim, which is
+// what makes an open-ended question answerable on a platform with no buttons.
+function classifyQuestionReply(held, text) {
+  const clean = String(text || '').trim();
+  if (!clean) return { answer: '', ok: false };
+  const options = (held?.options || []).filter((o) => String(o).trim());
+  const asNumber = /^(\d{1,2})$/.exec(clean);
+  if (asNumber && options.length) {
+    const index = Number(asNumber[1]) - 1;
+    if (index >= 0 && index < options.length) {
+      return { answer: options[index], ok: true, chosen: true };
+    }
+    // A number too large to be a choice is left as text rather than refused:
+    // it may be the answer itself ("how many retries?" -> "3").
+  }
+  return { answer: clean, ok: true, chosen: false };
+}
+
+// Answering resumes the work the question was blocking, exactly as the
+// dashboard does: settle it, then send the answer as the next turn.
+//
+// The `chat.send` belongs HERE and not in the caller. Sending only
+// `question.answer` settles the question without the model ever learning the
+// answer — it asked, the user answered, and the work stayed stopped. Keeping
+// both calls in one function is what makes that impossible to half-do.
+async function answerQuestion(ws, chatId, held, answer, send) {
+  const settled = await ws.send('question.answer',
+    { question_id: held.question_id, answer,
+      source: 'whatsapp', conversation: String(chatId) });
+  if (!settled?.success) {
+    // Retry only when retrying could work.
+    //
+    // `expired` is terminal, and so is an origin refusal — the backend is
+    // saying the id is gone for good, or that this chat is not the one it
+    // belongs to. Re-remembering in either case made the channel UNUSABLE:
+    // every later message was read as an answer to a question that can never be
+    // accepted, consumed, refused, and re-remembered, so the user could only
+    // type into a void. Guarding on `expired` alone missed the refusal the
+    // origin check introduced.
+    //
+    // A transient failure (a dropped socket) is different: the question is
+    // still queued, so putting it back lets the user simply type again.
+    const terminal = settled?.expired
+      || /different conversation|must say which conversation/i
+        .test(String(settled?.error || ''));
+    if (!terminal) {
+      rememberQuestion(chatId, held);
+    }
+    return settled;
+  }
+  const asked = held.question ? `"${held.question}"` : 'a question';
+  const resumed = await ws.send('chat.send', {
+    message:
+      `Answering your question ${asked}: ${answer}\n\n` +
+      `This is my answer to the question you asked. Continue the task you were ` +
+      `working on when you asked it, using this.`,
+    source: 'whatsapp',
+    conversation: String(chatId),
+  });
+  const text = resumed?.response || 'No response';
+  const max = 4000;
+  for (let i = 0; i < text.length; i += max) {
+    await send(text.slice(i, i + max));
+  }
+  // `settled` is what callers branch on, and success means the QUESTION was
+  // answered — a failure of the resume must not be reported as a refused
+  // answer, or the question would be re-armed with an id the backend has
+  // already closed.
+  return settled;
 }
 
 async function main() {
@@ -242,6 +359,40 @@ async function main() {
           if (!mentioned.includes(botId)) return;
         }
         await sock.sendPresenceUpdate('composing', sender);
+        // Two different decisions can be open at once, and they do not share an
+        // answer vocabulary: a question is settled by a number or by free text,
+        // an approval by one of three fixed words.
+        //
+        // The ORDER is therefore load-bearing, and it is the approval that is
+        // checked first *when the reply is one of its words*. A question accepts
+        // any text, so checking it first swallowed the "yes" a pending approval
+        // was waiting for — the approval was left hanging and the question was
+        // answered with the word "yes". A number ("1") cannot be an approval
+        // answer, so a choice still reaches the question.
+        const openQ = openQuestions.get(sender);
+        const approvalWord = classifyReply(text);
+        const pendingApproval = waiting.get(sender);
+        if (openQ && !(pendingApproval && approvalWord)) {
+          const parsed = classifyQuestionReply(openQ, text);
+          if (parsed.ok) {
+            takeQuestion(sender);
+            try {
+              const settled = await answerQuestion(ws, sender, openQ, parsed.answer,
+                (m) => sock.sendMessage(sender, { text: m }, { quoted: msg }));
+              if (!settled?.success) {
+                // Refused. The text must not be dropped — forward it as an
+                // ordinary request so the user is not typing into a void.
+                await sock.sendMessage(sender,
+                  { text: `⚠️ ${settled?.error || 'That question is no longer open.'}` },
+                  { quoted: msg });
+              }
+            } catch (e) {
+              await sock.sendMessage(sender,
+                { text: '⚠️ Failed: ' + e.message }, { quoted: msg });
+            }
+            return;
+          }
+        }
         // A decision on something this chat was asked about takes priority
         // over starting a new turn — otherwise the word "yes" becomes a fresh
         // question to the model and the request it was answering is abandoned.
@@ -300,20 +451,97 @@ async function main() {
               await sock.sendMessage(sender, { text: response.slice(i, i + max) });
           }
           const pending = Array.isArray(r?.pendingApprovals) ? r.pendingApprovals : [];
+          const questions = Array.isArray(r?.pendingQuestions) ? r.pendingQuestions : [];
           if (pending[0]?.approval_id) {
             waiting.set(sender, pending[0]);
             await sock.sendMessage(sender,
               { text: approvalPrompt(pending[0]) }, { quoted: msg });
           }
+          // A question is shown even when an approval is also waiting: they are
+          // separate decisions and the user needs to see both. Only the first
+          // is sent, for the same reason the other bridges send one card — two
+          // prompts at once is how the wrong one gets answered.
+          if (questions[0]?.question_id) {
+            rememberQuestion(sender, questions[0]);
+            await sock.sendMessage(sender,
+              { text: questionPrompt(questions[0]) }, { quoted: msg });
+          }
         } catch (e) {
           await sock.sendMessage(sender, { text: '\u2757 Addled: ' + e.message }, { quoted: msg });
         }
       }
-      if (type === 'imageMessage') {
-        await sock.sendMessage(sender, { text: '\uD83D\uDDBC Image received. Vision in Phase 3.' }, { quoted: msg });
-      }
-      if (type === 'audioMessage') {
-        await sock.sendMessage(sender, { text: '\uD83C\uDFA4 Voice note. STT in Phase 3.' }, { quoted: msg });
+      if (type === 'imageMessage' || type === 'audioMessage') {
+        // A photo or a voice note. Same route as the text path above — one
+        // `chat.send` carrying an attachment — so the backend does the reading
+        // and the model answers about what is IN the media.
+        //
+        // `downloadMediaMessage` is Baileys' own fetcher: it handles the
+        // encrypted-media round trip, which is why the bytes are not pulled
+        // from `content` directly.
+        const isAudio = type === 'audioMessage';
+        const notice = await sock.sendMessage(sender,
+          { text: isAudio ? '\uD83C\uDFA4 Transcribing\u2026'
+                          : '\uD83D\uDDBC Looking at it\u2026' },
+          { quoted: msg }).catch(() => null);
+        try {
+          const buffer = await downloadMediaMessage(msg, 'buffer', {});
+          const mime = content?.mimetype || '';
+          const fallback = isAudio ? 'voice.ogg' : 'image.jpg';
+          const built = toAttachment(buffer, fallback, mime);
+          if (built.error) {
+            await sock.sendMessage(sender, { text: '\u26A0\uFE0F ' + built.error },
+                                   { quoted: msg });
+            return;
+          }
+          // A caption on the image is the user's actual question, so it is used
+          // when present; otherwise a neutral prompt that makes the model
+          // describe what it was given.
+          const caption = String(content?.caption || '').trim();
+          const r = await ws.send('chat.send', {
+            message: caption
+              || (isAudio ? 'What did I say in this voice note?'
+                          : 'What is in this image?'),
+            source: 'whatsapp',
+            conversation: String(sender),
+            attachments: [built.attachment],
+          });
+          const response = r?.response || 'No response';
+          const max = 4000;
+          if (response.length <= max) {
+            await sock.sendMessage(sender, { text: response }, { quoted: msg });
+          } else {
+            for (let i = 0; i < response.length; i += max)
+              await sock.sendMessage(sender, { text: response.slice(i, i + max) });
+          }
+          const pending = Array.isArray(r?.pendingApprovals) ? r.pendingApprovals : [];
+          const questions = Array.isArray(r?.pendingQuestions) ? r.pendingQuestions : [];
+          if (pending[0]?.approval_id) {
+            // Same as the text path: a decision asked for here must be
+            // answerable here.
+            waiting.set(sender, pending[0]);
+            await sock.sendMessage(sender,
+              { text: approvalPrompt(pending[0]) }, { quoted: msg });
+          }
+          if (questions[0]?.question_id) {
+            // A voice note can raise a question too ("did you mean the January
+            // or the February report?"), and it has to be answerable here for
+            // the same reason.
+            rememberQuestion(sender, questions[0]);
+            await sock.sendMessage(sender,
+              { text: questionPrompt(questions[0]) }, { quoted: msg });
+          }
+          console.log(`[WhatsApp] handled ${describe(built.attachment)}`);
+        } catch (e) {
+          console.error('[WhatsApp] media failed:', e.message);
+          await sock.sendMessage(sender,
+            { text: '\u2757 Could not handle that: ' + e.message }, { quoted: msg });
+        } finally {
+          // The placeholder is transient; leaving it makes the chat read as if
+          // nothing happened after it.
+          if (notice?.key) {
+            await sock.sendMessage(sender, { delete: notice.key }).catch(() => {});
+          }
+        }
       }
     } catch (err) {
       console.error('[WhatsApp] Error:', err);

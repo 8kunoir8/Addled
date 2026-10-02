@@ -101,6 +101,11 @@ class WSServer:
 
     async def broadcast(self, method: str, params: dict | None = None):
         """Send a notification to all connected clients."""
+        # The floating character is not a WebSocket client — it is a Qt widget
+        # in this process — so it cannot hear a broadcast. The notifier is how
+        # it gets told, and it is called for *every* method so a future
+        # addition does not have to remember to wire itself up.
+        self._notify_ui(method, params)
         msg = json.dumps({
             "jsonrpc": "2.0",
             "method": method,
@@ -146,6 +151,52 @@ class WSServer:
         except Exception as e:  # noqa: BLE001
             log.debug("could not schedule the %s broadcast: %s", method, e)
             coro.close()
+
+    async def call(self, method: str, params: dict | None = None) -> dict:
+        """Invoke a handler directly, from inside this process.
+
+        Exists because the floating character is a Qt widget, not a socket
+        client: when the user answers a permission prompt on the bubble there is
+        no connection to send a request on, and faking one would go through the
+        remote-access gate and the JSON framing for no reason.
+
+        Deliberately does NOT run the remote gate: an answer tapped on the
+        character comes from the person at the machine, which is the case the
+        gate exists to allow.
+        """
+        handler = self._handlers.get(str(method or ""))
+        if handler is None:
+            return {"success": False, "error": f"Method not found: {method}"}
+        try:
+            result = await handler(params or {}, None)
+            return result if isinstance(result, dict) else {"success": True}
+        except Exception as e:  # noqa: BLE001
+            log.exception("Internal call %s failed", method)
+            return {"success": False, "error": str(e)}
+
+    def set_ui_notifier(self, fn) -> None:
+        """Register a callback for notifications the floating character needs.
+
+        Called with ``(method, params)`` for every broadcast. Kept separate from
+        the socket fan-out because the character is in-process and has no
+        connection to send to; without this it could only learn about a
+        permission request or a question by polling, which is both wasteful and
+        late — the point of the bubble is that it appears while the turn that
+        raised it is still running.
+
+        Failures are swallowed: a Qt widget that has been destroyed must not
+        take the WebSocket server down with it.
+        """
+        self._ui_notifier = fn
+
+    def _notify_ui(self, method: str, params: dict | None) -> None:
+        fn = getattr(self, "_ui_notifier", None)
+        if fn is None:
+            return
+        try:
+            fn(method, params or {})
+        except Exception as e:  # noqa: BLE001
+            log.debug("UI notifier failed for %s: %s", method, e)
 
     def _note_remote(self, ws: WebSocketServerProtocol) -> dict:
         """Attach the remote context to a connection, if the gateway set one.
@@ -471,15 +522,108 @@ def _plan_concurrency() -> int:
 # room to think. Above this a partial answer would diff as a mass deletion.
 _CODE_EDIT_MAX_CHARS = 12000
 
+# Refuse an audio attachment above this, decoded. Base64 inflates by ~33%, and
+# the socket frame limit is 64 MB — a payload near it would take seconds to
+# decode and then more seconds in Whisper, for a voice note nobody meant to be
+# that long. 12 MB is roughly 10 minutes of compressed speech.
+_MAX_AUDIO_BYTES = 12 * 1024 * 1024
+
+# Suffixes the local decoder accepts, mapped from what a bridge might call the
+# file. The suffix matters: the decoder sniffs the container, so writing .ogg
+# bytes to a .tmp file fails with an unhelpful decode error.
+_AUDIO_SUFFIXES = {
+    "ogg": ".ogg", "oga": ".ogg", "opus": ".ogg",
+    "m4a": ".m4a", "mp4": ".m4a", "mp3": ".mp3", "wav": ".wav",
+    "webm": ".webm", "flac": ".flac", "aac": ".aac", "amr": ".amr",
+}
+
+def _audio_suffix(name: str, mime: str = "") -> str:
+    """Pick a file suffix the decoder will accept.
+
+    From the attachment's own name first, then its mime type, and finally .ogg —
+    the container WhatsApp voice notes actually use, so an unlabelled blob is
+    guessed more often right than wrong.
+    """
+    for source in (name, mime):
+        text = str(source or "").lower()
+        for key, suffix in _AUDIO_SUFFIXES.items():
+            if f".{key}" in text or f"/{key}" in text or text.endswith(key):
+                return suffix
+    return ".ogg"
+
+async def _transcribe_note(name: str, data: str) -> str:
+    """Transcribe a base64 voice note into a context note.
+
+    Always returns a note and never raises: a voice note that cannot be read is
+    reported as unreadable rather than silently dropped, because a turn that
+    answers as if no audio was sent is far more confusing than one saying it
+    could not listen.
+    """
+    import base64
+    import tempfile
+    from pathlib import Path
+
+    try:
+        raw = base64.b64decode(data, validate=False)
+    except Exception as e:  # noqa: BLE001
+        log.debug("voice note %s was not decodable: %s", name, e)
+        return (f'[Attached voice note "{name}" — the audio could not be '
+                f'decoded.]')
+    if len(raw) > _MAX_AUDIO_BYTES:
+        return (f'[Attached voice note "{name}" — too large to transcribe '
+                f'({len(raw) // (1024 * 1024)} MB, limit '
+                f'{_MAX_AUDIO_BYTES // (1024 * 1024)} MB).]')
+
+    suffix = _audio_suffix(name)
+    tmp_path = None
+    result: dict = {}
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+            fh.write(raw)
+            tmp_path = Path(fh.name)
+        from backend.voice.stt import transcribe_file
+        result = await asyncio.to_thread(transcribe_file, str(tmp_path))
+    except Exception as e:  # noqa: BLE001
+        log.warning("voice note transcription failed for %s: %s", name, e)
+        return f'[Attached voice note "{name}" — transcription failed: {e}]'
+    finally:
+        # Delete in `finally` so a failure mid-transcription does not leave
+        # audio on disk. The user's words are their content; keeping a copy
+        # nobody asked for is not ours to do.
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError as e:
+                log.debug("could not remove the temp audio file: %s", e)
+
+    if not result.get("success"):
+        why = result.get("error") or "transcription is unavailable"
+        return (f'[Attached voice note "{name}" — could not be transcribed: '
+                f'{why}]')
+    text = (result.get("text") or "").strip()
+    if not text:
+        return (f'[Attached voice note "{name}" — it transcribed to nothing; '
+                f'there may be no speech in it.]')
+    lang = result.get("language") or ""
+    where = f" ({lang})" if lang else ""
+    return f'[Attached voice note "{name}"{where} — transcript: {text[:4000]}]'
 
 async def _analyze_attachments(provider, attachments: list[dict],
-                              vision_model: str | None = None) -> list[str]:
+                              vision_model: str | None = None,
+                              notify=None) -> list[str]:
     """Route attachments to the right model:
     - images → visual model (provider vision or local Florence-2) → text description
     - text files → inline content
+    - audio → local whisper transcription → the transcript
     - others → filename/size note only
 
     Returns context notes injected into the chat for the main model.
+
+    ``notify`` is an optional async callable taking one string, used to report
+    what the slow steps are doing. Local vision on CPU costs ~8s per image plus
+    a ~16s one-time model load, and transcription is seconds more: without a
+    word of feedback a turn with a photo looks like it has hung. Measured, not
+    guessed — see scripts/check_vision_feedback.py.
     """
     notes: list[str] = []
     for att in (attachments or [])[:5]:
@@ -491,14 +635,33 @@ async def _analyze_attachments(provider, attachments: list[dict],
             prompt = ("Describe this image in detail: what is shown, "
                       "any visible text, and the overall context.")
             desc = None
-            try:
-                if getattr(provider, "supports_vision", False):
+            # Say what is happening before the wait, not after. The fallback is
+            # only needed when the fast provider route cannot be used, and
+            # telling the user "looking at the image" either way is honest.
+            if notify is not None:
+                await notify(f"Looking at {name}…")
+            # Why each attempt failed is kept, not discarded. The previous
+            # version did `except Exception: desc = None`, and the caller
+            # logged the whole thing at DEBUG — so a real vision failure left
+            # no trace at normal log levels, and the only evidence left was
+            # whatever the chat model chose to say about it. A turn that
+            # answered "the visual model is unavailable" could not be checked
+            # against anything.
+            why = []
+            if getattr(provider, "supports_vision", False):
+                try:
                     res = await provider.vision(data, prompt,
                                                 model=vision_model)
                     if res.ok:
                         desc = res.response
-            except Exception:
-                desc = None
+                    else:
+                        why.append(f"provider ({getattr(provider, 'provider_id', '?')}): "
+                                   f"{res.error or 'no description returned'}")
+                except Exception as e:  # noqa: BLE001
+                    why.append(f"provider raised {type(e).__name__}: {e}")
+            else:
+                pid = getattr(provider, "provider_id", "?")
+                why.append(f"provider '{pid}' does not support vision")
             if not desc:
                 # Fallback: local Florence-2 visual model
                 try:
@@ -506,17 +669,20 @@ async def _analyze_attachments(provider, attachments: list[dict],
                     res = await hf_vision.analyze(data, prompt)
                     if res.ok:
                         desc = res.response
-                except Exception:
-                    desc = None
+                    else:
+                        why.append(f"Florence-2: {res.error or 'no description returned'}")
+                except Exception as e:  # noqa: BLE001
+                    why.append(f"Florence-2 raised {type(e).__name__}: {e}")
             if desc:
                 notes.append(
                     f'[Attached image "{name}" — visual model analysis: '
                     f'{str(desc)[:1500]}]')
             else:
-                # Both the provider and the local model failed. Say so in the
-                # log as well as the chat, or the reason is lost.
-                log.warning("Could not analyse attached image '%s' — vision "
-                            "provider and local Florence-2 both failed", name)
+                # Both the provider and the local model failed. WARNING, with
+                # every reason, because this is the line that makes the failure
+                # diagnosable — and it must survive the caller logging at DEBUG.
+                log.warning("Could not analyse attached image '%s' — %s",
+                            name, "; ".join(why) or "no vision route available")
                 notes.append(
                     f'[Attached image "{name}" — the visual model could '
                     f'not analyze it.]')
@@ -525,6 +691,18 @@ async def _analyze_attachments(provider, attachments: list[dict],
             notes.append(
                 f'[Attached file "{name}" — content:\n{text}\n'
                 f'--- end of file ---]')
+        elif kind == "audio" and data:
+            # A voice note. The transcript goes in as text, so the main model
+            # reads what was SAID rather than being told an audio file exists.
+            #
+            # The audio arrives base64 because a bot bridge must not decide where
+            # files land on the user's machine — the backend owns temp-file
+            # policy (see hf_vision and tts for the same pattern). Written with
+            # the real suffix, because faster-whisper sniffs the container: a
+            # .ogg handed over as .tmp fails to decode.
+            if notify is not None:
+                await notify(f"Listening to {name}…")
+            notes.append(await _transcribe_note(name, data))
         else:
             notes.append(
                 f'[Attached file "{name}" — binary or unreadable content, '
@@ -645,6 +823,46 @@ def _pending_for(params: dict) -> list[dict]:
         return out
     except Exception as e:  # noqa: BLE001
         log.debug("could not gather pending approvals: %s", e)
+        return []
+
+
+def _questions_for(params: dict) -> list[dict]:
+    """Questions this turn left waiting, described for a caller to render.
+
+    The mirror of `_pending_for`, scoped the same way for the same reason: only
+    the ones raised by *this* conversation, so a bridge is never shown another
+    chat's question to answer. Unlike an approval, a question has to carry its
+    wording and its choices — a bot has no card to fall back on, and an id alone
+    would let it offer buttons whose labels it does not know.
+
+    Returned to the caller of `chat.send` rather than only broadcast, because a
+    bot holds one socket with no notification loop of its own: it learns what
+    happened from the reply to the call it made.
+    """
+    try:
+        from backend.questions import pending, policy
+        from backend import chat_sources, chat_context
+        ambient = chat_context.origin()
+        source = chat_sources.normalise(params.get("source")
+                                        or ambient.get("source"))
+        conversation = str(params.get("conversation")
+                           or params.get("conversationId")
+                           or ambient.get("conversation") or "")
+        if not conversation:
+            return []
+        out = []
+        for entry in pending.open_questions(source=source,
+                                            conversation=conversation):
+            out.append({
+                "question_id": entry["question_id"],
+                "question": entry["question"],
+                "options": entry.get("options") or [],
+                "context": entry.get("context") or "",
+                "ttl": policy.describe_ttl(),
+            })
+        return out
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not gather open questions: %s", e)
         return []
 
 
@@ -1165,8 +1383,26 @@ async def _run_chat_pipeline_inner(
                 from backend.providers import router as _router
                 _vision_model = _router.resolve_model(
                     getattr(provider, "provider_id", ""), "vision")
+
+                async def _say(what: str) -> None:
+                    """Tell every open surface what the slow step is doing.
+
+                    A photo costs ~8s of CPU captioning (plus a ~16s model load
+                    the first time) and a voice note costs seconds of
+                    transcription. Silence for that long reads as a hang, which
+                    is how a turn can end with the model apologising about
+                    vision that was working. Best-effort: a broadcast failure
+                    must never break the turn it is describing.
+                    """
+                    try:
+                        await _server.broadcast("chat.activity",
+                                                {"what": what})
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("activity broadcast failed: %s", e)
+
                 att_notes = await _analyze_attachments(
-                    provider, attachments, vision_model=_vision_model)
+                    provider, attachments, vision_model=_vision_model,
+                    notify=_say)
                 if att_notes:
                     user_messages.insert(0, {
                         "role": "user",
@@ -1175,7 +1411,54 @@ async def _run_chat_pipeline_inner(
                         "the user's message.",
                     })
             except Exception as e:
-                log.debug("Attachment analysis failed: %s", e)
+                # WARNING, not debug. This is the wrapper around the whole
+                # analysis: at DEBUG a genuine failure here produced no log
+                # line at all, so a turn that answered "the visual model could
+                # not analyse it" could not be traced to anything. The
+                # per-attachment reasons are logged inside _analyze_attachments;
+                # this catches a failure of the routing itself.
+                log.warning("Attachment analysis failed: %s", e, exc_info=True)
+
+        # What happened to a question this conversation asked earlier.
+        #
+        # `recent_outcomes` existed and was documented as feeding this, but
+        # nothing ever called it — so a question that lapsed was simply gone,
+        # and the model asked the same thing again with no idea the first card
+        # had expired unanswered. Reported once and then consumed, so the same
+        # expiry is not replayed into every later turn.
+        try:
+            from backend.questions import pending as _pending
+            finished = _pending.recent_outcomes(
+                source=params.get("source"),
+                conversation=(params.get("conversation")
+                              or params.get("conversationId")))
+            if finished:
+                lines = []
+                for entry in finished:
+                    what = entry.get("question") or "a question"
+                    if entry.get("outcome") == "expired":
+                        lines.append(
+                            f'You asked "{what}" and it expired before the user '
+                            f"answered. Do not ask it again — make the most "
+                            f"likely choice, say which assumption you made, and "
+                            f"carry on.")
+                    elif entry.get("outcome") == "dismissed":
+                        lines.append(
+                            f'You asked "{what}" and the user skipped it. Do not '
+                            f"ask it again unless nothing can proceed without "
+                            f"it; decide and state your assumption.")
+                if lines:
+                    user_messages.insert(0, {
+                        "role": "user",
+                        "content": "[About the question you asked]\n"
+                                   + "\n".join(lines),
+                    })
+                _pending.forget_outcomes(
+                    source=params.get("source"),
+                    conversation=(params.get("conversation")
+                                  or params.get("conversationId")))
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not report finished questions: %s", e)
 
         user_messages.append({"role": "user", "content": message})
 
@@ -1258,6 +1541,27 @@ async def _run_chat_pipeline_inner(
         response_text = result.get("response", "")
         tool_rounds = result.get("tool_rounds", 0)
         tool_results = result.get("tool_results", [])
+
+        # The model asked the user something instead of guessing. Announce it
+        # now, on the way out, rather than from inside the skill: the skill runs
+        # deep in the tool loop with no idea which surface asked, and the card
+        # has to reach the conversation the question belongs to.
+        #
+        # The question is already queued by the time we get here — this only
+        # tells the UI to draw it. If the broadcast is lost the card is still
+        # recoverable through `questions.list`, which is why the queue is the
+        # authority and the push is an optimisation.
+        if result.get("awaiting_answer"):
+            try:
+                from backend.questions import pending as _questions, policy as _qpolicy
+                entry = _questions.get(result.get("question_id") or "")
+                if entry:
+                    await get_server().broadcast("question.ask", {
+                        **entry,
+                        "ttl": _qpolicy.describe_ttl(),
+                    })
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not announce the question: %s", e)
 
         # Named, so the chat page can say "used web_search" rather than only
         # how many. A turn that called nothing says that too, which is the
@@ -1783,6 +2087,13 @@ def _register_default_handlers():
                 result["pendingApprovals"] = _pending_for(params)
             except Exception as e:  # noqa: BLE001
                 log.debug("could not list pending approvals: %s", e)
+            # Same for questions, and it carries more: a bridge needs the
+            # wording and the choices to draw the card, since it has no
+            # dashboard to fall back on.
+            try:
+                result["pendingQuestions"] = _questions_for(params)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not list open questions: %s", e)
         # Rolling compaction: summarize the oldest turns in the background
         # once the conversation outgrows the context window.
         try:
@@ -1992,6 +2303,167 @@ def _register_default_handlers():
             except Exception as e:  # noqa: BLE001
                 log.debug("could not clear the session MCP grant: %s", e)
         return result
+
+    # ---- questions -----------------------------------------------------------
+    #
+    # The model can ask the user something mid-turn. The queue and its rules
+    # live in `backend/questions/`; these are the two ways the dashboard talks
+    # to it — read what is waiting, and answer one.
+    #
+    # There is deliberately no "ask" handler. A question is raised by the model
+    # calling the `ask_user` skill, so an RPC that could queue one would be a
+    # second way for a prompt to appear with no turn behind it.
+
+    async def questions_list(params: dict, ws) -> dict:
+        """Open questions, for a dashboard that connected after the broadcast.
+
+        Filtered by origin when the caller says which conversation it is: the
+        chat page asks for its own, so a question raised in a Telegram thread
+        does not appear on a page that cannot answer it. With no filter, every
+        open question is returned, which is what a restore pass wants.
+        """
+        from backend.questions import pending, policy
+        source = params.get("source")
+        conversation = params.get("conversation")
+        items = pending.open_questions(source=source, conversation=conversation)
+        # The ttl goes on EVERY item, not just the envelope. A card restored
+        # from this list reads `question.ttl` per row, so without it the same
+        # card promised an expiry when pushed and stayed silent when restored —
+        # two payloads for one shape, and the restored one understated what it
+        # was doing.
+        ttl = policy.describe_ttl()
+        return {
+            "success": True,
+            "questions": [{**item, "ttl": ttl} for item in items],
+            "count": len(items),
+            "ttl": ttl,
+        }
+
+    async def question_answer(params: dict, ws) -> dict:
+        """Settle a question with the user's answer.
+
+        The answer is returned rather than executed here: a new turn carries it
+        back to the model, and that is the caller's job because only the caller
+        knows which conversation to continue.
+
+        **The origin is checked.** A question belongs to the conversation that
+        asked it, and an answer arriving under a different one is refused. The
+        read path (`questions.list`, `_questions_for`) was already scoped, but
+        the write path was not — so an id was enough to settle another chat's
+        question, which is consent moving between conversations. The check is
+        skipped only when the caller names no origin at all, because a local
+        caller that has none (a script, a check) is not claiming to be somebody
+        else; naming a *different* one is what is refused.
+        """
+        from backend.questions import pending
+        question_id = str(params.get("question_id")
+                          or params.get("questionId") or "").strip()
+        if not question_id:
+            return {"success": False, "error": "question_id is required"}
+        # `answer` for text; `choice` is what a button sends, and is accepted as
+        # the same thing so the card does not need two methods.
+        text = params.get("answer")
+        if text in (None, ""):
+            text = params.get("choice")
+        trouble = _question_origin_mismatch(question_id, params)
+        if trouble:
+            return {"success": False, "error": trouble}
+        result = pending.answer(question_id, text)
+        if result.get("success"):
+            await _announce_question_settled(result)
+        return result
+
+    async def question_dismiss(params: dict, ws) -> dict:
+        """Give up on a question without answering it."""
+        from backend.questions import pending
+        question_id = str(params.get("question_id")
+                          or params.get("questionId") or "").strip()
+        if not question_id:
+            return {"success": False, "error": "question_id is required"}
+        trouble = _question_origin_mismatch(question_id, params)
+        if trouble:
+            return {"success": False, "error": trouble}
+        result = pending.dismiss(question_id)
+        if result.get("success"):
+            # The entry's own origin, not blanks: a surface filtering
+            # `question.settled` by conversation could not match an empty one,
+            # so a dismissed card would stay on screen everywhere but here.
+            entry = dict(result)
+            entry.setdefault("outcome", "dismissed")
+            await _announce_question_settled(entry)
+        return result
+
+    def _question_origin_mismatch(question_id: str, params: dict) -> str:
+        """Why this caller may not settle that question, or "".
+
+        **Fails closed.** The check used to skip entirely when the caller named
+        no origin, on the reasoning that a local caller has none — but nothing
+        distinguishes a local caller from a bridge or a remote client, so
+        omitting the origin was a way to settle any question by id, which is the
+        exact behaviour the check exists to stop ("consent moving between
+        conversations"). A caller that cannot be identified is refused, and the
+        refusal names what to send.
+
+        The comparison is *normalised on both sides*. Comparing a normalised
+        claim against a raw stored value let any nonsense source (`"tellegram"`)
+        normalise to the default and match a question raised with no source.
+        """
+        try:
+            from backend.questions import pending
+            from backend import chat_sources
+            entry = pending.get(question_id)
+            if entry is None:
+                return ""  # nothing to compare; `answer` reports it as closed
+            claimed_source = params.get("source")
+            claimed_conversation = (params.get("conversation")
+                                    or params.get("conversationId"))
+            if claimed_source in (None, "") and claimed_conversation in (None, ""):
+                # No origin at all. Refused, and the message says how to answer
+                # rather than leaving the caller guessing.
+                return ("An answer must say which conversation it belongs to: "
+                        "send 'source' and 'conversation' from the surface that "
+                        "was asked.")
+            held_source = chat_sources.normalise(entry.get("source"))
+            held_conversation = str(entry.get("conversation") or "")
+            if claimed_source not in (None, ""):
+                if chat_sources.normalise(claimed_source) != held_source:
+                    return ("That question belongs to a different "
+                            "conversation than this one.")
+            if claimed_conversation not in (None, ""):
+                if str(claimed_conversation) != held_conversation:
+                    return ("That question belongs to a different "
+                            "conversation than this one.")
+            # A question raised with NO conversation (the dashboard's own chat
+            # does this) can only be settled by naming its source and no
+            # conversation — an empty string is not a claim to be elsewhere, and
+            # the source check above has already run.
+            if claimed_conversation not in (None, "") and not held_conversation:
+                return ("That question belongs to a different "
+                        "conversation than this one.")
+            return ""
+        except Exception as e:  # noqa: BLE001
+            # Fail closed: a caller that cannot be checked is not allowed to
+            # settle somebody else's question on the strength of an error.
+            log.warning("could not check the question origin: %s", e)
+            return "The question's origin could not be verified."
+
+    async def _announce_question_settled(entry: dict) -> None:
+        """Tell every surface the card is answered, so none is left showing.
+
+        Without this, a question answered on the dashboard stayed on the
+        Telegram keyboard and vice versa — the second surface would offer a
+        button whose only possible result is "that question is no longer open".
+        Best-effort: a broadcast failure must not fail the answer that already
+        succeeded.
+        """
+        try:
+            await _server.broadcast("question.settled", {
+                "question_id": entry.get("question_id"),
+                "source": entry.get("source", ""),
+                "conversation": entry.get("conversation", ""),
+            })
+        except Exception as e:  # noqa: BLE001
+            log.debug("question settled broadcast failed: %s", e)
 
     # ---- Excel operations -----------------------------------------------------
 
@@ -3081,7 +3553,7 @@ def _register_default_handlers():
                     hint += ("\n\nAttached by the user:\n"
                              + "\n".join(notes))
             except Exception as e:  # noqa: BLE001
-                log.debug("Could not analyse code attachments: %s", e)
+                log.warning("Could not analyse code attachments: %s", e)
                 names = [str((a or {}).get("name") or "file")
                          for a in attachments[:5]]
                 hint += ("\n\nThe user attached files that could not be read: "
@@ -4903,6 +5375,9 @@ def _register_default_handlers():
     _server.register("approvals.session", approvals_session)
     _server.register("approvals.revokeSession", approvals_revoke_session)
     _server.register("approvals.clearSession", approvals_clear_session)
+    _server.register("questions.list", questions_list)
+    _server.register("question.answer", question_answer)
+    _server.register("question.dismiss", question_dismiss)
     _server.register("voice.speak", voice_speak)
     _server.register("voice.voices", voice_voices)
     _server.register("character.setState", character_set_state)
