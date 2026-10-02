@@ -1,3 +1,40 @@
+# Addled 1.0.29
+
+A small cleanup release. The fix in 1.0.28 — starting the backend from a
+read-only install directory — works, and this stops it leaving clutter behind.
+
+## What changed
+
+When Addled has to move its data into your user folder (because it is installed
+somewhere it cannot write, such as `C:\Program Files`), it copies any existing
+state across on first run. That copy was too broad: `backend/memory/` holds the
+memory **modules** next to the state they use, so the module files came too.
+
+They were inert — nothing imports from the data folder — but they left a stale
+second copy of the app's own code sitting in `%LOCALAPPDATA%\Addled`, which is
+misleading to anyone who looks there. The migration now copies only state:
+`.py`, `.pyc`, `.pyo` and `__pycache__` are skipped.
+
+If you installed 1.0.28 you were unaffected in every practical sense — this only
+touches the first-run migration, which had already happened. It matters for a
+fresh install on a machine that already has data.
+
+## Also
+
+- `scripts/check_data_dir.py` now asserts that only state files are migrated, so
+the copy cannot quietly widen again.
+- `scripts/check_all.py` runs 69 suites, all green.
+
+## The 1.0.28 fix, for context
+
+If you are coming from 1.0.27: installing to `Program Files` used to leave you
+with a character that said *Backend not running*, because every writable path was
+resolved beside the code. `backend/app_paths.py` now decides — the install
+directory when it is writable, your user folder when it is not — and the startup
+log names which it chose.
+
+---
+
 # Addled 1.0.28
 
 **The backend could not start when Addled was installed to `C:\Program Files`.**

@@ -149,6 +149,15 @@ def migrate() -> int:
     for item in source.rglob("*"):
         if not item.is_file():
             continue
+        # `backend/memory/` is unusual: it holds the memory *modules* (the .py
+        # files that are part of the app) alongside the state they read and
+        # write. Only the state should move. Copying the modules would litter
+        # the data directory with a stale second copy of the code — harmless,
+        # because nothing imports from there, but confusing to anyone who looks.
+        if item.suffix in (".py", ".pyc", ".pyo"):
+            continue
+        if "__pycache__" in item.parts:
+            continue
         target = DATA_DIR / item.relative_to(source)
         # Never take a file that is already there. The destination has been in
         # use since this version started; an older copy is not an improvement.

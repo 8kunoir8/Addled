@@ -131,15 +131,28 @@ def main() -> int:
         (source / "sub").mkdir(parents=True)
         (source / "settings.json").write_text('{"a": 1}', encoding="utf-8")
         (source / "sub" / "facts.json").write_text('[]', encoding="utf-8")
+        # `backend/memory/` holds the memory modules next to the state they use,
+        # so a migration that copies everything would litter the data directory
+        # with a second copy of the app's own code.
+        (source / "recall.py").write_text("# module, not state\n",
+                                          encoding="utf-8")
+        (source / "__pycache__").mkdir()
+        (source / "__pycache__" / "recall.cpython-314.pyc").write_bytes(b"\x00")
 
         original_legacy, original_data = app_paths.LEGACY_DIR, app_paths.DATA_DIR
         try:
             app_paths.LEGACY_DIR = source
             app_paths.DATA_DIR = dest
             copied = app_paths.migrate()
-            check("files were copied", copied == 2, f"copied={copied}")
+            check("only the state files were copied", copied == 2,
+                  f"copied={copied} (expected 2: settings.json + facts.json)")
             check("the nested file arrived",
                   (dest / "sub" / "facts.json").exists())
+            check("no module was copied",
+                  not (dest / "recall.py").exists(),
+                  "a .py file reached the data directory")
+            check("no bytecode was copied",
+                  not (dest / "__pycache__").exists())
             check("the source is left in place",
                   (source / "settings.json").exists(),
                   "a downgrade must still find its data")
