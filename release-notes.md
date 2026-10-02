@@ -1,3 +1,124 @@
+# Addled 1.0.31
+
+"Install torch + transformers" did nothing if you installed Addled to
+`C:\Program Files`, and saving a conversation failed there too. Both are fixed.
+
+## The install button
+
+The button ran:
+
+```
+pip install --target C:\Program Files\Addled\resources\python\Lib\site-packages torch transformers …
+```
+
+That target is inside `Program Files`, which a normal user cannot write. pip
+fetched everything — several gigabytes — and then died at the final copy:
+
+```
+PermissionError: [WinError 5] Access is denied: …\site-packages\einops
+```
+
+The button returned to "Install" and the packages were absent, which reads as
+*nothing happened* rather than *it failed*. Fixed:
+
+- **The target is checked.** Addled keeps using its own `site-packages` when
+  that folder is writable — so a portable or per-user install is unchanged — and
+  falls back to `%LOCALAPPDATA%\Addled\pylibs`, which is added to the import
+  path at startup.
+- **Success is verified, not assumed.** `torch` and `transformers` are imported
+  after pip finishes; if either is missing the install is reported as failed.
+- **A failure now reaches the UI**, with the reason.
+
+## Ten more files that wrote beside the code
+
+1.0.28 moved the *directory* the app writes to, and fixed nineteen modules that
+computed it. It missed ten that live **inside** that directory and so never
+mentioned it by name — `chat_history.json`, `facts.json`, `vectors.db`,
+`links.db`, `triples.db`, `session_context.json`, `session_summaries.json`,
+`user_profile.json`, `rolling_summary.json`, `maintenance_state.json`.
+
+Each was still built as `Path(__file__).parent / "<file>.json"`, so under
+`Program Files` they kept trying to write into a read-only folder. The visible
+symptom was:
+
+```
+ERROR addled.ws: Chat failed
+PermissionError: [Errno 13] Permission denied: …\backend\memory\chat_history.json
+```
+
+— every message failed once the app tried to save it. All ten now resolve
+through `app_paths` like the rest.
+
+`check_data_dir.py` was only looking for a path containing `"memory"`, which is
+why it passed while these were broken. It now also flags a `__file__`-relative
+path ending in a file the app would write, and fails by name on the exact shape
+that was invisible (verified by reintroducing one).
+
+## Verified
+
+- Reproduced the original `PermissionError` with the installed interpreter, then
+  confirmed the fixed code chooses a writable target, puts it on `sys.path`, and
+  installs a real package that then imports.
+- `scripts/check_all.py` runs **70 suites**, all green.
+
+---
+
+# Addled 1.0.30
+
+**"Install torch + transformers" did nothing if you installed Addled to
+`C:\Program Files`.** It downloaded the whole stack, then threw it away. This
+release makes the button work, and makes a failure say so instead of failing
+silently.
+
+## The bug
+
+The button ran:
+
+```
+pip install --target C:\Program Files\Addled\resources\python\Lib\site-packages torch transformers …
+```
+
+That target is inside `Program Files`, which a normal user cannot write. pip
+fetched everything — several gigabytes — and then died at the final copy:
+
+```
+PermissionError: [WinError 5] Access is denied: …\site-packages\einops
+```
+
+Two things made that invisible:
+
+- the destination was chosen without checking whether it could be written to,
+  and
+- success was decided by pip's exit code alone, so a `--target` install into a
+  folder the app cannot import from still counted as done.
+
+The button simply returned to "Install" and the packages were absent, which
+reads as *nothing happened* rather than *it failed*.
+
+## The fix
+
+- **The install target is now checked.** Addled keeps using its own
+  `site-packages` when that folder is writable — so a portable or per-user
+  install behaves exactly as before — and falls back to
+  `%LOCALAPPDATA%\Addled\pylibs` when it is not. That folder is added to the
+  import path at startup, which is what makes an install there visible to the
+  app (`-s` means the interpreter only searches its own directories).
+- **Success is verified, not assumed.** After pip finishes, Addled imports
+  `torch` and `transformers`. If either is still missing, the install is
+  reported as failed with the reason, rather than silently reported as done.
+- **A failure now reaches the UI.** A failed install broadcasts its phase and
+  the error text, so the page can say what went wrong.
+
+## Verified
+
+- Reproduced the original `PermissionError` with the installed interpreter, then
+  confirmed the fixed code chooses a writable target, puts it on `sys.path`, and
+  installs a real package that then imports.
+- `scripts/check_vision_install.py` is new; `scripts/check_all.py` runs **70
+  suites**, all green.
+
+---
+
 # Addled 1.0.29
 
 A small cleanup release. The fix in 1.0.28 — starting the backend from a

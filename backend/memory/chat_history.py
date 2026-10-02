@@ -15,7 +15,9 @@ from typing import Optional
 
 log = logging.getLogger("addled.chat_history")
 
-HISTORY_PATH = Path(__file__).parent / "chat_history.json"
+from backend import app_paths
+
+HISTORY_PATH = app_paths.MEMORY_DIR / "chat_history.json"
 
 
 class ChatHistory:

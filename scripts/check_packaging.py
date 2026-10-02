@@ -138,10 +138,18 @@ CODE_DIRECTORIES = {
 # added — the alternative is a hand-written list, which is the very thing that
 # drifts, and the failure it drifts into is shipping a user's data over their
 # own.
+#
+# `app_paths.MEMORY_DIR` is the shape everything uses now. It is resolved at
+# runtime to whichever directory is writable (see backend/app_paths.py), and in
+# the installer's own layout that is `<install>/resources/backend/memory` — the
+# same place as before, which is why one anchor covers both. The older
+# `Path(__file__).parent…` shapes stay in the pattern because nothing stops a new
+# module from being written that way, and a store this check cannot see is a
+# store that could ship.
 _STATE_EXPR = re.compile(
     r'^[A-Z_]+\s*=\s*'
     r'(?P<base>Path\(__file__\)(?:\.resolve\(\))?'
-    r'(?:\.parent)+|SETTINGS_PATH\.parent)'
+    r'(?:\.parent)+|SETTINGS_PATH\.parent|app_paths\.MEMORY_DIR)'
     r'(?P<tail>(?:\s*/\s*"[^"]+")+)')
 
 def written_state_paths() -> set[str]:
@@ -186,7 +194,11 @@ def written_state_paths() -> set[str]:
                         node = os.path.dirname(node)
                     anchor = node.replace(os.sep, "/")
                 else:
-                    # SETTINGS_PATH lives at backend/memory/settings.json.
+                    # `SETTINGS_PATH` lives at backend/memory/settings.json, and
+                    # `app_paths.MEMORY_DIR` is that same directory — whichever
+                    # writable location it resolves to at runtime, the *packaged*
+                    # one is `<install>/resources/backend/memory`, which is what
+                    # this check has to reason about.
                     anchor = "backend/memory"
                 parts = re.findall(r'"([^"]+)"', m.group("tail"))
                 if parts:

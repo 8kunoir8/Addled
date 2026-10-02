@@ -108,20 +108,42 @@ def main() -> int:
         finally:
             os.environ.pop("ADDLED_DATA_DIR", None)
 
-    print("\n=== no module computes its own memory/ path any more ===")
+    print("\n=== no module computes its own state path any more ===")
     # The 19 copies are how this drifted; one resolver is the fix, so a
     # regression is a new copy appearing.
+    #
+    # Two shapes to catch, and the narrow one is why this check exists rather
+    # than a grep for `"memory"`:
+    #   Path(__file__).parent.parent / "memory" / thing   (modules that had to
+    #                                                      climb out of backend/)
+    #   Path(__file__).parent / "chat_history.json"       (state files living
+    #                                                      INSIDE backend/memory/,
+    #                                                      which never mention
+    #                                                      "memory" at all)
+    # The second shape shipped and broke chat under `Program Files`: saving a
+    # conversation raised PermissionError, because the file was still written
+    # beside the code. A search that only knows the first shape cannot see it.
+    import re
+
     offenders = []
     backend = pathlib.Path(ROOT) / "backend"
+    # A __file__-relative path that ends in something the app would write.
+    state_suffix = re.compile(
+        r"""Path\(__file__\)[^\n]*?/\s*"""
+        r"""(?:"[^"]+\.(?:json|db|db-wal|db-shm|log|jsonl|txt|csv)"|"""
+        r"""'[^']+\.(?:json|db|db-wal|db-shm|log|jsonl|txt|csv)')"""
+    )
     for path in backend.rglob("*.py"):
         if path.name == "app_paths.py":
             continue          # it defines the resolver; it may name the paths
         text = path.read_text(encoding="utf-8", errors="replace")
         for lineno, line in enumerate(text.splitlines(), 1):
             if "Path(__file__)" in line and '"memory"' in line:
-                offenders.append(f"{path.relative_to(backend)}:{lineno}")
-    check("no file computes backend/memory from __file__", not offenders,
-          ", ".join(offenders[:5]))
+                offenders.append(f"{path.relative_to(backend)}:{lineno} (memory dir)")
+            elif state_suffix.search(line):
+                offenders.append(f"{path.relative_to(backend)}:{lineno} (state file)")
+    check("no file computes a writable path from __file__", not offenders,
+          ", ".join(offenders[:6]))
 
     print("\n=== migration brings an old install-local tree across ===")
     with tempfile.TemporaryDirectory() as tmp:

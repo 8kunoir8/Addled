@@ -20,7 +20,9 @@ import numpy as np
 
 log = logging.getLogger("addled.knowledge_graph")
 
-DB_PATH = Path(__file__).parent / "triples.db"
+from backend import app_paths
+
+DB_PATH = app_paths.MEMORY_DIR / "triples.db"
 
 
 def _triple_text(sub: str, rel: str, obj: str) -> str:

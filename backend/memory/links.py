@@ -32,7 +32,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.memory.links")
 
-DB_PATH: Path = Path(__file__).parent / "links.db"
+from backend import app_paths
+
+DB_PATH: Path = app_paths.MEMORY_DIR / "links.db"
 
 # What a link endpoint can be.
 KINDS = ("fact", "triple", "memory", "summary", "journal", "wiki", "file")

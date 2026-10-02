@@ -35,6 +35,7 @@ when the weights are mapped by a CPU-only run.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import os
 import shutil
@@ -100,16 +101,26 @@ def _vision_requirements() -> Path | None:
     return None
 
 def _app_site_packages() -> str | None:
-    """The site-packages directory this interpreter actually imports from.
+    """Where an on-demand `pip install` should put its packages.
 
-    Deliberately NOT ``site.getusersitepackages()``. The app runs with ``-s``,
-    so user site-packages are invisible to it; installing there is the bug this
-    helper exists to avoid. Derived from the running interpreter (rather than
-    hard-coded) so it stays correct if the bundle moves.
+    Prefers the app's own site-packages when that is writable, so a portable or
+    per-user install keeps everything in one place as it always has.
 
-    Returns None when no known layout exists, so the caller falls back to pip's
-    default scheme instead of guessing wrong.
+    Falls back to the writable data directory — and adds it to `sys.path` — when
+    it is not. A per-machine install puts site-packages under ``Program Files``,
+    where pip downloads the whole stack and then cannot copy it into place:
+
+        PermissionError: [WinError 5] Access is denied: ...\\site-packages\\einops
+
+    The UI showed no error for that, so the button simply returned to "Install"
+    and the packages were absent. `--target` was never the problem; the
+    *destination* was.
+
+    Returns None only when neither location works, so the caller falls back to
+    pip's default scheme instead of guessing wrong.
     """
+    from backend import app_paths
+
     exe = Path(sys.executable).resolve()
     py = f"python{sys.version_info.major}.{sys.version_info.minor}"
     candidates = [
@@ -120,8 +131,13 @@ def _app_site_packages() -> str | None:
         exe.parent.parent / "lib" / py / "site-packages",
     ]
     for path in candidates:
-        if path.is_dir():
+        if path.is_dir() and app_paths._writable(path):
             return str(path)
+
+    # Not writable (the Program Files case): use the data directory, and make
+    # sure this process can import from it afterwards.
+    if app_paths.add_pylibs_to_path():
+        return str(app_paths.PYLIBS_DIR)
     return None
 
 class LocalLlmManager:
@@ -927,6 +943,27 @@ class LocalLlmManager:
             if proc.returncode != 0:
                 tail = (out or b"").decode("utf-8", "replace")[-400:]
                 raise RuntimeError(f"pip exited with {proc.returncode}: {tail}")
+
+            # pip exiting 0 is not the same as the packages being usable.
+            #
+            # `--target` copies into a directory the *running* process may not
+            # search (-s excludes user site-packages, and under a per-machine
+            # install site-packages itself is inside Program Files), and a
+            # partial install can leave the directory present but the import
+            # broken. The old code returned ok=True on the exit code alone, so a
+            # button that changed nothing reported success. Importing is the
+            # only evidence that matters, and it is cheap next to a 2.5 GB
+            # download.
+            absent = [
+                name for name in ("torch", "transformers")
+                if importlib.util.find_spec(name) is None
+            ]
+            if absent:
+                raise RuntimeError(
+                    "pip finished but " + ", ".join(absent) + " still cannot be "
+                    "imported. The app could not see the packages it just "
+                    f"installed (target: {target or 'default scheme'})."
+                )
         except Exception as exc:
             self._hf_deps_installing = False
             self._broadcast("local.hfProgress",

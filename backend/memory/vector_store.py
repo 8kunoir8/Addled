@@ -20,7 +20,9 @@ import numpy as np
 
 log = logging.getLogger("addled.vector_memory")
 
-DB_PATH = Path(__file__).parent / "vectors.db"
+from backend import app_paths
+
+DB_PATH = app_paths.MEMORY_DIR / "vectors.db"
 DEFAULT_DIM = 384  # Compatible with all-MiniLM-L6-v2 and similar
 
 

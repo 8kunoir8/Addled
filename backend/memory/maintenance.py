@@ -22,7 +22,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.maintenance")
 
-STATE_PATH = Path(__file__).parent / "maintenance_state.json"
+from backend import app_paths
+
+STATE_PATH = app_paths.MEMORY_DIR / "maintenance_state.json"
 _running = False
 
 INTERVALS = {  # seconds between runs of each job

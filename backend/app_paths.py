@@ -193,6 +193,55 @@ def subdir(*parts: str) -> Path:
     return path
 
 
+# ---- optional packages the app installs for itself ---------------------------
+
+# Where an on-demand `pip install` puts what it downloads.
+#
+# The same trap as the data directory, one layer deeper: the "Install torch +
+# transformers" button ran
+#     pip install --target <install>/python/Lib/site-packages ...
+# and under a per-machine install that target is `Program Files`, which is not
+# writable. pip downloaded the whole ~2.5 GB, then died at the final copy:
+#     PermissionError: [WinError 5] Access is denied: ...\site-packages\einops
+# and the UI put the button back with no error, so it looked like nothing had
+# happened. Installing into the writable data directory avoids that.
+PYLIBS_DIR = DATA_DIR / "pylibs"
+
+
+def add_pylibs_to_path() -> bool:
+    """Put `PYLIBS_DIR` on `sys.path` so an install there can be imported.
+
+    Needed because the app runs its interpreter with ``-s``, which excludes user
+    site-packages; the only directories it searches are inside the install, and
+    under a per-machine install none of those can be written to. A directory pip
+    can write into is therefore only half the fix — it must also be somewhere
+    the interpreter looks.
+
+    Idempotent, and appended rather than inserted: anything shipped with the app
+    must keep winning over an optional package fetched later.
+
+    Returns True when the directory is on the path, so the caller can say so.
+    """
+    if not PYLIBS_DIR.is_dir():
+        try:
+            PYLIBS_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return False
+    entry = str(PYLIBS_DIR)
+    if entry not in sys.path:
+        sys.path.append(entry)
+        # `find_spec` caches its misses per (name, path) — and a package imported
+        # once as "absent" would otherwise stay absent for the life of the
+        # process, so a freshly installed one needs the caches dropped.
+        try:
+            import importlib
+
+            importlib.invalidate_caches()
+        except Exception:  # noqa: BLE001 - never fatal
+            pass
+    return True
+
+
 def describe() -> dict:
     """Diagnostics for the Settings page and for `addled.paths` in a bug report."""
     return {

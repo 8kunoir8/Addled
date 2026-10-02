@@ -18,7 +18,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.user_profile")
 
-PROFILE_PATH = Path(__file__).resolve().parent / "user_profile.json"
+from backend import app_paths
+
+PROFILE_PATH = app_paths.MEMORY_DIR / "user_profile.json"
 
 _DEFAULTS = {
     "tone": "friendly",

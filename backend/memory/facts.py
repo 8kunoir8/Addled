@@ -16,7 +16,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.facts")
 
-FACTS_PATH = Path(__file__).parent / "facts.json"
+from backend import app_paths
+
+FACTS_PATH = app_paths.MEMORY_DIR / "facts.json"
 # The next id to hand out. Persisted so an id is never reused.
 #
 # `next_id = max(ids) + 1` was computed from the CURRENT list, which is trimmed
@@ -25,7 +27,9 @@ FACTS_PATH = Path(__file__).parent / "facts.json"
 # `autolink.forget_ref("fact", id)` would then act on a different fact than the
 # one the user (or the dashboard) meant. Ids have to be monotonic, not "whatever
 # is highest right now".
-_COUNTER_PATH = Path(__file__).parent / "facts_counter.json"
+from backend import app_paths
+
+_COUNTER_PATH = app_paths.MEMORY_DIR / "facts_counter.json"
 
 
 def _load() -> list[dict]:

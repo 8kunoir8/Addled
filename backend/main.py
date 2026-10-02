@@ -98,6 +98,11 @@ def main():
     except Exception as e:  # noqa: BLE001 - never block startup on migration
         print(f"[Addled] migration skipped: {e}", file=sys.stderr)
 
+    # Optional packages the app installs for itself (torch, transformers, …)
+    # land in the writable data directory, so that directory has to be on the
+    # import path or every install would be invisible to this process.
+    app_paths.add_pylibs_to_path()
+
     _setup_logging()
     import logging
     log = logging.getLogger("addled")

@@ -14,7 +14,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.session_context")
 
-CONTEXT_PATH = Path(__file__).parent / "session_context.json"
+from backend import app_paths
+
+CONTEXT_PATH = app_paths.MEMORY_DIR / "session_context.json"
 
 
 class SessionContext:

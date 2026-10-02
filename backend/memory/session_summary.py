@@ -19,7 +19,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.session_memory")
 
-SUMMARIES_PATH = Path(__file__).parent / "session_summaries.json"
+from backend import app_paths
+
+SUMMARIES_PATH = app_paths.MEMORY_DIR / "session_summaries.json"
 MAX_SUMMARIES = 50
 
 

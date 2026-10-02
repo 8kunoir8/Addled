@@ -18,7 +18,9 @@ from pathlib import Path
 
 log = logging.getLogger("addled.compaction")
 
-ROLLING_PATH = Path(__file__).parent / "rolling_summary.json"
+from backend import app_paths
+
+ROLLING_PATH = app_paths.MEMORY_DIR / "rolling_summary.json"
 MAX_ENTRIES = 10
 PROVIDER_BACKOFF_S = 15 * 60
 
