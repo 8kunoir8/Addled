@@ -15,10 +15,13 @@ browser.installProgress, and back off for an hour after failures.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import subprocess
 import sys
 import time
+
+from backend import app_paths
 
 log = logging.getLogger("addled.browser_autoinstall")
 
@@ -61,18 +64,33 @@ async def _run(backend: str) -> bool:
         return False
     _installing[backend] = True
     _progress(backend, "starting")
+    # Ensure the user-writable package dir is on the import path, so packages
+    # installed there are usable without a restart. `add_pylibs_to_path` is
+    # idempotent and safe to call from a background task.
+    app_paths.add_pylibs_to_path()
+    target = str(app_paths.PYLIBS_DIR)
     try:
         if backend == "playwright":
             cmds = [
                 [sys.executable, "-s", "-m", "pip", "install", "playwright",
-                 "--no-warn-script-location"],
-                [sys.executable, "-s", "-m", "playwright", "install",
-                 "chromium"],
+                 "--target", target, "--no-warn-script-location"],
+                # `playwright install chromium` reads the package from the
+                # target dir, so it must be on sys.path already (guaranteed
+                # above). The chromium browser itself is always placed in the
+                # user's own Playwright cache (~/.cache/ms-playwright), so no
+                # write into the install dir is needed for this step.
+                #
+                # The subprocess needs target on PYTHONPATH because it does
+                # not inherit this process's sys.path modifications.
+                [sys.executable, "-s", "-c",
+                 f"import sys; sys.path.insert(0, {target!r}); "
+                 "from playwright.__main__ import main; main()",
+                 "install", "chromium"],
             ]
         else:
             cmds = [
                 [sys.executable, "-s", "-m", "pip", "install", "browser-use",
-                 "--no-warn-script-location"],
+                 "--target", target, "--no-warn-script-location"],
             ]
         for i, cmd in enumerate(cmds):
             _progress(backend, "installing", str(i))
@@ -89,6 +107,17 @@ async def _run(backend: str) -> bool:
         if backend == "framework":
             from backend.browser.framework_agent import refresh
             refresh()
+        # pip's exit code alone is not proof: a `--target` install into a
+        # directory the process does not search still exits 0. Verify the
+        # import, the same way `install_hf_deps` does, before reporting done.
+        check = "playwright" if backend == "playwright" else "browser_use"
+        if importlib.util.find_spec(check) is None:
+            _fail_until[backend] = time.time() + BACKOFF_S
+            msg = (f"pip finished but {check} still cannot be imported "
+                   f"(target: {target})")
+            _progress(backend, "failed", msg)
+            log.warning("%s auto-install: %s", backend, msg)
+            return False
         _progress(backend, "done")
         log.info("%s installed automatically", backend)
         return True

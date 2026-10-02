@@ -1,3 +1,48 @@
+# Addled 1.0.33
+
+**"Install Playwright" and "Install browser-use" did nothing if Addled was
+installed to `C:\Program Files`.** The exact same bug that broke the vision
+install in 1.0.30 broke browser automation here.
+
+## The bug
+
+The Settings → Browser buttons ran:
+
+```
+pip install playwright --no-warn-script-location
+pip install browser-use --no-warn-script-location
+```
+
+with no destination specified. Under a per-machine install the bundled
+interpreter defaults to its own `site-packages` inside `Program Files`, which is
+read-only. pip downloaded the packages, then died at the final copy:
+
+```
+ERROR: Could not install packages due to an OSError: [WinError 5] Access is denied
+```
+
+The UI returned the generic message:
+*"the install did not finish. check the network and try again — the reason is in the log"*.
+
+## The fix
+
+- **The install targets the writable directory.** Both pip commands now pass
+  `--target %LOCALAPPDATA%\Addled\pylibs`, which is added to `sys.path` so the
+  packages are importable immediately without a restart.
+- **The Playwright CLI sees the packages.** `playwright install chromium` runs
+  through an inline runner that inserts `pylibs` into `sys.path` before
+  importing, because a fresh subprocess under `-s` ignores `PYTHONPATH` and the
+  embeddable Python has no user site-packages.
+- **Success is verified.** The import is checked after pip finishes, before
+  reporting "done" to the UI.
+
+## Verified
+
+- `scripts/check_browser_autoinstall.py` is new (#71); `scripts/check_all.py`
+  runs **71 suites**, all green.
+
+---
+
 # Addled 1.0.32
 
 One more store was still writing beside the code, found by auditing the

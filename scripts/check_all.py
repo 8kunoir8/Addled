@@ -62,6 +62,7 @@ SUITES = [
     "check_open_question.py",
     "check_data_dir.py",
     "check_vision_install.py",
+    "check_browser_autoinstall.py",
     "check_anchored.py",
     "check_gitops.py",
     "check_session.py",
