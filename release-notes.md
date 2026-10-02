@@ -1,3 +1,52 @@
+# Addled 1.0.32
+
+One more store was still writing beside the code, found by auditing the
+installed app rather than the source.
+
+## The journal
+
+`backend/memory/journal.py` kept its daily journal in
+`<install>/backend/memory/journal`. Under a per-machine install that is inside
+`C:\Program Files`, so every write failed:
+
+```
+WARNING addled.journal: journal save failed: [WinError 5] Access is denied:
+'C:\Program Files\Addled\resources\backend\memory\journal'
+```
+
+This one was easy to miss for two reasons. It is a **directory**, not a file, so
+there was no `.json` suffix to notice; and it fails as a **warning** — the
+journal is written best-effort, nothing waits on it, so chat kept working and
+only the timeline silently stayed empty.
+
+It now resolves through `app_paths` like the other thirty locations.
+
+## Why three rounds of this
+
+Each pass fixed a different *shape* of the same mistake, and each check only
+recognised the shape it was written for:
+
+1. `Path(__file__).parent.parent / "memory" / x` — nineteen modules.
+2. `Path(__file__).parent / "x.json"` — ten state files that live *inside*
+   `backend/memory/` and so never mention `"memory"` at all.
+3. `Path(__file__).parent / "journal"` — a directory, with no suffix to match.
+
+`check_data_dir.py` now recognises all three, and the ones that are correct are
+named with their reason rather than merely tolerated: the shipped starter skins,
+the bundled embedder and voice weights, and the tool lookups that already try the
+install directory first and fall back to a per-user one. A check that flags
+correct code is worse than no check, so each exception is deliberate and
+reviewed.
+
+## Verified
+
+- Audited the **installed** 1.0.31 app: 33 RPCs across every page, all 30 state
+  locations, chat (including history saving), memory, vision, and all 13
+  dashboard routes.
+- `scripts/check_all.py` runs **70 suites**, all green.
+
+---
+
 # Addled 1.0.31
 
 "Install torch + transformers" did nothing if you installed Addled to

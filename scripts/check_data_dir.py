@@ -112,36 +112,73 @@ def main() -> int:
     # The 19 copies are how this drifted; one resolver is the fix, so a
     # regression is a new copy appearing.
     #
-    # Two shapes to catch, and the narrow one is why this check exists rather
-    # than a grep for `"memory"`:
-    #   Path(__file__).parent.parent / "memory" / thing   (modules that had to
-    #                                                      climb out of backend/)
-    #   Path(__file__).parent / "chat_history.json"       (state files living
-    #                                                      INSIDE backend/memory/,
-    #                                                      which never mention
-    #                                                      "memory" at all)
-    # The second shape shipped and broke chat under `Program Files`: saving a
-    # conversation raised PermissionError, because the file was still written
-    # beside the code. A search that only knows the first shape cannot see it.
+    # Three shapes to catch, and each was missed in turn before being added
+    # here — which is the argument for listing them:
+    #   Path(__file__).parent.parent / "memory" / thing   (modules climbing out
+    #                                                      of backend/)
+    #   Path(__file__).parent / "chat_history.json"       (state files INSIDE
+    #                                                      backend/memory/, which
+    #                                                      never mention "memory")
+    #   Path(__file__).parent / "journal"                 (a state DIRECTORY —
+    #                                                      no extension to match,
+    #                                                      so a suffix rule
+    #                                                      cannot see it)
+    # The third shipped and only showed up as a WARNING in the live log
+    # ("journal save failed: [WinError 5] ..."), because the journal is written
+    # best-effort and nothing waits on it.
     import re
 
     offenders = []
     backend = pathlib.Path(ROOT) / "backend"
-    # A __file__-relative path that ends in something the app would write.
+    # A __file__-relative path that ends in something writable: a data file, or
+    # a bare lowercase directory name that is not a package (packages ship).
     state_suffix = re.compile(
         r"""Path\(__file__\)[^\n]*?/\s*"""
         r"""(?:"[^"]+\.(?:json|db|db-wal|db-shm|log|jsonl|txt|csv)"|"""
         r"""'[^']+\.(?:json|db|db-wal|db-shm|log|jsonl|txt|csv)')"""
     )
+    # A bare quoted directory on the end of a __file__ expression, e.g.
+    # `... / "journal"`. Package directories contain an __init__.py, so a name
+    # that resolves to a package is skipped rather than flagged.
+    bare_dir = re.compile(
+        r"""Path\(__file__\)[^\n]*?/\s*["']([A-Za-z0-9_-]+)["']\s*$""")
+    #
+    # A bare directory is only a fault when it is where state is written. A
+    # module may legitimately name a read-only location beside the code:
+    #   * `sprite_skin.DEFAULT_SKINS_DIR` — starter skins copied OUT of it
+    #   * `embedding.MODEL_DIR`, `voice.tts.MODELS_DIR` — bundled weights, read
+    #   * `tools.rtk.app_dir` / `tools.uv.app_dir` — the install's copy, tried
+    #     first and abandoned for `user_dir()` when it is not writable
+    # Flagging those would be a check that cries wolf on correct code, so they
+    # are named here with the reason, the same way the packaging check names its
+    # deliberate exceptions. A new one has to be added on purpose.
+    READ_ONLY_BESIDE_CODE = {
+        ("character/sprite_skin.py", "default_skins"),
+        ("memory/embedding.py", "minilm-l6-v2"),
+        ("voice/tts.py", "models"),
+        ("tools/rtk.py", "rtk"),
+        ("tools/uv.py", "uv"),
+    }
     for path in backend.rglob("*.py"):
         if path.name == "app_paths.py":
             continue          # it defines the resolver; it may name the paths
+        rel = path.relative_to(backend).as_posix()
         text = path.read_text(encoding="utf-8", errors="replace")
         for lineno, line in enumerate(text.splitlines(), 1):
             if "Path(__file__)" in line and '"memory"' in line:
-                offenders.append(f"{path.relative_to(backend)}:{lineno} (memory dir)")
+                offenders.append(f"{rel}:{lineno} (memory dir)")
             elif state_suffix.search(line):
-                offenders.append(f"{path.relative_to(backend)}:{lineno} (state file)")
+                offenders.append(f"{rel}:{lineno} (state file)")
+            else:
+                m = bare_dir.search(line)
+                if not m:
+                    continue
+                name = m.group(1)
+                if (path.parent / name / "__init__.py").exists():
+                    continue      # a package: code, ships with the app
+                if (rel, name) in READ_ONLY_BESIDE_CODE:
+                    continue      # named above as a deliberate read
+                offenders.append(f"{rel}:{lineno} (state dir '{name}')")
     check("no file computes a writable path from __file__", not offenders,
           ", ".join(offenders[:6]))
 

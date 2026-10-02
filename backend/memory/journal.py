@@ -35,7 +35,9 @@ log = logging.getLogger("addled.journal")
 # from worker threads, and the lock is only ever held for a local file write.
 _JOURNAL_LOCK = threading.Lock()
 
-JOURNAL_DIR = Path(__file__).resolve().parent / "journal"
+from backend import app_paths
+
+JOURNAL_DIR = app_paths.subdir("journal")
 MAX_ENTRIES_PER_DAY = 200
 KEEP_DAYS = 60
 
