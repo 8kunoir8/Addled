@@ -56,8 +56,13 @@ def _is_deliberately_silent(text: object) -> bool:
     """
     return SILENT_MARKER in str(text or "")
 
-def resume_after_decision(source: str, conversation: str, message: str) -> bool:
+def resume_after_decision(conversation: str, message: str) -> bool:
     """Continue the task a permission prompt or question interrupted.
+
+    Takes the CONVERSATION only, not the source that raised it. The source of a
+    continuation is always `approval`, for the reason at the end of this
+    docstring; accepting one would let a caller file it as the chat page's own
+    turn and silence it.
 
     A turn ENDS when it needs the user's decision — deliberately, because
     waiting in-band lost a race with the dashboard's own socket timeout and the
@@ -80,8 +85,17 @@ def resume_after_decision(source: str, conversation: str, message: str) -> bool:
     ran and the agent was never told.
 
     Answers whether the continuation was started, never raises.
+
+    The turn is announced as the `approval` source rather than as whatever
+    conversation raised it. That is not cosmetic: `chat.push` is suppressed for
+    the `dashboard` source, because a turn the page sent is one the page already
+    drew — announcing it would show the exchange twice. This continuation is the
+    opposite case. NOBODY drew it: the page's original turn ended at the
+    permission prompt, and the running app might not even be the page that
+    answered. Filing it under `dashboard` therefore kept the agent's actual
+    reply invisible to every client watching the socket — which looked exactly
+    like the bug this feature exists to fix.
     """
-    source = str(source or "").strip() or "addled"
     conversation = str(conversation or "").strip()
     text = str(message or "").strip()
     if not conversation or not text:
@@ -90,7 +104,10 @@ def resume_after_decision(source: str, conversation: str, message: str) -> bool:
         return False
     try:
         get_server().run_soon(run_chat_pipeline(text, {
-            "source": source,
+            # `approval` is an attended, NON-local source, so the continuation
+            # is pushed to every surface — the chat page, the character and the
+            # bots — instead of being silently swallowed as the page's own turn.
+            "source": "approval",
             "conversation": conversation,
         }))
         log.info("Resumed conversation %s after a decision", conversation)

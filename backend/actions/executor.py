@@ -224,14 +224,13 @@ class ActionExecutor:
         the silence this whole change is about.
         """
         conversation = str(origin.get("conversation") or "").strip()
-        source = str(origin.get("source") or "").strip()
         if not conversation:
             ActionExecutor._report_to_chat(approval_id, request,
                                            result or ActionResult(False))
             return
         try:
             from backend.ws_server import resume_after_decision
-            resume_after_decision(source, conversation,
+            resume_after_decision(conversation,
                                   ActionExecutor._continuation(request, result,
                                                                approved))
         except Exception as e:  # noqa: BLE001

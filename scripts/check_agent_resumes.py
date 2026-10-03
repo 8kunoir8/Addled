@@ -94,8 +94,8 @@ def main() -> int:
     original_resume = ws_server.resume_after_decision
     original_report = ActionExecutor._report_to_chat
 
-    def _capture_resume(source, conversation, message):
-        seen.append(("resume", source, conversation))
+    def _capture_resume(conversation, message):
+        seen.append(("resume", conversation, message))
         return True
 
     def _capture_report(*_a, **_k):
@@ -111,9 +111,11 @@ def main() -> int:
         check("an approval with a conversation resumes",
               seen and seen[-1][0] == "resume", str(seen))
         check("it resumes the SAME conversation",
-              seen[-1][2] == "conv_7", str(seen[-1]))
-        check("and keeps the source", seen[-1][1] == "dashboard",
-              str(seen[-1]))
+              seen[-1][1] == "conv_7", str(seen[-1]))
+        # No source is passed any more, and that is the point: a continuation
+        # filed as the chat page's own turn is suppressed as already-drawn.
+        check("the resume carries the continuation message",
+              "Continue the task" in seen[-1][2], str(seen[-1]))
 
         seen.clear()
         # A gated action raised by a bare dashboard button belongs to nobody's
@@ -206,7 +208,7 @@ def main() -> int:
         # Call the real helper with a real loop running, so `create_task` WOULD
         # have worked: the point is that it must not be used either way.
         async def _drive():
-            return _ws.resume_after_decision("dashboard", "conv_9", "carry on")
+            return _ws.resume_after_decision("conv_9", "carry on")
         ok = asyncio.run(_drive())
         check("the helper reports the continuation started", ok is True,
               f"returned {ok!r}")
@@ -217,6 +219,29 @@ def main() -> int:
             coro.close()
     finally:
         _ws.get_server().run_soon = original_soon
+
+    # The continuation must NOT be filed as the chat page's own turn. `chat.push`
+    # is suppressed for `dashboard` (the page already drew it), so filing a
+    # server-initiated continuation there made the agent's actual reply invisible
+    # to every client watching the socket — which looked exactly like the bug
+    # this feature exists to fix. Found live, not by reading.
+    body = Path(ROOT, "backend", "ws_server.py").read_text(
+        encoding="utf-8").split("def resume_after_decision")[1].split("\ndef ")[0]
+    code_only = "\n".join(l for l in body.splitlines()
+                          if not l.strip().startswith("#"))
+    check("the continuation is announced as an approval, not as dashboard",
+          '"source": "approval"' in code_only,
+          "a dashboard-sourced continuation is suppressed as already-drawn")
+    from backend import chat_sources
+    check("and `approval` is actually announcable",
+          chat_sources.should_announce("approval") is True,
+          "the source chosen cannot be pushed")
+    check("while `dashboard` is not (so the trap is real)",
+          chat_sources.should_announce("dashboard") is False,
+          "the reason for choosing approval no longer holds")
+    check("the helper no longer takes a source",
+          "source" not in body.split(") -> bool")[0],
+          "a caller could file the continuation as the page's own turn")
 
     # And it must not be silent about a failure, because a failed resume leaves
     # the agent mute, which is the bug being fixed.
