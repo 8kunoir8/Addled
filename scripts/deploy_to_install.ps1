@@ -158,37 +158,47 @@ if (-not (Test-Path $resources)) {
 # Probed by writing, not by testing the ACL: an inherited deny or a read-only
 # attribute both block the copy, and `IsInRole(Administrator)` only answers
 # whether the token *could* elevate, not whether this folder accepts the write.
-if ($DryRun) { return }
-$probe = Join-Path $InstallRoot '.deploy-write-probe'
-try {
-    New-Item -ItemType File -Path $probe -Force -ErrorAction Stop | Out-Null
-    Remove-Item $probe -Force -ErrorAction SilentlyContinue
-} catch {
-    $elevated = (New-Object Security.Principal.WindowsPrincipal(
-        [Security.Principal.WindowsIdentity]::GetCurrent())
-    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    $why = if ($elevated) {
-        "This shell IS elevated, so the folder itself is refusing writes - " +
-        "check its ACL, or that the app is not running and holding the files."
-    } else {
-        "This shell is NOT elevated. Re-run it from an Administrator terminal."
+#
+# Skipped for a dry run, which is the point of a dry run: it must be possible to
+# preview a deploy from an ordinary shell. This used to be `if ($DryRun) { return }`,
+# which returned before every copy step — so `-DryRun` printed nothing and exited
+# 0, the `/L` listing in Invoke-Sync was unreachable, and the "Dry run - nothing
+# was written" line at the end could never run. A preview that silently shows
+# nothing is worse than no preview, because it reads as "nothing would change".
+if ($DryRun) {
+    Write-Host "Dry run: previewing what would be written (no elevation needed)." -ForegroundColor Yellow
+} else {
+    $probe = Join-Path $InstallRoot '.deploy-write-probe'
+    try {
+        New-Item -ItemType File -Path $probe -Force -ErrorAction Stop | Out-Null
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+    } catch {
+        $elevated = (New-Object Security.Principal.WindowsPrincipal(
+            [Security.Principal.WindowsIdentity]::GetCurrent())
+        ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $why = if ($elevated) {
+            "This shell IS elevated, so the folder itself is refusing writes - " +
+            "check its ACL, or that the app is not running and holding the files."
+        } else {
+            "This shell is NOT elevated. Re-run it from an Administrator terminal."
+        }
+        # Echo back the flags that were actually passed. A fixed hint that dropped
+        # `-WithDashboard` would send the user to a command that does not deploy the
+        # thing they asked for, which is worse than no hint at all.
+        #
+        # Built with statements, not a trailing `if`: in Windows PowerShell 5.1 `if`
+        # is a statement and cannot be an operand, and `'x' + (if (...) {...})` is a
+        # parse error — the same trap that cost time earlier in this project.
+        $relay = @()
+        foreach ($flag in @('BackendOnly', 'WithDashboard', 'WithSkills')) {
+            if ($PSBoundParameters.ContainsKey($flag)) { $relay += "-$flag" }
+        }
+        $suggest = 'powershell -File scripts\deploy_to_install.ps1'
+        if ($relay.Count -gt 0) { $suggest = "$suggest " + ($relay -join ' ') }
+        throw ("Cannot write to $InstallRoot.`n  $why`n  " +
+               "Right-click PowerShell -> 'Run as administrator', then:`n" +
+               "    cd $repo; $suggest")
     }
-    # Echo back the flags that were actually passed. A fixed hint that dropped
-    # `-WithDashboard` would send the user to a command that does not deploy the
-    # thing they asked for, which is worse than no hint at all.
-    #
-    # Built with statements, not a trailing `if`: in Windows PowerShell 5.1 `if`
-    # is a statement and cannot be an operand, and `'x' + (if (...) {...})` is a
-    # parse error — the same trap that cost time earlier in this project.
-    $relay = @()
-    foreach ($flag in @('BackendOnly', 'WithDashboard', 'WithSkills')) {
-        if ($PSBoundParameters.ContainsKey($flag)) { $relay += "-$flag" }
-    }
-    $suggest = 'powershell -File scripts\deploy_to_install.ps1'
-    if ($relay.Count -gt 0) { $suggest = "$suggest " + ($relay -join ' ') }
-    throw ("Cannot write to $InstallRoot.`n  $why`n  " +
-           "Right-click PowerShell -> 'Run as administrator', then:`n" +
-           "    cd $repo; $suggest")
 }
 
 $settings = Join-Path $resources 'backend\memory\settings.json'
@@ -269,8 +279,17 @@ if (-not $BackendOnly -or $WithDashboard) {
 foreach ($reqName in @('requirements.txt', 'requirements-vision.txt')) {
     $reqFrom = Join-Path $repo $reqName
     if (Test-Path $reqFrom) {
-        Copy-Item -Path $reqFrom -Destination (Join-Path $resources $reqName) -Force
-        Write-Host "Deployed $reqName" -ForegroundColor Cyan
+        # Honour -DryRun. This is a plain Copy-Item rather than an Invoke-Sync,
+        # so it did not pick up the `/L` flag the syncs get, and a dry run tried
+        # to write for real — failing on the read-only install with a raw
+        # AccessDenied, which is the failure a dry run exists to predict rather
+        # than perform.
+        if ($DryRun) {
+            Write-Host "Would deploy $reqName" -ForegroundColor Cyan
+        } else {
+            Copy-Item -Path $reqFrom -Destination (Join-Path $resources $reqName) -Force
+            Write-Host "Deployed $reqName" -ForegroundColor Cyan
+        }
     }
 }
 

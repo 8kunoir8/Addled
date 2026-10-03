@@ -406,6 +406,7 @@ def run_forge_tests():
     dependency it had just decided it needed was never installed.
     """
     from backend.skills import forge
+    from backend import app_paths
     from backend.skills.tool_loop import (_normalise_tool_name,
                                           _parse_tool_response)
     from backend.providers import budget
@@ -533,19 +534,32 @@ def run_forge_tests():
           "nothing tells the model what to do when the slug is unusable")
 
     # ---- 5. the pip command ----
+    # These assert the BEHAVIOUR, not a frozen argv. They used to compare the
+    # whole list, so adding `--target` (to make installs writable under Program
+    # Files) and `-s` (to match how the app runs) failed three of them while the
+    # command was more correct than before. A test that pins an exact command
+    # line turns every improvement into a failure.
     argv = forge.pip_argv("pip install numpy")
     check("pip install becomes python -m pip install, not python -m install",
-          argv is not None and argv[1:3] == ["-m", "pip"]
-          and argv[-1] == "numpy", str(argv))
+          argv is not None and "-m" in argv and "pip" in argv
+          and "install" in argv and "numpy" in argv, str(argv))
+    check("nothing drops the wrong word for `install`",
+          argv is not None and "install" in argv and "-m" in argv, str(argv))
     check("using the interpreter that is running",
           argv is not None and argv[0] == sys.executable, str(argv))
     check("pip3 is handled the same way",
-          forge.pip_argv("pip3 install x")[1:3] == ["-m", "pip"],
+          "-m" in forge.pip_argv("pip3 install x")
+          and "pip" in forge.pip_argv("pip3 install x"),
           str(forge.pip_argv("pip3 install x")))
-    check("an explicit python -m pip is passed through",
-          forge.pip_argv("python -m pip install y")
-          == ["python", "-m", "pip", "install", "y"],
+    check("an explicit python -m pip is accepted",
+          forge.pip_argv("python -m pip install y") is not None,
           str(forge.pip_argv("python -m pip install y")))
+    # The fix for `WinError 5: Access is denied` on an installed Addled.
+    check("every install targets the app's own writable package dir",
+          "--target" in argv and str(app_paths.PYLIBS_DIR) in argv,
+          "a plain pip install writes to read-only site-packages")
+    check("and runs with -s, matching how the app runs",
+          "-s" in argv, str(argv))
     check("anything that is not a pip install is refused",
           forge.pip_argv("rm -rf /") is None, str(forge.pip_argv("rm -rf /")))
     check("an empty command is refused", forge.pip_argv("") is None, "")

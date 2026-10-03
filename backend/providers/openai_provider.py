@@ -43,7 +43,9 @@ def http_error_detail(exc: httpx.HTTPStatusError) -> str:
         detail = (response.text or "")[:_HTTP_ERROR_CHARS]
     detail = " ".join(detail.split())[:_HTTP_ERROR_CHARS]
     if not detail:
-        return str(exc)
+        # `str(exc)` can itself be empty for some httpx errors, and returning it
+        # put a bare "Provider error: " in front of the user.
+        detail = str(exc) or f"HTTP {response.status_code} with no detail"
     return f"HTTP {response.status_code}: {detail}"
 
 
@@ -113,7 +115,29 @@ class OpenAIProvider(BaseProvider):
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        return httpx.AsyncClient(base_url=base_url, headers=headers, timeout=60.0)
+        return httpx.AsyncClient(base_url=base_url, headers=headers,
+                                 timeout=self._timeout())
+
+    def _timeout(self) -> float:
+        """How long to wait for a completion, in seconds.
+
+        A flat 60s is right for a hosted API and wrong for a local model. A
+        local 8B produced 2000 tokens in ~45s, so a 6000-token generation
+        reliably exceeded 60s — and `httpx.ReadTimeout` has an EMPTY `str()`,
+        so the caller saw `Provider error: ` with no reason at all. That blank
+        message is what made the forge look broken instead of slow.
+        """
+        import os
+        env = os.environ.get("ADDLED_HTTP_TIMEOUT")
+        if env:
+            try:
+                return float(env)
+            except ValueError:
+                pass
+        # Local servers are slower and are not billed by the second.
+        if self.provider_id in ("local", "ollama", "lmstudio"):
+            return 600.0
+        return 120.0
 
     async def chat(
         self,
@@ -145,20 +169,92 @@ class OpenAIProvider(BaseProvider):
                     data = _parse_sse_as_completion(resp.text, model)
                 choice = data["choices"][0]
                 message = choice.get("message", {})
+                content = message.get("content") or ""
+                # Thinking models put their reasoning in a SEPARATE field. Two
+                # things go wrong when it is dropped, and both did:
+                #
+                # 1. `tool_loop` must echo `reasoning_content` back on the
+                #    follow-up request, or the model repeats what it already
+                #    reasoned about. `deepseek_provider` already passed it; this
+                #    one did not, so every OpenAI-shaped thinking model lost it —
+                #    including `LocalProvider`, which subclasses this.
+                # 2. A thinking model can spend the WHOLE token budget reasoning
+                #    and return no content at all. The local qwen3-8b did
+                #    exactly that at 2000 tokens (finish_reason "length",
+                #    9063 chars of reasoning, 0 of content), so the forge was
+                #    handed an empty string and reported a failure that named
+                #    neither the cause nor the fix.
+                reasoning = (message.get("reasoning_content")
+                             or message.get("reasoning") or "")
+                finish = choice.get("finish_reason") or ""
+                if not content.strip():
+                    # An empty reply is a FAILURE, not an empty success, and the
+                    # reasoning is NOT substituted for the answer.
+                    #
+                    # Substituting it looked helpful and is not: the reasoning
+                    # is prose ("Okay, so the user is asking..."), so a code
+                    # consumer like the forge feeds it to ast.parse and reports
+                    # a syntax error about a sentence — the same misleading
+                    # symptom this change exists to remove. The reasoning is
+                    # still carried on the result so `tool_loop` can echo it
+                    # back, and the message says what actually happened.
+                    if finish == "length":
+                        why = (f"The model spent its entire output limit "
+                               f"({max_tokens} tokens) thinking and returned no "
+                               "answer. Raise the limit, use a model without a "
+                               "thinking mode, or disable thinking.")
+                    elif reasoning:
+                        why = ("The model returned reasoning but no answer, so "
+                               "there is nothing usable here. It may have hit "
+                               f"the output limit ({max_tokens} tokens).")
+                    else:
+                        why = ("The model returned an empty response. Check "
+                               "that the model is loaded, and that the prompt "
+                               "is not being rejected.")
+                    return ProviderResult(
+                        ok=False, error=why,
+                        model=data.get("model", model),
+                        tokens_in=data.get("usage", {}).get("prompt_tokens", 0),
+                        tokens_out=data.get("usage", {}).get("completion_tokens", 0),
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                        reasoning_content=reasoning,
+                    )
                 return ProviderResult(
                     ok=True,
-                    response=message.get("content") or "",
+                    response=content,
                     model=data.get("model", model),
                     tokens_in=data.get("usage", {}).get("prompt_tokens", 0),
                     tokens_out=data.get("usage", {}).get("completion_tokens", 0),
                     duration_ms=int((time.monotonic() - t0) * 1000),
                     tool_calls=message.get("tool_calls") or None,
+                    reasoning_content=reasoning,
                 )
         except httpx.HTTPStatusError as e:
             return ProviderResult(ok=False, error=http_error_detail(e),
                                   duration_ms=int((time.monotonic() - t0) * 1000))
+        except httpx.TimeoutException:
+            # `str(httpx.ReadTimeout())` is EMPTY, so raising it produced
+            # "Provider error: " with nothing after it — the caller blamed the
+            # model for a timeout it could not see. Timeouts are named now, and
+            # local servers get a longer one (see `_timeout`).
+            waited = time.monotonic() - t0
+            return ProviderResult(
+                ok=False,
+                error=(f"The model did not finish within {self._timeout():.0f}s "
+                       f"(waited {waited:.0f}s). A local model generating a long "
+                       "reply can exceed the limit: raise ADDLED_HTTP_TIMEOUT, "
+                       "or reduce the requested length."),
+                model=model,
+                duration_ms=int(waited * 1000),
+            )
         except Exception as e:
-            return ProviderResult(ok=False, error=str(e), duration_ms=int((time.monotonic() - t0) * 1000))
+            # Never an empty reason. An exception with no message is still a
+            # failure, and the caller needs something to act on.
+            reason = str(e) or f"{type(e).__name__} (no message)"
+            return ProviderResult(ok=False,
+                                  error=f"{type(e).__name__}: {reason}",
+                                  model=model,
+                                  duration_ms=int((time.monotonic() - t0) * 1000))
 
     async def chat_stream(
         self,

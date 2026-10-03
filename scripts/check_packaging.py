@@ -467,6 +467,52 @@ def main() -> int:
           bool(deploy_dirs) and bool(deploy_files),
           f"{len(deploy_dirs)} dirs, {len(deploy_files)} files")
 
+    # ---- `-DryRun` must preview, and must not write ----------------------
+    #
+    # It returned before every copy step, so it printed nothing and exited 0.
+    # The `/L` flag in the script's Invoke-Sync was unreachable, the closing
+    # "Dry run - nothing was written" line could never run, and the one thing a
+    # dry run is for — seeing what a deploy would change before running it —
+    # did not happen. A silent empty preview is worse than none: it reads as
+    # "nothing would change".
+    #
+    # Run WITHOUT elevation against whatever install the script auto-detects, so
+    # a dry run that tries to write fails loudly here instead of on someone's
+    # install. That it succeeds unelevated is the point: previewing a deploy
+    # must not require admin rights. When no install is present the script says
+    # so and exits non-zero, which is correct behaviour, not a failure of this
+    # check — so the install is located first and the check is skipped without
+    # one. (A dry run still needs a real target to diff against; it is the
+    # *write* probe that -DryRun removes, not the target lookup.)
+    any_install = [os.path.join(base, "Addled")
+                   for base in (os.environ.get("ProgramFiles"),
+                                os.environ.get("ProgramFiles(x86)"),
+                                os.path.join(os.environ.get("LOCALAPPDATA") or "",
+                                             "Programs"))
+                   if base and os.path.isdir(
+                       os.path.join(base, "Addled", "resources", "backend"))]
+    if not any_install:
+        print("  --   no installed app; skipping the dry-run checks")
+    else:
+        dry = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", os.path.join(ROOT, "scripts", "deploy_to_install.ps1"),
+             "-BackendOnly", "-DryRun"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=ROOT)
+        dry_out = (dry.stdout or "") + (dry.stderr or "")
+        check("a dry run needs no elevation and succeeds", dry.returncode == 0,
+              dry_out.strip()[-300:])
+        check("a dry run says it is a dry run",
+              "dry run" in dry_out.lower(), dry_out.strip()[-200:])
+        check("a dry run does not claim to have deployed",
+              "Deployed " not in dry_out,
+              "a preview wrote for real, or reported writing")
+        probe = os.path.join(any_install[0], ".deploy-write-probe")
+        check("a dry run created no probe file in the install",
+              not os.path.exists(probe),
+              "the write probe ran despite -DryRun")
+
     for ignored_path in sorted(ignored):
         stripped = ignored_path.rstrip("/")
         covered = bool({stripped} & deploy_files)
