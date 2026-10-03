@@ -103,13 +103,33 @@ def resume_after_decision(conversation: str, message: str) -> bool:
         # outcome, which is better than resuming into nothing.
         return False
     try:
-        get_server().run_soon(run_chat_pipeline(text, {
+        params = {
             # `approval` is an attended, NON-local source, so the continuation
             # is pushed to every surface — the chat page, the character and the
             # bots — instead of being silently swallowed as the page's own turn.
             "source": "approval",
             "conversation": conversation,
-        }))
+        }
+
+        async def _resume_and_announce():
+            """Run the continuation, then tell every surface what it said.
+
+            The announcement is explicit because `_announce_turn` is called by
+            `chat_send`, and this path does not go through it: it calls the
+            pipeline directly. Relabelling the source was therefore necessary
+            and NOT sufficient — the reply was never pushed at all, so the agent
+            continued silently and the user saw nothing. That was the third
+            version of this bug and the first two were also only found by
+            running it, so the announce is written here rather than assumed.
+            """
+            result = await run_chat_pipeline(text, params)
+            reply = ""
+            if isinstance(result, dict):
+                reply = str(result.get("response") or "")
+            _announce_turn(params, text, reply)
+            return result
+
+        get_server().run_soon(_resume_and_announce())
         log.info("Resumed conversation %s after a decision", conversation)
         return True
     except Exception as e:  # noqa: BLE001

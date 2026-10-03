@@ -27,6 +27,7 @@ Run from the project root:
 """
 
 import asyncio
+import ctypes
 import os
 import sys
 
@@ -55,6 +56,12 @@ def _foreground_is_frameless(u) -> bool:
     Used only to decide if a live-desktop check is meaningful. If the user
     really is in a game while this runs, asserting "not gaming" would fail
     through no fault of the code.
+
+    Must check SIZE as well as style. Style alone said "a game is in front" for
+    the TASKBAR — an empty-titled popup with no caption, 2560x48 — and reported
+    a failure that the detector itself had correctly avoided. A game covers the
+    work area; that is half of what makes it one, so the check has to include it
+    or it is testing a different question than the code asks.
     """
     try:
         GWL_STYLE = -16
@@ -66,7 +73,23 @@ def _foreground_is_frameless(u) -> bool:
         has_caption = bool(style & WS_CAPTION)
         has_frame = bool(style & WS_THICKFRAME)
         is_popup = bool(style & WS_POPUP)
-        return not ((has_caption or has_frame) and not is_popup)
+        frameless = not ((has_caption or has_frame) and not is_popup)
+        if not frameless:
+            return False
+
+        class _RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+        rect = _RECT()
+        u.GetWindowRect(hwnd, ctypes.byref(rect))
+        w, h = rect.right - rect.left, rect.bottom - rect.top
+        work = _RECT()
+        u.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0)
+        wa_w = work.right - work.left
+        wa_h = work.bottom - work.top
+        # Big enough to be covering the usable screen, frameless, and so the
+        # kind of window a game would be.
+        return w >= wa_w - 2 and h >= wa_h - 2
     except Exception:  # noqa: BLE001
         return False
 

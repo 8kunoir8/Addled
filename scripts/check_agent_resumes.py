@@ -243,6 +243,26 @@ def main() -> int:
           "source" not in body.split(") -> bool")[0],
           "a caller could file the continuation as the page's own turn")
 
+    print()
+    print("=== the continuation is ANNOUNCED, not just run ===")
+    # The third version of this bug: the resume ran (the log proved a list_dir
+    # executed) and the reply was never pushed, because `_announce_turn` is
+    # called by `chat_send` and this path calls the pipeline directly. Relabelling
+    # the source was necessary and not sufficient. Every one of these three was
+    # found by running it, so the announce is asserted here explicitly.
+    check("the resume announces the turn itself",
+          "_announce_turn(" in code_only,
+          "the agent would continue silently and the user would see nothing")
+    check("it announces with the same params it ran with",
+          "_announce_turn(params, text, reply)" in code_only,
+          "the badge and source would not match the turn that ran")
+    # And it must await the reply before announcing, or it would push an empty
+    # message: the announcement is what carries the agent's words.
+    check("it runs the turn and collects the reply before announcing",
+          "await run_chat_pipeline(text, params)" in code_only
+          and "reply" in code_only,
+          "it would announce before the reply existed")
+
     # And it must not be silent about a failure, because a failed resume leaves
     # the agent mute, which is the bug being fixed.
     src = Path(ROOT, "backend", "ws_server.py").read_text(encoding="utf-8")
