@@ -72,8 +72,14 @@ def resume_after_decision(source: str, conversation: str, message: str) -> bool:
     Spawned rather than awaited: the caller is usually an approval RPC that has
     to answer immediately, and a resumed turn can take minutes on a local model.
 
-    Answers whether the continuation was started, never raises. A resume that
-    cannot be scheduled must not turn an approved action into a failed one.
+    Dispatched through the SERVER's loop (`run_soon`), not `asyncio.create_task`
+    on whatever loop happens to be current. An approval can be answered from a
+    path that is not running on the server's loop — and `create_task` there
+    raises, which an earlier version of this swallowed, leaving a resume that
+    reported success and did nothing. That is worse than a failure: the action
+    ran and the agent was never told.
+
+    Answers whether the continuation was started, never raises.
     """
     source = str(source or "").strip() or "addled"
     conversation = str(conversation or "").strip()
@@ -83,14 +89,17 @@ def resume_after_decision(source: str, conversation: str, message: str) -> bool:
         # outcome, which is better than resuming into nothing.
         return False
     try:
-        _spawn(run_chat_pipeline(text, {
+        get_server().run_soon(run_chat_pipeline(text, {
             "source": source,
             "conversation": conversation,
         }))
-        log.debug("Resumed conversation %s after a decision", conversation)
+        log.info("Resumed conversation %s after a decision", conversation)
         return True
     except Exception as e:  # noqa: BLE001
-        log.debug("could not resume after a decision: %s", e)
+        # Logged at warning, not debug. A resume that fails means the agent was
+        # left mid-task with no idea what happened, which is the whole bug this
+        # exists to fix — it must not be invisible.
+        log.warning("could not resume after a decision: %s", e)
         return False
 
 def set_engine(engine):

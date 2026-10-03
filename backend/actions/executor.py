@@ -235,7 +235,10 @@ class ActionExecutor:
                                   ActionExecutor._continuation(request, result,
                                                                approved))
         except Exception as e:  # noqa: BLE001
-            log.debug("could not resume after %s: %s", approval_id, e)
+            # Warning, not debug. This branch means the agent was left mid-task
+            # with no idea what happened — the exact failure this exists to fix
+            # — so it must be visible rather than buried.
+            log.warning("could not resume after %s: %s", approval_id, e)
             try:
                 ActionExecutor._report_to_chat(approval_id, request,
                                                result or ActionResult(False))

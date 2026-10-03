@@ -185,6 +185,59 @@ def main() -> int:
           "def resume_after_decision" in ws_src)
 
     print()
+    print("=== the continuation is DISPATCHED onto the server loop ===")
+    # The check that matters most, and the one an earlier version lacked: the
+    # first implementation called `_spawn`, which needs a RUNNING loop on the
+    # current thread. An approval can be answered from a path that is not on the
+    # server's loop, where `create_task` raises — and the error was swallowed,
+    # so the resume reported success and did nothing while the action had
+    # really run. Asserting the dispatch mechanism catches that; asserting the
+    # message text did not.
+    import asyncio
+    from backend import ws_server as _ws
+
+    async def _noop():
+        return None
+
+    dispatched = []
+    original_soon = _ws.get_server().run_soon
+    _ws.get_server().run_soon = lambda coro: dispatched.append(coro)
+    try:
+        # Call the real helper with a real loop running, so `create_task` WOULD
+        # have worked: the point is that it must not be used either way.
+        async def _drive():
+            return _ws.resume_after_decision("dashboard", "conv_9", "carry on")
+        ok = asyncio.run(_drive())
+        check("the helper reports the continuation started", ok is True,
+              f"returned {ok!r}")
+        check("it dispatched through the server's loop, not create_task",
+              len(dispatched) == 1,
+              f"run_soon called {len(dispatched)} time(s)")
+        for coro in dispatched:
+            coro.close()
+    finally:
+        _ws.get_server().run_soon = original_soon
+
+    # And it must not be silent about a failure, because a failed resume leaves
+    # the agent mute, which is the bug being fixed.
+    src = Path(ROOT, "backend", "ws_server.py").read_text(encoding="utf-8")
+    body = src.split("def resume_after_decision")[1].split("\ndef ")[0]
+    check("a failed resume is logged as a warning, not hidden",
+          "log.warning" in body,
+          "a failure would be invisible")
+    # Check the CODE, not the prose: the docstring explains why create_task is
+    # wrong, so a naive substring search matches the explanation and fails on a
+    # correct implementation. Comments are stripped first.
+    code_only = "\n".join(
+        line for line in body.splitlines()
+        if not line.strip().startswith("#"))
+    check("it does not call create_task directly",
+          "create_task(" not in code_only,
+          "create_task needs a running loop and raises off the server's thread")
+    check("it dispatches via run_soon", "run_soon(" in code_only,
+          "nothing schedules the turn onto the server's loop")
+
+    print()
     print("FAILED: " + ", ".join(fails) if fails
           else "all resume checks passed")
     return 1 if fails else 0
