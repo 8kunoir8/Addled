@@ -1273,6 +1273,182 @@ class SkillRegistry:
             swarm_learn, "system",
         ))
 
+        async def swarm_delegate(params: dict) -> dict:
+            """Hand a task to a swarm agent and report back when it is done.
+
+            Non-blocking ON PURPOSE. A swarm agent runs a full reasoning turn —
+            with tools, memory and possibly several tool rounds — which takes
+            minutes. Making the user's chat turn wait for that would look like a
+            hang, and the character would sit on "thinking" for work it is not
+            doing. So this starts the agent and returns immediately; the answer
+            arrives later as a message, the same way a scheduled reminder does
+            (`backend/tasks/actions.py`).
+
+            Refused inside a delegation. `SwarmAgent.run_task` goes through
+            `run_chat_pipeline`, so an agent IS a chat turn and holds this same
+            skill — without the brake, an agent could delegate to an agent
+            forever. One level is the whole allowance; see
+            `backend/chat_context.MAX_DELEGATION_DEPTH`.
+            """
+            from backend import chat_context
+            from backend.swarm import roster
+            from backend.swarm.orchestrator import swarm
+
+            if chat_context.in_delegation():
+                return {
+                    "success": False,
+                    "error": ("You are a swarm agent working a delegated task, "
+                              "so you cannot delegate again. Do the task "
+                              "yourself with your own tools, and say what you "
+                              "found."),
+                }
+
+            wanted = str(params.get("agent") or params.get("agentId")
+                         or params.get("name") or "").strip()
+            task = str(params.get("task") or params.get("brief")
+                       or params.get("request") or "").strip()
+            if not wanted:
+                return {"success": False,
+                        "error": "Name the agent to delegate to. Use "
+                                 "swarm_roster to see the saved agents."}
+            if not task:
+                return {"success": False,
+                        "error": "Give the agent a task in 'task'."}
+
+            # Accept a name as well as an id — a user says "the Reviewer", not
+            # "agent_7f3a21bc". Same resolution `swarm_learn` uses, kept
+            # identical so the two cannot disagree about what a name means.
+            entry = roster.get(wanted)
+            if not entry:
+                lowered = wanted.strip().lower()
+                entry = next((e for e in roster.definitions()
+                              if str(e.get("name", "")).lower() == lowered),
+                             None)
+            if not entry:
+                names = [str(e.get("name") or "?") for e in roster.definitions()]
+                return {
+                    "success": False,
+                    "error": (f"No swarm agent called '{wanted}'. Saved "
+                              "agents: " + (", ".join(names) if names
+                                            else "(none yet — the Swarm page "
+                                                  "creates them)")),
+                }
+
+            agent_id = str(entry.get("id") or "")
+            agent_name = str(entry.get("name") or agent_id)
+
+            # Reuse a live agent rather than spawning a second copy of the same
+            # desk: two agents with one name would both write that desk's
+            # notebook, and `swarm.stop` could only cancel one of them.
+            agent = swarm.get_agent(agent_id)
+            if agent is None:
+                agent = swarm.spawn_from_roster(agent_id)
+            if agent is None:
+                return {"success": False,
+                        "error": f"Could not start '{agent_name}'."}
+
+            # Anything the caller wants the agent to know that is not the task
+            # itself — a file path, a decision already made, a constraint.
+            context = str(params.get("context") or "").strip()
+            if context:
+                task = f"{task}\n\nContext you need:\n{context}"
+
+            async def _run_and_report() -> None:
+                """Run the agent's turn, then tell every surface it finished.
+
+                The delegation depth is raised HERE, inside the task, so it
+                applies to the agent's own turn and not to the chat turn that
+                started it. `ContextVar` follows the task, so this does not leak
+                back to the caller.
+                """
+                from backend.ws_server import get_server
+                chat_context.enter_delegation()
+                try:
+                    from backend.providers.registry import get_provider
+                    provider = get_provider()
+                except Exception:  # noqa: BLE001
+                    provider = None
+                try:
+                    result = await swarm.run_agent(agent_id, task, provider)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Delegated task for %s failed: %s", agent_name, e)
+                    result = {"success": False, "error": str(e)}
+                finally:
+                    chat_context.exit_delegation()
+
+                text = str((result or {}).get("response") or "").strip()
+                ok = bool((result or {}).get("success")) and bool(text)
+                payload = {
+                    "agent_id": agent_id,
+                    "agent": agent_name,
+                    "task": task,
+                    "success": ok,
+                    "text": text or str((result or {}).get("error")
+                                        or "The agent did not return an answer."),
+                    # The chat that asked, so the result can be filed back into
+                    # the right conversation rather than every open page.
+                    "source": chat_context.source(),
+                    "conversation": chat_context.conversation(),
+                }
+                server = get_server()
+                if server is None:
+                    return
+                try:
+                    server.broadcast_nowait("swarm.agentResult", payload)
+                    # The Swarm page draws running/finished state from this.
+                    server.broadcast_nowait("swarm.updated",
+                                            {"agents": swarm.list_agents()})
+                    # The remote companion: a phone that asked for this deserves
+                    # the answer too, and it is the same shape a reminder uses.
+                    server.broadcast_nowait("bot.notify", {
+                        "text": (f"🤖 {agent_name}: {payload['text'][:600]}"
+                                 if ok else
+                                 f"⚠ {agent_name} could not finish: "
+                                 f"{payload['text'][:400]}"),
+                        "platforms": [],
+                    })
+                except Exception as e:  # noqa: BLE001
+                    log.debug("could not announce the delegated result: %s", e)
+
+            try:
+                asyncio.create_task(_run_and_report())
+            except Exception as e:  # noqa: BLE001
+                return {"success": False,
+                        "error": f"Could not start the task: {e}"}
+
+            return {
+                "success": True,
+                "status": "started",
+                "agent": agent_name,
+                "message": (f"{agent_name} is working on that now. The answer "
+                            "will arrive as a message when it is done."),
+            }
+        self.register(SkillDefinition(
+            "swarm_delegate",
+            "Hand a longer piece of work to one of the saved swarm agents, "
+            "which has its own role, brief and learned rules. Use it when the "
+            "task suits a specialist better than you — a review, a research "
+            "pass, a second opinion — or when it is long enough that you would "
+            "rather not hold the conversation open. You get an acknowledgement "
+            "straight away and the agent's answer arrives later as a message, "
+            "so tell the user that is what will happen. Not available to a "
+            "swarm agent itself.",
+            {"type": "object", "properties": {
+                "agent": {"type": "string",
+                          "description": "The agent's name or id. Use "
+                                         "swarm_roster to see them."},
+                "task": {"type": "string",
+                         "description": "What to do, in full sentences. The "
+                                        "agent does not see this conversation, "
+                                        "so include everything it needs."},
+                "context": {"type": "string",
+                            "description": "Optional extra facts: file paths, "
+                                           "decisions already made, "
+                                           "constraints."},
+            }, "required": ["agent", "task"]},
+            swarm_delegate, "system",
+        ))
+
     # ── System ───────────────────────────────────────────────────────────
 
     def _register_system_skills(self):

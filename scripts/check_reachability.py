@@ -152,6 +152,17 @@ PHRASINGS: dict[str, list[str]] = {
     "swarm_notes": ["read the swarm notes"],
     "swarm_roster": ["show the agent roster", "what agents do I have"],
     "swarm_learn": ["teach the agent a rule"],
+    # Delegation has no single obvious phrasing — a user asks for the *outcome*
+    # ("have the reviewer look at this"), not for "delegation". So the list is
+    # the phrasings that should reach it, which is the same standard the check
+    # applies to every other skill: give it its best chance.
+    "swarm_delegate": [
+        "have the reviewer check this",
+        "ask the researcher to look into it",
+        "delegate this to an agent",
+        "get another agent to do this",
+        "hand this off to one of your agents",
+    ],
     "task_schedule": ["remind me to call mum at 5pm", "schedule a task for tomorrow"],
     "task_list": ["what reminders do I have", "list my scheduled tasks"],
     "task_cancel": ["cancel that reminder"],

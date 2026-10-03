@@ -1,3 +1,51 @@
+# Addled 1.0.34
+
+**Chat and Code can hand work to a swarm agent.** Ask for the Reviewer to check
+something and it happens, in the conversation, without visiting the Swarm page.
+
+## What you can do now
+
+> "have the reviewer look at the parser changes"
+
+Addled acknowledges straight away — *"Reviewer is working on that now. The answer
+will arrive as a message when it is done."* — and its turn continues. When the
+agent finishes, its answer appears in the chat as a message from that agent, a
+toast shows on whatever page you moved to, and it reaches your phone through the
+bot bridges if you have them.
+
+The Code page can do the same, because its planner runs through the same
+pipeline as chat.
+
+## Why it does not wait
+
+A swarm agent runs a full reasoning turn — its own brief, its own skills, its own
+model, possibly several tool rounds. That is minutes, not seconds. Holding your
+chat open for it would look like a hang, and the character would sit on
+"thinking" for work it is not doing. So the delegation starts the agent and
+reports back; the answer arrives the same way a scheduled reminder does.
+
+## One level deep, on purpose
+
+A swarm agent runs its task through the same pipeline a chat turn does, which
+means an agent *is* a chat turn — and holds this skill itself. Without a limit,
+an agent could delegate to an agent, forever, on a local model that runs one
+generation at a time so the nested work would simply queue behind itself.
+
+So the allowance is **one level**: your chat or code turn may delegate, and the
+agent it delegates to cannot delegate again. An agent that is asked to try says
+so and does the work itself instead.
+
+## Verified
+
+- `scripts/check_swarm_delegate.py` is new and covers the skill, the depth
+  brake, the refusal inside a delegation, and the wording of the error when an
+  agent name is wrong (it lists the agents you actually have).
+- `check_reachability.py` caught this before release: the skill was registered
+  but **no realistic phrasing would ever offer it**. That is now covered.
+- `scripts/check_all.py` runs **72 suites**, all green.
+
+---
+
 # Addled 1.0.33
 
 **"Install Playwright" and "Install browser-use" did nothing if Addled was

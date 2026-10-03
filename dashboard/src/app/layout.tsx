@@ -54,6 +54,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [browserPrompt, setBrowserPrompt] = useState<string | null>(null);
   const [localPrompt, setLocalPrompt] = useState<any>(null);
   const [localProgress, setLocalProgress] = useState<any>(null);
+  // A delegated swarm task that just finished, shown as a toast on pages that
+  // are not the chat.
+  const [swarmResult, setSwarmResult] =
+    useState<{ agent: string; success: boolean; text: string } | null>(null);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>(getApprovals);
   const [approvalErrors, setApprovalErrors] =
     useState<Record<string, string>>({});
@@ -173,6 +177,27 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   // Local model download request (ask before downloading the configured GGUF)
   useEffect(() => onNotification('local.llmInstallRequest', (p: any) => {
     setLocalPrompt(p || {});
+  }), [onNotification]);
+
+  // A delegated swarm task finishing.
+  //
+  // Owned by the layout for the same reason approvals and questions are: it is
+  // the only always-mounted component, and `onNotification` keeps ONE handler
+  // per method, so a page-level subscriber would be replaced by whichever page
+  // mounted next. The chat page ALSO listens, but only renders results from its
+  // own source; this one is the toast for everywhere else, so finishing a task
+  // from the Code page is not silent.
+  useEffect(() => onNotification('swarm.agentResult', (p: any) => {
+    if (!p?.agent) return;
+    setSwarmResult({
+      agent: String(p.agent),
+      success: Boolean(p.success),
+      text: String(p.text || ''),
+    });
+    // Long enough to read a short answer; the full text is on the Chat page and
+    // on the agent's notebook, so the toast does not have to hold all of it.
+    const t = setTimeout(() => setSwarmResult(null), 15000);
+    return () => clearTimeout(t);
   }), [onNotification]);
 
   // Local model download progress
@@ -369,6 +394,32 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 onClick={() => { send('localLlm.installDecline', {}).catch(() => {}); setLocalPrompt(null); }}
                 className="flex-1 bg-[#21262d] hover:bg-[#30363d] text-[#8b949e] rounded-md py-1.5 text-sm font-medium">
                 No thanks
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* A delegated swarm task finishing — a toast everywhere except the
+            chat, which files the full answer into the conversation itself. */}
+        {swarmResult && pathname !== '/chat' && (
+          <div className="fixed bottom-4 right-4 z-40 w-80 rounded-lg border border-[#8957e5] bg-[#161b22] p-3 shadow-xl">
+            <p className="text-xs font-semibold text-[#e8eaed]">
+              {swarmResult.success ? `🐝 ${swarmResult.agent} finished`
+                                    : `⚠ ${swarmResult.agent} could not finish`}
+            </p>
+            <p className="mt-1.5 text-[11px] text-[#8b949e] whitespace-pre-wrap break-words">
+              {swarmResult.text.length > 260
+                ? swarmResult.text.slice(0, 260) + '…'
+                : swarmResult.text}
+            </p>
+            <div className="mt-2 flex gap-2">
+              <Link href="/chat"
+                    className="text-[10px] text-[#58a6ff] hover:text-[#4d94ff]">
+                Open in Chat
+              </Link>
+              <button onClick={() => setSwarmResult(null)}
+                      className="text-[10px] text-[#8b949e] hover:text-[#e8eaed]">
+                Dismiss
               </button>
             </div>
           </div>

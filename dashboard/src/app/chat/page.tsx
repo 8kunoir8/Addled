@@ -220,6 +220,35 @@ export default function ChatPage() {
     if (params) setUsage(params);
   }), [onNotification]);
 
+  // A swarm agent finishing the work this chat delegated to it.
+  //
+  // The delegation itself answers immediately - "Reviewer is working on that" -
+  // so this is the other half of that promise, and without it the user is told
+  // an answer is coming and never sees it. Filed as an assistant message so it
+  // reads as part of the conversation rather than a system event.
+  //
+  // Filtered on `source`, not on a conversation id: this page sends
+  // `source: 'dashboard'` and never names a conversation (the backend owns
+  // which thread is current), so a conversation match is not available here.
+  // A result that names no source is shown rather than dropped — a missing
+  // label must not mean a silently lost answer.
+  useEffect(() => onNotification('swarm.agentResult', (params: any) => {
+    if (!params?.agent) return;
+    if (params.source && params.source !== 'dashboard') return;
+    const who = String(params.agent);
+    const body = params.success
+      ? `${who} finished:\n\n${params.text || ''}`
+      : `⚠ ${who} could not finish:\n\n${params.text || ''}`;
+    setMessages(prev => [...prev, {
+      role: 'assistant',
+      content: body,
+      timestamp: Date.now(),
+      source: 'swarm',
+      sourceLabel: who,
+      sourceIcon: '🐝',
+    }]);
+  }), [onNotification]);
+
   // What a slow attachment step is doing right now.
   //
   // Local vision costs ~8s of CPU per image plus a ~16s one-time model load,
