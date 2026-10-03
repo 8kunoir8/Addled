@@ -154,6 +154,38 @@ def main() -> int:
     qp.clear()
 
     print()
+    print("=== EVERY entry point is gated, not just one ===")
+    # The bug this exists for: the gate went into `tool_loop._execute_skill_inner`,
+    # which fires on an unknown tool NAME. A model asked to forge calls the
+    # REGISTERED `forge_skill` skill directly — and the live log proved it did,
+    # with "Forged new skill: ..." from a turn that was never asked. A gate on
+    # the path the model does not take is not a gate, so each entry point is
+    # checked by name.
+    reg = Path(ROOT, "backend", "skills", "registry.py").read_text(
+        encoding="utf-8")
+    forge_fn = reg.split("async def forge_skill")[1].split("\n        self.register")[0]
+    check("the REGISTERED forge_skill skill asks first",
+          "_consented(" in forge_fn and "_ask_to_acquire(" in forge_fn,
+          "the tool the model actually calls is ungated")
+    check("the registered forge reports it is waiting",
+          "requires_answer" in forge_fn,
+          "the turn would not stop for the answer")
+    mcp_fn = reg.split("async def find_mcp_server")[1].split(
+        "\n        self.register")[0]
+    check("find_mcp_server asks before adding a server",
+          "_consented(" in mcp_fn and "_ask_to_acquire(" in mcp_fn,
+          "it would add a third-party process unprompted")
+    # And the dashboard's own install button must NOT be gated: that is an
+    # explicit user action, and asking again would be asking the user to
+    # confirm the button they just pressed.
+    ws_src = Path(ROOT, "backend", "ws_server.py").read_text(encoding="utf-8")
+    install_rpc = ws_src.split("async def skills_install_from")[1].split(
+        "\n    async def ")[0]
+    check("the dashboard's Install button is NOT second-guessed",
+          "_ask_to_acquire" not in install_rpc,
+          "it would ask the user to confirm their own click")
+
+    print()
     print("=== ordinary turns still do not ask (no interrogation) ===")
     desc_low = str(R.get("ask_user").description).lower()
     check("the do-not-be-cautious rule survives",

@@ -3675,13 +3675,41 @@ class SkillRegistry:
 
     def _register_meta_skills(self):
         async def forge_skill(params: dict) -> dict:
-            """Learn a new capability on demand."""
+            """Learn a new capability on demand, after asking the user.
+
+            The consent check belongs HERE, not only in
+            `tool_loop._execute_skill_inner`. That path fires on an unknown tool
+            NAME, which is the rarer route; a model asked to forge calls this
+            registered skill directly, and it did: the log showed
+            "Forged new skill: convert_a_colour_name__e_g___c (package:
+            webcolors)" from a turn that was never asked. A gate on the path the
+            model does not take is not a gate.
+            """
             from backend.skills.forge import skill_forge
             from backend.providers.registry import get_provider
 
             task = str(params.get("task", params.get("description", "")))
             if not task:
                 return {"success": False, "error": "No task description provided"}
+
+            from backend.skills import tool_loop as _tl
+            if not _tl._consented(None):
+                asked = await _tl._ask_to_acquire(
+                    "write and test a new skill",
+                    f"a tool for: {task[:120]}",
+                    "It searches the web for a library, generates the code, and "
+                    "runs it to check that it works.",
+                    ["Write it", "Skip this"])
+                return {
+                    "success": False,
+                    "requires_answer": True,
+                    "question_id": asked.get("question_id"),
+                    "error": asked.get("error") or
+                             ("This needs your permission first: forging writes "
+                              "new code and runs it, and can install packages. "
+                              "Ask the user and wait for their answer before "
+                              "generating anything."),
+                }
 
             provider = None
             try:
