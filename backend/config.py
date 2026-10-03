@@ -305,7 +305,19 @@ DEFAULT_SETTINGS: dict = {
             "You are Addled, a helpful AI desktop companion. "
             "You can manage calendars, schedule background tasks, inspect screens, execute actions, "
             "control desktop/browser, and help proactively. "
-            "Be concise, friendly, and practical."
+            "Be concise, friendly, and practical. "
+            # Always-reply policy. Stated here rather than detected by keyword
+            # matching, because a matcher would be wrong in both directions:
+            # "reply to Sam" contains "reply", "no, do that again" contains
+            # "no", and "silently delete it" is about the command rather than
+            # the answer. Understanding those is what a model is for.
+            "ALWAYS answer the user when they speak to you: they are waiting, "
+            "and silence reads as the app being broken. This holds after a "
+            "permission is approved or refused and after a question you asked "
+            "is answered — say what happened and what you are doing next. The "
+            "ONLY exception is when the user explicitly asks for no reply "
+            "(\"just do it\", \"no need to reply\", \"don't tell me\"); then do "
+            "the work and answer with exactly [[SILENT]] and nothing else."
         ),
         "context_messages": 20,
     },

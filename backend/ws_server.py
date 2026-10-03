@@ -40,6 +40,59 @@ def _spawn(coro):
     task.add_done_callback(_background_tasks.discard)
     return task
 
+# The marker a model replies with when the user asked for no answer.
+#
+# Deliberately a token rather than an empty string: an empty reply already means
+# "the model had nothing to say", which is a different thing and must still be
+# reported. A token keeps the two apart.
+SILENT_MARKER = "[[SILENT]]"
+
+def _is_deliberately_silent(text: object) -> bool:
+    """Whether the model chose to say nothing because the user asked it to.
+
+    The system prompt tells it to answer with the marker instead of prose when a
+    reply was explicitly declined. Matched as an exact token so ordinary writing
+    that happens to discuss silence is not mistaken for the signal.
+    """
+    return SILENT_MARKER in str(text or "")
+
+def resume_after_decision(source: str, conversation: str, message: str) -> bool:
+    """Continue the task a permission prompt or question interrupted.
+
+    A turn ENDS when it needs the user's decision — deliberately, because
+    waiting in-band lost a race with the dashboard's own socket timeout and the
+    user saw "Request timed out" instead of a permission prompt. What was
+    missing is the other half: once the decision arrives, the turn is resumed
+    with it, so a multi-step task finishes instead of stopping at the gate.
+
+    The message is not a new question about the decision. It is the tool result
+    the model was already waiting for, delivered late, so the model continues
+    where it stopped rather than starting something new.
+
+    Spawned rather than awaited: the caller is usually an approval RPC that has
+    to answer immediately, and a resumed turn can take minutes on a local model.
+
+    Answers whether the continuation was started, never raises. A resume that
+    cannot be scheduled must not turn an approved action into a failed one.
+    """
+    source = str(source or "").strip() or "addled"
+    conversation = str(conversation or "").strip()
+    text = str(message or "").strip()
+    if not conversation or not text:
+        # No thread to continue. The executor falls back to reporting the
+        # outcome, which is better than resuming into nothing.
+        return False
+    try:
+        _spawn(run_chat_pipeline(text, {
+            "source": source,
+            "conversation": conversation,
+        }))
+        log.debug("Resumed conversation %s after a decision", conversation)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not resume after a decision: %s", e)
+        return False
+
 def set_engine(engine):
     """Called by main.py to give WS handlers access to engine state."""
     global _engine_ref
@@ -972,8 +1025,23 @@ async def run_chat_pipeline(
         # here does an empty answer become something to show the user, because
         # a caller like the code editor has to be able to tell "the model said
         # nothing" apart from "the model wrote this sentence".
-        if isinstance(response, dict) and not (response.get("response") or "").strip():
-            response["response"] = "I couldn't process that request."
+        #
+        # EXCEPT when the model chose to say nothing on purpose, because the
+        # user asked for no reply. Filling that in would put words in its mouth
+        # — the exact opposite of the request — so the deliberate-silence
+        # marker is honoured and stripped instead.
+        #
+        # The choice is the MODEL's, from the user's own wording, and never a
+        # keyword match here. "reply to Sam" contains "reply"; "no, do that
+        # again" contains "no"; "silently delete it" is about the command, not
+        # the answer. Deciding those needs an understanding of the sentence,
+        # which is what the model is for; a matcher would be wrong both ways.
+        if isinstance(response, dict):
+            if _is_deliberately_silent(response.get("response")):
+                response["response"] = ""
+                response["silent"] = True
+            elif not (response.get("response") or "").strip():
+                response["response"] = "I couldn't process that request."
         # Surface provider/connection failures as the ERROR character state
         text = response.get("response", "") if isinstance(response, dict) else ""
         if record:

@@ -487,11 +487,15 @@ async def chat_with_tools(
                              for tr in pending[:3])
             return {
                 "response": (f"This needs your approval before it can run: "
-                             f"{said}. Approve it in the dashboard and it will "
-                             f"run straight away."),
+                             f"{said}. Approve it in the dashboard and I will "
+                             f"pick up where I left off."),
                 "tokens": 0,
                 "tool_rounds": rounds,
                 "tool_results": tool_results,
+                # Read by the pipeline so the turn is recorded as waiting on a
+                # decision rather than as a completed exchange — and so a
+                # resume knows this turn was interrupted rather than finished.
+                "awaiting_approval": True,
             }
 
         # If all tools failed, try a forced plain-text answer before giving up

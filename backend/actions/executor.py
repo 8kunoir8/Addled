@@ -101,14 +101,26 @@ class ActionExecutor:
         ]
 
     async def approve(self, approval_id: str) -> ActionResult:
-        """Approve and run a pending destructive action.
+        """Approve and run a pending destructive action, then RESUME the task.
 
-        Nothing is waiting on this decision any more — the turn that asked ended
-        when it asked — so the action runs here. Its outcome is pushed into the
-        conversation afterwards, because approving used to be silent: the
-        command ran, and the chat showed nothing at all, which reads as though
-        the approval did nothing.
+        The turn that asked ended when it asked — that part is deliberate, and
+        the docstring on `execute_for_chat` explains why (waiting in-band lost a
+        race with the dashboard's socket timeout, so the user saw "Request
+        timed out" instead of a permission prompt).
+
+        What was missing is the other half. Approving ran the command and pushed
+        a receipt, but the model was never handed the result, so a multi-step
+        task stopped dead at the gated step: "delete this file, then list the
+        folder" deleted the file and never listed anything. The user saw a
+        standalone "✅ Approved and ran X" and no continuation.
+
+        So the continuation is the point, not a nicety. It is not a new request
+        about the approval — it is the tool result the model was already waiting
+        for, delivered late. The turn picks up where it stopped.
         """
+        # The origin has to be read BEFORE `_forget_origin` clears it, because
+        # it is what identifies the conversation to continue.
+        origin = self._origin_of(approval_id)
         request = self._pending_approvals.pop(approval_id, None)
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
@@ -124,7 +136,8 @@ class ActionExecutor:
             result = await self.execute(request)
         finally:
             self._gate = gate
-        self._report_to_chat(approval_id, request, result)
+        self._resume_after_decision(approval_id, origin, request, result,
+                                    approved=True)
         return result
 
     @staticmethod
@@ -166,13 +179,104 @@ class ActionExecutor:
                       approval_id, e)
 
     def deny(self, approval_id: str) -> ActionResult:
-        """Deny a pending destructive action."""
+        """Deny a pending destructive action.
+
+        Also resumes, for the same reason an approval does: the agent stopped
+        mid-task to ask, and going silent after a refusal leaves it with no idea
+        what happened. Told plainly that it was refused, it can carry on without
+        that step or say why it cannot.
+        """
+        origin = self._origin_of(approval_id)
         request = self._pending_approvals.pop(approval_id, None)
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
         self._forget_origin(approval_id)
-        return ActionResult(True, request.action_type, summary="Action denied by user",
-                            data={"approval_id": approval_id})
+        outcome = ActionResult(True, request.action_type,
+                               summary="Action denied by user",
+                               data={"approval_id": approval_id})
+        self._resume_after_decision(approval_id, origin, request, outcome,
+                                    approved=False)
+        return outcome
+
+    @staticmethod
+    def _origin_of(approval_id: str) -> dict:
+        """Which conversation raised this approval, before it is forgotten."""
+        try:
+            from backend.approvals import pending
+            return pending.get(approval_id) or {}
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read the origin of %s: %s", approval_id, e)
+            return {}
+
+    @staticmethod
+    def _resume_after_decision(approval_id: str, origin: dict,
+                               request: ActionRequest,
+                               result: ActionResult | None,
+                               *, approved: bool) -> None:
+        """Continue the task the interrupted turn was working on.
+
+        Fire and forget, on the server's loop: the approval RPC must answer
+        immediately, and a resumed turn can take minutes.
+
+        Falls back to the old receipt when there is no conversation to continue.
+        A gated action raised by a bare dashboard button belongs to nobody's
+        task, so there is nothing to resume — and reporting it is better than
+        the silence this whole change is about.
+        """
+        conversation = str(origin.get("conversation") or "").strip()
+        source = str(origin.get("source") or "").strip()
+        if not conversation:
+            ActionExecutor._report_to_chat(approval_id, request,
+                                           result or ActionResult(False))
+            return
+        try:
+            from backend.ws_server import resume_after_decision
+            resume_after_decision(source, conversation,
+                                  ActionExecutor._continuation(request, result,
+                                                               approved))
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not resume after %s: %s", approval_id, e)
+            try:
+                ActionExecutor._report_to_chat(approval_id, request,
+                                               result or ActionResult(False))
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _continuation(request: ActionRequest, result: ActionResult | None,
+                      approved: bool) -> str:
+        """What the model is told so it can carry on.
+
+        Phrased as a tool result, not as a new instruction: the turn stopped
+        only because this answer was not known yet, so handing it over is what
+        lets the model continue rather than start something.
+
+        Forbids repeating the identical call on purpose. The model asked for
+        this action, and telling it "approved" without saying "do not ask again"
+        invites it to re-issue the same call, which would raise a second
+        approval for something the user just allowed.
+        """
+        what = request.action_type
+        command = str((request.params or {}).get("command") or "").strip()
+        label = f"`{command}`" if command else what
+
+        if approved and result is not None and result.success:
+            detail = str(result.summary or "").strip()
+            body = (f"The {label} you asked for was APPROVED and ran "
+                    f"successfully.")
+            if detail:
+                body += f"\n\nResult:\n{detail[:4000]}"
+        elif approved:
+            body = (f"The {label} you asked for was APPROVED, but it failed: "
+                    f"{(result.error if result else 'no reason given')}")
+        else:
+            body = (f"The {label} you asked for was DENIED by the user. Do not "
+                    "attempt it again. Continue the rest of the task without "
+                    "it, or say what you cannot do because of the refusal.")
+
+        return (body + "\n\nContinue the task this was part of, from where it "
+                       "stopped. Do not repeat this same call — it has been "
+                       "answered.")
 
     def _resolve_waiter(self, approval_id: str, verdict) -> bool:
         """Retired: no chat turn waits on an approval any more.

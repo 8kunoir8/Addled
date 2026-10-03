@@ -83,6 +83,7 @@ SUITES = [
     "check_local_llm_flags.py",
     "check_gaming_pause.py",
     "check_approval_sync.py",
+    "check_agent_resumes.py",
     "check_reply_language.py",
     "check_packaging.py",
     "check_rtk.py",
