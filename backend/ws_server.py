@@ -152,6 +152,38 @@ class WSServer:
             log.debug("could not schedule the %s broadcast: %s", method, e)
             coro.close()
 
+    def run_soon(self, coro) -> None:
+        """Run a coroutine on this server's loop, from any thread.
+
+        The engine runs on its own thread with its own event loop (`engine.py`
+        creates one), so it cannot `await` anything owned by this one — doing so
+        drives the subprocess handle from the wrong loop and hangs. Broadcasts
+        solved this already (`broadcast_nowait`); this is the same hop for work
+        that is not a broadcast, so a caller does not have to reach into
+        `_loop` and re-derive the running-loop check.
+
+        Fire and forget: the caller is a ticking loop that will try again, so a
+        dropped job is not a lost state, only a delayed one. The reference is
+        kept so the task is not collected before it runs — the same reason
+        `broadcast_nowait` holds one.
+        """
+        if self._loop is None or self._loop.is_closed():
+            coro.close()
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self._loop:
+            self._background.add(task := self._loop.create_task(coro))
+            task.add_done_callback(self._background.discard)
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not schedule background work: %s", e)
+            coro.close()
+
     async def call(self, method: str, params: dict | None = None) -> dict:
         """Invoke a handler directly, from inside this process.
 
@@ -1015,6 +1047,38 @@ def _record_scope(record):
     return flag, flag, flag
 
 
+def _delegation_ack(tool_results: list) -> dict | None:
+    """The swarm delegation this turn started, if any.
+
+    Returns `{"agent": ..., "message": ...}` from the `swarm_delegate` result
+    payload, or None. The skill returns `success=True, status="started"` plus a
+    ready-made sentence for the user; `chat_send` appends that sentence when the
+    model's own reply failed to mention it.
+
+    Why it has to be enforced rather than asked for: the model is told in the
+    tool description to say the answer is coming, and observed live it called
+    the tool correctly (`toolRounds: 2`, `toolResults: 1`) and then replied with
+    an unrelated greeting. The user was told nothing was happening while an
+    agent was in fact working. A sentence the skill already wrote cannot be
+    ignored if the code adds it.
+
+    Only a *started* delegation counts: a refusal (`success=False`, an unknown
+    agent name) is something the model should explain itself, and appending
+    "..." for it would be nonsense.
+    """
+    for r in tool_results or []:
+        if r.get("tool") != "swarm_delegate":
+            continue
+        data = r.get("result") or {}
+        if not isinstance(data, dict) or not data.get("success"):
+            continue
+        if str(data.get("status") or "") != "started":
+            continue
+        return {"agent": str(data.get("agent") or ""),
+                "message": str(data.get("message") or "")}
+    return None
+
+
 async def _run_chat_pipeline_inner(
     message: str,
     params: dict | None = None,
@@ -1076,19 +1140,21 @@ async def _run_chat_pipeline_inner(
             if not sys_prompt.strip():
                 sys_prompt = (f"You are {agent_name}, a helpful AI desktop "
                               "companion with access to system tools.")
-            capabilities_ctx = (
-                "You are deeply integrated into the Addled desktop app with real tools and background services:\n"
-                "- Shell: Run Windows PowerShell 5.1 commands on the user's own PC (`run_command`) — read and write files, inspect processes, run git/pip/npm/build commands. You DO have access to the user's system through this tool; never tell the user you cannot run commands or lack system access. Chain with ';' (not '&&'). Safe commands run immediately; a destructive one (delete, format, shutdown, restart) asks the user to approve it first, so say that it is waiting for approval rather than that you are unable to do it.\n"
-                "- Calendar: Add events (`calendar_add`), list/check events (`calendar_list`), delete events (`calendar_delete`).\n"
-                "- Task Scheduler: Background daemon runs 24/7. Schedule tasks/reminders (`task_schedule`), list scheduled tasks (`task_list`), cancel tasks (`task_cancel`).\n"
-                "- Desktop & Screen: Inspect screen (`screen_read`), click/type (`desktop_click`, `desktop_type`), scroll, manage windows, control volume/brightness.\n"
-                "- Browser: Navigate web pages, click, type, extract content (`browser_open`, `browser_click`, `browser_extract`).\n"
-                "- Files & Workspace: Read, write, and search workspace files (`read_file`, `write_file`, `search_files`).\n"
-                "- Memory: Remember facts (`remember`), recall past notes (`recall`).\n"
-                "When asked about abilities or asked to check/manage calendar, schedule, tasks, reminders, desktop, files, or to run a command, acknowledge these capabilities and call the appropriate tool.\n"
-                "- Permission: a tool that guards something destructive will not run the first time. The result comes back marked `requires_approval` with a message. When that happens, say plainly what you want to do and ask the user to allow it — name the tool and what it will touch, in one or two sentences, and stop there. Do not claim you are unable to do it and do not silently try another route. How they answer depends on where they are: in this app they click Allow on the card above the composer or on a button in your message, and on a bot (Telegram, Discord, WhatsApp) they get a button or reply \"yes\". Ask, then wait. If the request is not answered in time it stays queued, so do not repeat it forever — say it is still waiting once and let them come back to it.\n"
-            )
-            sys_prompt = sys_prompt + "\n\n" + capabilities_ctx
+        # What this turn can actually do, appended on BOTH paths. It used to sit
+        # inside the `else`, so assigning `sys_prompt = persona` above threw it
+        # away — and every persona caller (swarm agents, the code planner,
+        # search) then held a tool schema with no prose that the tools exist,
+        # answered "those tools aren't accessible here", and refused work it
+        # could have done. A persona changes who is answering, not what it can
+        # find out; the block is generated from `tools`, so a narrowed set is
+        # described accurately rather than promised in full.
+        try:
+            from backend.tool_brief import capabilities_block
+            caps = capabilities_block(tools)
+            if caps:
+                sys_prompt = sys_prompt + "\n\n" + caps
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not build the capabilities block: %s", e)
         # Context window sizing: local models get a lean 6-message (3-turn) window
         # so remaining tokens belong to memory and tools; cloud gets 20 turns.
         provider_id = getattr(provider, "provider_id", "") or ""
@@ -1602,6 +1668,20 @@ async def _run_chat_pipeline_inner(
                                    if record else None),
                 "toolRounds": tool_rounds,
                 "toolResults": len(tool_results),
+                # The names, not just the count. A caller has to be able to ask
+                # "did this turn delegate?" to act on it — `chat_send` uses it
+                # to guarantee the delegation acknowledgement reaches the user
+                # even when the model drops it. Sending only a number meant the
+                # answer was available and thrown away.
+                "toolsUsed": [str(r.get("tool") or "")
+                              for r in tool_results if r.get("tool")],
+                # The acknowledgement `swarm_delegate` returned, if this turn
+                # started a delegation. The skill already knows the right words
+                # ("<Name> is working on that now...") and hands them back as
+                # `message`; the model is asked to relay it and live testing
+                # showed it often does not. Carried out here so `chat_send` can
+                # append it rather than trusting the model to.
+                "delegation": _delegation_ack(tool_results),
                 "memoryRecall": bool(memory_ctx),
                 "role": role,
                 "model": route_model or "",
@@ -2059,6 +2139,24 @@ def _register_default_handlers():
             return {"response": "I didn't catch that.", "tokens": 0, "conversationId": None}
         result = await run_chat_pipeline(message, params)
         reply = result.get("response", "") if isinstance(result, dict) else ""
+        # Guarantee the delegation acknowledgement, rather than trusting the
+        # model to relay it. `swarm_delegate` starts the agent and returns a
+        # sentence saying so; the model is asked to pass it on and live testing
+        # showed it often does not — it called the tool, got the ack, and
+        # answered with an unrelated greeting while an agent was actually
+        # working. The user has to be told, so when the reply does not name the
+        # agent, the skill's own words are appended here.
+        #
+        # Done BEFORE `_announce_turn` so the bots, voice and character all get
+        # the corrected reply too, instead of only the surface that asked.
+        if isinstance(result, dict):
+            ack = result.get("delegation") or {}
+            agent = str(ack.get("agent") or "")
+            note = str(ack.get("message") or "")
+            if agent and note and agent.lower() not in reply.lower():
+                reply = (reply.rstrip() + "\n\n" + note).strip()
+                result["response"] = reply
+                log.debug("appended the delegation acknowledgement for %s", agent)
         # Show the turn in every other surface that is watching the
         # conversation. A message typed on Telegram reached Addled and got an
         # answer the chat page never saw, because this function used to return
@@ -3503,6 +3601,19 @@ def _register_default_handlers():
             elif entry:
                 context_files.append(str(entry))
 
+        # Swarm agents the user named in the composer (an `@` mention). These
+        # are not files and not a scope change: naming an agent says WHO the
+        # user wants in the loop, so it belongs in the request as a fact rather
+        # than being inferred from wording. Stating it plainly is what makes the
+        # routing deterministic — the planner is otherwise left to guess whether
+        # "Scout" was an agent, a file, or a word in the sentence.
+        context_agents: list[str] = []
+        for entry in (params.get("contextAgents") or []):
+            name = str(entry.get("name") if isinstance(entry, dict) else entry
+                       or "").strip()
+            if name and name not in context_agents:
+                context_agents.append(name)
+
         if not wp:
             return {"status": "error", "message": "Bind a workspace first.",
                     "plan": None}
@@ -3527,6 +3638,16 @@ def _register_default_handlers():
             hint += ("\n\nThe user named these files — start from them, and still "
                      "check whether anything else must change:\n"
                      + "\n".join(f"- {f}" for f in context_files))
+        if context_agents:
+            # Stated as a fact the user supplied, not as an instruction to obey
+            # blindly — and paired with the tool to reach them, because naming
+            # an agent is only useful if something acts on the name.
+            hint += ("\n\nThe user named these swarm agents for this task: "
+                     + ", ".join(context_agents)
+                     + ". Use `swarm_delegate` with the agent's name when the "
+                       "work suits that desk — a review, research, a second "
+                       "opinion — and carry on with the rest yourself. Naming "
+                       "an agent does not by itself start one.")
 
         # Attachments: a pasted screenshot of an error, a dropped PDF spec, a
         # stack trace in a text file. Routed through the same helper the chat
@@ -5111,6 +5232,14 @@ def _register_default_handlers():
 
     async def localllm_start(params: dict, ws) -> dict:
         from backend.local_llm.manager import local_llm
+        # An explicit Start outranks an automatic pause. Without this, pressing
+        # Start while a game is detected would appear to do nothing — the pause
+        # is still set, so the manager refuses to load — and the button would
+        # look broken with no explanation. The user asking is the authority.
+        if local_llm.is_paused():
+            log.info("Local model Start pressed while paused (%s) — clearing the pause",
+                     local_llm.pause_reason())
+            await local_llm.resume_from_pause()
         ok, problem = await local_llm.start()
         return {"success": ok, "error": problem, "status": local_llm.status()}
 

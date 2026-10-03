@@ -17,9 +17,17 @@
 # Usage:
 #   .\scripts\deploy_to_install.ps1              # deploy backend + dashboard
 #   .\scripts\deploy_to_install.ps1 -BackendOnly
+#   .\scripts\deploy_to_install.ps1 -BackendOnly -WithDashboard
 #   .\scripts\deploy_to_install.ps1 -DryRun      # list what would move
 #   .\scripts\deploy_to_install.ps1 -ListExclusions   # print the exclude set
 #   .\scripts\deploy_to_install.ps1 -WithSkills  # also copy installed market skills
+#
+# `-WithDashboard` exists because `-BackendOnly` skipped the pages too. A change
+# that spanned the backend AND the dashboard was therefore half-deployable: the
+# backend part went live and the UI part did not, with no way to ship just those
+# two. It is a separate switch rather than part of `-BackendOnly` because bot
+# scripts are a different concern and wanting the pages does not imply wanting
+# them; the full deploy (neither flag) still does everything.
 #
 # `-WithSkills` exists because market skills are user data (gitignored), so the
 # backend sync leaves them behind by design. Installing a skill for the dev tree
@@ -50,11 +58,48 @@ param(
     # skill for the dev tree otherwise leaves the running app without it, and
     # the fix must be something the caller asks for.
     [switch]$WithSkills,
-    [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\Addled"
+    # Copy the built dashboard as well. Without this, `-BackendOnly` left the
+    # running app on the OLD pages: a backend change was live while a UI change
+    # built into the same session was not, so a fix that spanned both looked
+    # half-applied and there was no way to deploy just the two. The bots step
+    # stays behind `-BackendOnly` because bot scripts are a separate concern and
+    # syncing them is not implied by wanting the pages.
+    [switch]$WithDashboard,
+    # Where the installed app lives. Empty means "find it" — see below.
+    #
+    # This used to default to `%LOCALAPPDATA%\Programs\Addled`, which was right
+    # while the installer was per-user. It now installs to `C:\Program Files\`
+    # for a machine-wide install, so the hardcoded default silently pointed at a
+    # folder that no longer existed and the deploy failed with
+    # "No installed app at ...". Detecting it is what stops the two drifting
+    # apart again — the installer's choice is the only authority on where the
+    # app is.
+    [string]$InstallRoot = ""
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+
+if (-not $InstallRoot) {
+    # Per-machine first: that is what the current installer produces. The
+    # per-user path is kept as a fallback because an app installed by an older
+    # version is still a valid target, and the upgrade path has to keep working.
+    $candidates = @(
+        (Join-Path $env:ProgramFiles 'Addled'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Addled'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Addled')
+    )
+    $found = $candidates |
+        Where-Object { $_ -and (Test-Path (Join-Path $_ 'resources\backend')) } |
+        Select-Object -First 1
+    if (-not $found) {
+        throw ("No installed app found. Looked in:`n  " +
+               (($candidates | Where-Object { $_ }) -join "`n  ") +
+               "`nPass -InstallRoot to point at one.")
+    }
+    $InstallRoot = $found
+}
+
 $resources = Join-Path $InstallRoot 'resources'
 
 # git is what keeps this list honest, so its absence is a failure, not a
@@ -101,6 +146,49 @@ if ($ListExclusions) {
 
 if (-not (Test-Path $resources)) {
     throw "No installed app at $InstallRoot (looked for $resources)."
+}
+
+# A machine-wide install lives under `C:\Program Files`, which a non-elevated
+# shell cannot write to. Without this check the failure surfaces several minutes
+# later, from somewhere in the middle of the copy, as a raw
+# `UnauthorizedAccessException` on `Copy-Item` — which reads like a bug in this
+# script rather than "you are not an administrator". Found the hard way, after
+# two deploys died at the very last step with the app still running old code.
+#
+# Probed by writing, not by testing the ACL: an inherited deny or a read-only
+# attribute both block the copy, and `IsInRole(Administrator)` only answers
+# whether the token *could* elevate, not whether this folder accepts the write.
+if ($DryRun) { return }
+$probe = Join-Path $InstallRoot '.deploy-write-probe'
+try {
+    New-Item -ItemType File -Path $probe -Force -ErrorAction Stop | Out-Null
+    Remove-Item $probe -Force -ErrorAction SilentlyContinue
+} catch {
+    $elevated = (New-Object Security.Principal.WindowsPrincipal(
+        [Security.Principal.WindowsIdentity]::GetCurrent())
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $why = if ($elevated) {
+        "This shell IS elevated, so the folder itself is refusing writes - " +
+        "check its ACL, or that the app is not running and holding the files."
+    } else {
+        "This shell is NOT elevated. Re-run it from an Administrator terminal."
+    }
+    # Echo back the flags that were actually passed. A fixed hint that dropped
+    # `-WithDashboard` would send the user to a command that does not deploy the
+    # thing they asked for, which is worse than no hint at all.
+    #
+    # Built with statements, not a trailing `if`: in Windows PowerShell 5.1 `if`
+    # is a statement and cannot be an operand, and `'x' + (if (...) {...})` is a
+    # parse error — the same trap that cost time earlier in this project.
+    $relay = @()
+    foreach ($flag in @('BackendOnly', 'WithDashboard', 'WithSkills')) {
+        if ($PSBoundParameters.ContainsKey($flag)) { $relay += "-$flag" }
+    }
+    $suggest = 'powershell -File scripts\deploy_to_install.ps1'
+    if ($relay.Count -gt 0) { $suggest = "$suggest " + ($relay -join ' ') }
+    throw ("Cannot write to $InstallRoot.`n  $why`n  " +
+           "Right-click PowerShell -> 'Run as administrator', then:`n" +
+           "    cd $repo; $suggest")
 }
 
 $settings = Join-Path $resources 'backend\memory\settings.json'
@@ -160,7 +248,7 @@ if (-not $BackendOnly) {
     }
 }
 
-if (-not $BackendOnly) {
+if (-not $BackendOnly -or $WithDashboard) {
     $out = Join-Path $repo 'dashboard\out'
     if (-not (Test-Path (Join-Path $out 'index.html'))) {
         throw "dashboard\out is not built. Run: cd dashboard; npm run build"

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -250,6 +251,74 @@ def remove(agent_id: str) -> bool:
 def definitions() -> list[dict]:
     return [normalise(a) for a in load().get("agents", [])]
 
+# Filler a model wraps a name in. A MODEL does not know the desk is called
+# "QA"; it writes "the QA agent", "QA Agent", or "our QA". Requiring an exact
+# match turned those into "No swarm agent called 'QA agent'" even though the
+# desk was right there in the list the same message printed — a refusal that
+# reads as the feature being broken.
+_NAME_FILLER = frozenset({"the", "a", "an", "agent", "agents", "swarm",
+                          "our", "my", "your"})
+
+def _relaxed(text: str) -> str:
+    """Strip the filler a name gets wrapped in.
+
+    Only filler is removed — the remaining words must still match exactly, so
+    this cannot silently pick the wrong agent. "the QA agent" and "QA" are the
+    same desk; "our coder" is not "the Coder" because "coder" survives on both
+    sides and would collide with nothing.
+
+    Lives here, not in the skill, because THREE callers need the same rule:
+    `swarm_delegate`, `swarm_learn` and `swarm_rename`. It was copy-pasted into
+    the first two, and two copies of a matching rule is how one of them ends up
+    accepting a name the other refuses.
+    """
+    words = [w for w in re.split(r"[^a-z0-9]+", str(text or "").lower())
+             if w and w not in _NAME_FILLER]
+    return " ".join(words)
+
+def find_ambiguous(handle: str) -> list[str]:
+    """Names a relaxed handle matched, when it matched more than one.
+
+    Returned so a caller can say WHICH agents collided. Ambiguity is a refusal,
+    never a guess: two desks whose names relax to the same thing must be
+    disambiguated by the caller, not resolved by list order.
+    """
+    key = _relaxed(handle)
+    if not key:
+        return []
+    return [str(e.get("name") or "?") for e in definitions()
+            if _relaxed(str(e.get("name", ""))) == key]
+
+def find(handle: str) -> dict | None:
+    """An agent by id, exact name, or a relaxed name. None if not unambiguous.
+
+    The one place "which agent did they mean" is decided. Three passes, most
+    certain first:
+
+    1. An id, verbatim — a caller holding one means exactly that agent.
+    2. The name, case-folded — the common case, and exact.
+    3. The relaxed name — a model's loose wording, accepted ONLY when it picks
+       out exactly one agent.
+
+    Returns None both for "no such agent" and for "ambiguous", because a caller
+    that cannot tell those apart must ask rather than act. `find_ambiguous`
+    distinguishes them for a message.
+    """
+    wanted = str(handle or "").strip()
+    if not wanted:
+        return None
+    for entry in definitions():
+        if str(entry.get("id")) == wanted:
+            return entry
+    lowered = wanted.lower()
+    for entry in definitions():
+        if str(entry.get("name", "")).lower() == lowered:
+            return entry
+    hits = [e for e in definitions()
+            if _relaxed(str(e.get("name", ""))) == _relaxed(wanted)]
+    # Ambiguity is a refusal, not a guess.
+    return hits[0] if len(hits) == 1 else None
+
 def type_catalogue() -> list[dict]:
     """The built-in types and their default skills, for the UI to offer."""
     return [{"type": name, **{k: v for k, v in spec.items()}}
@@ -349,6 +418,19 @@ def build_persona(agent, base_prompt: str = "") -> str:
     brief = str(getattr(agent, "brief", "") or "").strip()
     if brief:
         parts.append("Standing brief (always applies):\n" + brief[:MAX_BRIEF_CHARS])
+
+    # Name the tools this desk actually holds. Stated here rather than left to
+    # the capability block alone because a desk is defined by what it can do —
+    # a QA checker that is not told it has `verify_code` and `read_file` spends
+    # its turn explaining that it cannot check anything. `tools` is already
+    # narrowed to the desk's skills by `spawn`, so this cannot overstate.
+    #
+    # Narrowed sets only: None means "every enabled skill", and listing several
+    # hundred names here would crowd out the brief on a small local model.
+    held = getattr(agent, "tools", None)
+    if held:
+        parts.append("Tools this desk holds: "
+                     + ", ".join(f"`{n}`" for n in sorted(held)))
 
     rules = rules_for(str(getattr(agent, "id", "")))
     if rules:

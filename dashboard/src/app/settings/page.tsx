@@ -969,9 +969,11 @@ function ProvidersSection({ settings, update, saving, status }: any) {
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-[#e8eaed]">🧠 Local AI (llamafile)</p>
         <span className="text-[10px] text-[#8b949e]">
-          {llmStatus?.running
-            ? (llmStatus?.run_reason?`● running (${llmStatus.run_reason})`:'● running (on demand)')
-            : llmStatus?.installed?'○ stopped':'— not installed'}
+          {llmStatus?.paused
+            ? `⏸ paused while you ${llmStatus.paused}`
+            : llmStatus?.running
+              ? (llmStatus?.run_reason?`● running (${llmStatus.run_reason})`:'● running (on demand)')
+              : llmStatus?.installed?'○ stopped':'— not installed'}
         </span>
       </div>
       <p className="mt-1 text-[11px] text-[#8b949e]">
@@ -979,6 +981,14 @@ function ProvidersSection({ settings, update, saving, status }: any) {
         {llmStatus?.installed_mb?` · on disk ${(llmStatus.installed_mb/1024).toFixed(1)} GB`:''}
         {llmStatus?` · ${llmStatus.free_mb} MB free`:''}
       </p>
+      {/* A paused model is not a stopped one. Saying so here is what stops it
+          reading as broken when it declines to start while a game is running. */}
+      {llmStatus?.paused && (
+        <p className="mt-1 text-[10px] text-[#d29922]">
+          Freed while you {llmStatus.paused}. It comes back about 30 seconds
+          after the game closes, or press Start to bring it back now.
+        </p>
+      )}
       {llmStatus?.installed&&(
         <div className="mt-2 space-y-1">
           <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
@@ -1521,7 +1531,10 @@ function SafetySection({ settings, update, saving, status }: any) {
     <Toggle label="Prompt Guard" desc="Block injection attempts" skey="prompt_guard"/>
     <SettingRow label="Quiet Hours"><div className="flex items-center gap-2 text-sm text-[#e8eaed]"><input type="time" value={s.quiet_hours_start||'22:00'} onChange={e=>update('safety','quiet_hours_start',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed]"/><span className="text-[#8b949e]">to</span><input type="time" value={s.quiet_hours_end||'07:00'} onChange={e=>update('safety','quiet_hours_end',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed]"/></div></SettingRow>
     <Toggle label="Meeting Auto-Sleep" skey="meeting_auto_sleep"/>
-    <Toggle label="Gaming Auto-Sleep" skey="gaming_auto_sleep"/>
+    <Toggle label="Gaming Auto-Sleep" desc="Stay quiet while you play" skey="gaming_auto_sleep"/>
+    <Toggle label="Free the local model while gaming"
+      desc="Stops the local model during a game and brings it back afterwards, so its memory is available. Separate from Gaming Auto-Sleep: that one only quiets Addled."
+      skey="pause_local_model_on_gaming"/>
     <StandingPermissions send={send} connected={wsState==='connected'}/>
   </div>;
 }

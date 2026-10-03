@@ -1240,17 +1240,21 @@ class SkillRegistry:
                 return {"success": False,
                         "error": "Give the rule or correction text."}
             # Accept a name as well as an id — a user says "the reviewer", not
-            # "agent_7f3a21bc".
-            if not roster.get(agent_id):
-                lowered = agent_id.strip().lower()
-                match = next((e for e in roster.definitions()
-                              if str(e.get("name", "")).lower() == lowered), None)
-                if match:
-                    agent_id = match["id"]
-                else:
+            # "agent_7f3a21bc". `roster.find` owns that rule now, so this tool,
+            # `swarm_delegate` and `swarm_rename` cannot disagree about what a
+            # name means.
+            entry = roster.find(agent_id)
+            if not entry:
+                collided = roster.find_ambiguous(agent_id)
+                if len(collided) > 1:
                     return {"success": False,
-                            "error": (f"No agent '{agent_id}'. Use swarm_roster "
-                                      "to see the saved agents.")}
+                            "error": (f"'{agent_id}' could match more than one "
+                                      "agent: " + ", ".join(collided)
+                                      + ". Use the exact name or the id.")}
+                return {"success": False,
+                        "error": (f"No agent '{agent_id}'. Use swarm_roster "
+                                  "to see the saved agents.")}
+            agent_id = str(entry.get("id") or agent_id)
             kind = str(params.get("kind") or "standing").lower()
             if kind in ("oneoff", "one-off", "one_off", "task"):
                 return roster.add_one_off(agent_id, text)
@@ -1315,22 +1319,30 @@ class SkillRegistry:
                 return {"success": False,
                         "error": "Give the agent a task in 'task'."}
 
-            # Accept a name as well as an id — a user says "the Reviewer", not
-            # "agent_7f3a21bc". Same resolution `swarm_learn` uses, kept
-            # identical so the two cannot disagree about what a name means.
-            entry = roster.get(wanted)
+            # Which agent did they mean — the ONE place that is decided.
+            # `roster.find` takes an id, an exact name, or a loose name ("the
+            # QA agent"), and returns None when the loose form is ambiguous
+            # rather than guessing. This used to be a copy of the same logic
+            # that also sat in `swarm_learn`; two copies is how one of them
+            # ends up accepting a name the other refuses.
+            entry = roster.find(wanted)
             if not entry:
-                lowered = wanted.strip().lower()
-                entry = next((e for e in roster.definitions()
-                              if str(e.get("name", "")).lower() == lowered),
-                             None)
-            if not entry:
+                # Distinguish "no such agent" from "two agents matched", because
+                # the user's next move is different: create one, or say which.
+                collided = roster.find_ambiguous(wanted)
+                if len(collided) > 1:
+                    return {
+                        "success": False,
+                        "error": (f"'{wanted}' could match more than one agent: "
+                                  + ", ".join(collided)
+                                  + ". Use the exact name or the id."),
+                    }
                 names = [str(e.get("name") or "?") for e in roster.definitions()]
                 return {
                     "success": False,
                     "error": (f"No swarm agent called '{wanted}'. Saved "
                               "agents: " + (", ".join(names) if names
-                                            else "(none yet — the Swarm page "
+                                            else "(none yet - the Swarm page "
                                                   "creates them)")),
                 }
 
@@ -1432,7 +1444,11 @@ class SkillRegistry:
             "rather not hold the conversation open. You get an acknowledgement "
             "straight away and the agent's answer arrives later as a message, "
             "so tell the user that is what will happen. Not available to a "
-            "swarm agent itself.",
+            "swarm agent itself. When the user NAMES an agent — 'ask Scout', "
+            "'have the Reviewer look at this' — pass that name as `agent`; a "
+            "name refers to a saved desk, and the match tolerates loose wording "
+            "like 'the Scout agent'. If you are not sure the desk exists, call "
+            "swarm_roster first rather than guessing a name.",
             {"type": "object", "properties": {
                 "agent": {"type": "string",
                           "description": "The agent's name or id. Use "
@@ -1447,6 +1463,203 @@ class SkillRegistry:
                                            "constraints."},
             }, "required": ["agent", "task"]},
             swarm_delegate, "system",
+        ))
+
+        async def swarm_create(params: dict) -> dict:
+            """Create a named swarm agent the user can then call by name.
+
+            This is the gap that made "make me an agent called Scout" a refusal
+            with a trip to another page: naming existed, but only the Swarm page
+            could write a definition, and no skill reached it. A user talks to
+            the chat, so the chat has to be able to name a desk.
+
+            Goes through `roster.upsert` + `spawn_from_roster`, the same pair
+            `swarm.define` uses on the WebSocket. Written that way on purpose:
+            two creation paths would drift, and whichever ran second would
+            overwrite the other's fields.
+
+            Refuses a name that already belongs to an agent. Two desks with one
+            name make every later lookup ambiguous, and `roster.find` answers
+            ambiguity by refusing — so a duplicate name would be created here
+            and then be unusable everywhere else.
+            """
+            from backend.swarm import roster
+            from backend.swarm.orchestrator import swarm
+
+            name = str(params.get("name") or params.get("agent") or "").strip()
+            if not name:
+                return {"success": False,
+                        "error": "Give the agent a name in 'name'."}
+
+            existing = roster.find(name)
+            if existing and not params.get("replace"):
+                return {
+                    "success": False,
+                    "error": (f"An agent called '{existing.get('name')}' already "
+                              f"exists (id {existing.get('id')}). Use its name to "
+                              "delegate to it, swarm_rename to rename it, or pass "
+                              "a different name."),
+                }
+
+            # An explicit id means UPDATE that agent; no id means create one.
+            # Passing a NAME here would make `normalise` invent an id and
+            # `upsert` would then store a second entry, which is exactly the
+            # duplication this guards against.
+            agent_id = str(params.get("id") or "").strip()
+            if not agent_id and existing and params.get("replace"):
+                agent_id = str(existing.get("id") or "")
+
+            entry = {
+                "id": agent_id,
+                "name": name,
+                "type": str(params.get("type") or "general"),
+                "role": str(params.get("role") or ""),
+                "does": str(params.get("does") or ""),
+                "prompt": str(params.get("prompt") or ""),
+                # `brief` is what the user means by "who it is" — a few standing
+                # sentences read before every task. Accept it under either name.
+                "brief": str(params.get("brief") or params.get("instructions")
+                             or ""),
+                "tools": params.get("tools"),
+                "skills": params.get("skills"),
+                "model": str(params.get("model") or ""),
+                "provider": str(params.get("provider") or ""),
+            }
+            saved = roster.upsert(entry)
+            # Respawn so the new desk is usable in this session without a
+            # restart, and so an edited brief takes effect immediately.
+            swarm.stop(saved["id"])
+            agent = swarm.spawn_from_roster(saved["id"])
+            if agent is None:
+                return {"success": False,
+                        "error": (f"Saved '{name}' but could not start it. It "
+                                  "will be there after a restart.")}
+            return {
+                "success": True,
+                "agentId": saved["id"],
+                "name": saved["name"],
+                "type": saved["type"],
+                "message": (f"Created the swarm agent '{saved['name']}'. Ask it "
+                            "for something by name whenever you like."),
+            }
+        self.register(SkillDefinition(
+            "swarm_create",
+            "Create a named swarm agent, or update the one with this name. Use "
+            "it when the user asks for a new specialist — 'make me an agent "
+            "called Scout who reviews my writing' — or wants to change what an "
+            "existing desk does. Say the name back to the user once it exists, "
+            "because the point of naming it is that they can ask for it by "
+            "name afterwards. Refuses a name that is already taken.",
+            {"type": "object", "properties": {
+                "name": {"type": "string",
+                         "description": "What the agent is called. This is how "
+                                        "the user will ask for it later."},
+                "type": {"type": "string",
+                         "description": "One of the built-in types (general, "
+                                        "coder, reviewer, analyst, researcher, "
+                                        "writer, planner, devops, qa) or omit "
+                                        "for general."},
+                "brief": {"type": "string",
+                          "description": "Standing instructions in a few "
+                                         "sentences: tone, red lines, what "
+                                         "good looks like."},
+                "role": {"type": "string",
+                         "description": "One-line role, if the type default is "
+                                        "not right."},
+                "skills": {"type": "array", "items": {"type": "string"},
+                           "description": "Optional tool skills to narrow it to. "
+                                          "Omit for all enabled skills."},
+                "model": {"type": "string",
+                          "description": "Optional model to pin this desk to."},
+            }, "required": ["name"]},
+            swarm_create, "system",
+        ))
+
+        async def swarm_rename(params: dict) -> dict:
+            """Give an agent a different name, keeping everything else.
+
+            Kept separate from `swarm_create` because "rename Scout to Lookout"
+            is a different intent from "make Scout", and a single tool that
+            guessed between them would sometimes create a second desk when the
+            user meant to move one.
+
+            The id is deliberately unchanged, which is what makes the learned
+            rules survive: `roster.rules_for` reads
+            `feedback/<agent_id>.md`, so editing the name on the same id carries
+            every correction the agent has earned straight across. A rename that
+            minted a new id would look identical to the user and silently throw
+            away everything the desk had learned.
+            """
+            from backend.swarm import roster
+            from backend.swarm.orchestrator import swarm
+
+            handle = str(params.get("agent") or params.get("agentId")
+                         or params.get("from") or "").strip()
+            new_name = str(params.get("name") or params.get("to") or "").strip()
+            if not handle:
+                return {"success": False,
+                        "error": "Name the agent to rename in 'agent'."}
+            if not new_name:
+                return {"success": False,
+                        "error": "Give the new name in 'name'."}
+
+            entry = roster.find(handle)
+            if not entry:
+                collided = roster.find_ambiguous(handle)
+                if len(collided) > 1:
+                    return {"success": False,
+                            "error": (f"'{handle}' could match more than one "
+                                      "agent: " + ", ".join(collided)
+                                      + ". Use the exact name or the id.")}
+                names = [str(e.get("name") or "?") for e in roster.definitions()]
+                return {"success": False,
+                        "error": (f"No swarm agent called '{handle}'. Saved "
+                                  "agents: " + (", ".join(names) if names
+                                                else "(none yet)") )}
+
+            taken = roster.find(new_name)
+            agent_id = str(entry.get("id") or "")
+            if taken and str(taken.get("id")) != agent_id:
+                return {"success": False,
+                        "error": (f"'{taken.get('name')}' is already an agent. "
+                                  "Pick a name that is not in use.")}
+
+            moved = dict(entry)
+            moved["name"] = new_name
+            saved = roster.upsert(moved)
+
+            rules = roster.rules_for(agent_id)
+            # Respawn so the running session answers to the new name at once.
+            swarm.stop(agent_id)
+            agent = swarm.spawn_from_roster(agent_id)
+            return {
+                "success": True,
+                "agentId": saved["id"],
+                "name": saved["name"],
+                "previousName": entry.get("name"),
+                "rulesKept": len(rules),
+                "message": (f"Renamed '{entry.get('name')}' to "
+                            f"'{saved['name']}'"
+                            + (f", keeping its {len(rules)} learned rule(s)"
+                               if rules else "")
+                            + "."),
+                "warning": None if agent is not None else
+                           "Saved, but the running session will pick it up "
+                           "after a restart.",
+            }
+        self.register(SkillDefinition(
+            "swarm_rename",
+            "Rename a swarm agent, keeping its brief, learned rules and "
+            "notebook. Use it when the user wants a desk called something else "
+            "— 'rename Scout to Lookout'. This does not create a new agent and "
+            "does not lose what the existing one has learned.",
+            {"type": "object", "properties": {
+                "agent": {"type": "string",
+                          "description": "The agent's current name or id."},
+                "name": {"type": "string",
+                         "description": "The new name."},
+            }, "required": ["agent", "name"]},
+            swarm_rename, "system",
         ))
 
     # ── System ───────────────────────────────────────────────────────────

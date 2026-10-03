@@ -163,6 +163,18 @@ PHRASINGS: dict[str, list[str]] = {
         "get another agent to do this",
         "hand this off to one of your agents",
     ],
+    # Creating and renaming a desk. The wording is the user's, not the tool's:
+    # nobody says "create a swarm agent definition", they say "make me an agent
+    # called Scout" — the same standard the check applies everywhere else.
+    "swarm_create": [
+        "create an agent called Scout",
+        "make me a new agent for reviewing copy",
+        "add a swarm agent that writes emails",
+    ],
+    "swarm_rename": [
+        "rename the Scout agent to Lookout",
+        "call that agent something else",
+    ],
     "task_schedule": ["remind me to call mum at 5pm", "schedule a task for tomorrow"],
     "task_list": ["what reminders do I have", "list my scheduled tasks"],
     "task_cancel": ["cancel that reminder"],

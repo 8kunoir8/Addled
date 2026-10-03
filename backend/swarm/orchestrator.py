@@ -9,6 +9,8 @@ import logging
 import time
 import uuid
 
+from backend import tool_brief
+
 log = logging.getLogger("addled.swarm")
 
 # How much of the flow's shared transcript rides along with each step. Bounded
@@ -186,6 +188,23 @@ class SwarmAgent:
                 provider=provider,
             )
             text = (result or {}).get("response", "") or ""
+            # An agent that answers "I have no tools" while holding tools is
+            # wrong, and it used to be believed: the reply went to the chat as
+            # the agent's considered answer. Two causes, both now fixed — the
+            # persona replaced the system prompt so the capability text was
+            # dropped (see `tool_brief.capabilities_block`), and small models
+            # refuse anyway. The block is the cure; this is the backstop, so a
+            # refusal is corrected rather than relayed as a finding.
+            #
+            # Logged either way. If this fires the prompt fix did not land, and
+            # that is worth seeing rather than quietly papering over.
+            if text and tool_brief.claims_no_tools(text):
+                offered = tool_brief.tool_names(self.tools)
+                log.warning("agent %s claimed it had no tools; offered %d (%s)",
+                            self.name, len(offered), ", ".join(offered[:8]))
+                fix = tool_brief.correction(self.tools)
+                if fix:
+                    text = text.rstrip() + fix
             if text and not text.startswith(("[Provider:", "[Not connected:")):
                 self.results.append({
                     "task": task,

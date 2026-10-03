@@ -103,14 +103,37 @@ class PresenceGuard:
             return False
 
     def _detect_gaming(self) -> bool:
-        """Check for fullscreen gaming."""
+        """Check for a game covering the screen, windowed-borderless included.
+
+        Two shapes have to be recognised, and measurement on this machine is
+        what set the thresholds:
+
+        * **Exclusive fullscreen** — the window is the SCREEN (2560x1440 here).
+          The original test caught this.
+        * **Borderless-windowed** — the app draws itself over the desktop with
+          no frame. Commonly the same size as the screen (also caught), but
+          some titles size to the WORK AREA instead (2560x1392 here), because
+          they do not cover the taskbar. Those were MISSED: the old test asked
+          whether the window covered the whole screen, and 1392 < 1440.
+
+        The work-area case cannot be settled by size alone, because a MAXIMISED
+        ordinary window is also exactly the work area. What separates them is
+        the window STYLE: a borderless game is a popup with no caption and no
+        resize frame, while a maximised app keeps its caption and thick frame.
+        Measured on this machine: VS Code maximised reports caption=True,
+        thickframe=True; a borderless game reports popup=True and neither.
+
+        So the rule is: big enough to cover the work area, AND frameless. The
+        frameless half is what stops every maximised window from being called a
+        game, and the work-area half is what stops a borderless game from being
+        missed.
+        """
         try:
             import ctypes
             user32 = ctypes.windll.user32
             hwnd = user32.GetForegroundWindow()
-
-            # Check if fullscreen
-            from ctypes import wintypes
+            if not hwnd:
+                return False
 
             class RECT(ctypes.Structure):
                 _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
@@ -124,9 +147,52 @@ class PresenceGuard:
             screen_w = user32.GetSystemMetrics(0)
             screen_h = user32.GetSystemMetrics(1)
 
-            if width >= screen_w and height >= screen_h:
-                return True
-            return False
+            # The usable area, which excludes the taskbar. A borderless window
+            # that does not cover the taskbar is this size, and it is still a
+            # game taking the screen.
+            work = RECT()
+            SPI_GETWORKAREA = 0x0030
+            got_work = bool(user32.SystemParametersInfoW(
+                SPI_GETWORKAREA, 0, ctypes.byref(work), 0))
+            work_w = (work.right - work.left) if got_work else screen_w
+            work_h = (work.bottom - work.top) if got_work else screen_h
+
+            # A pixel or two of slack: a borderless window can be positioned at
+            # -1 or sized 1px short by its own window procedure, and being one
+            # pixel under must not mean "not a game".
+            SLACK = 2
+            covers = (width >= work_w - SLACK and height >= work_h - SLACK)
+            if not covers:
+                return False
+
+            # Frameless is the half that excludes ordinary maximised windows.
+            #
+            # Read the styles in one place rather than stacking conditions: an
+            # earlier draft of this function tried to be clever with several
+            # overlapping checks and ended up with two branches that could never
+            # be reached. One decision, expressed once, is the only version that
+            # can be reasoned about.
+            GWL_STYLE = -16
+            WS_POPUP = 0x80000000
+            WS_CAPTION = 0x00C00000
+            WS_THICKFRAME = 0x00040000
+            style = user32.GetWindowLongW(hwnd, GWL_STYLE) & 0xFFFFFFFF
+            has_caption = bool(style & WS_CAPTION)
+            has_frame = bool(style & WS_THICKFRAME)
+            is_popup = bool(style & WS_POPUP)
+
+            # A normal window keeps its caption and its resize frame even when
+            # maximised — that is what a maximised editor is. A borderless game
+            # has neither: the app draws its own frame or none at all.
+            looks_like_a_window = has_caption or has_frame
+            if looks_like_a_window and not is_popup:
+                return False
+
+            # A popup with a caption is a dialog or a splash, not a game.
+            if has_caption and not has_frame:
+                return False
+
+            return True
         except Exception:
             return False
 

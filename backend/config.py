@@ -551,6 +551,12 @@ DEFAULT_SETTINGS: dict = {
         "quiet_hours_end": "07:00",
         "meeting_auto_sleep": True,
         "gaming_auto_sleep": True,
+        # Free the local model's RAM while the user is gaming. Separate from
+        # `gaming_auto_sleep` on purpose: that one only stops the agent
+        # chattering, and a user may reasonably want the quiet without giving up
+        # the model, or the RAM without silencing Addled. Tying them together
+        # would make one look like it had broken the other.
+        "pause_local_model_on_gaming": True,
         "away_timeout_minutes": 5,
         # Names the user has granted standing permission to, so a skill or tool
         # that normally asks does not ask again. Answered once from the approval

@@ -319,6 +319,14 @@ export default function CodePage() {
   const [pullFrom, setPullFrom] = useState<{ from: number; to: number } | null>(null);
   // Which file the @ menu is filtering, and where its token starts in the box.
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  // Swarm agents the user named with @. Same kind of hint as a file mention,
+  // but about WHO rather than WHERE: it tells the planner which desk the user
+  // has in mind, and the planner reaches it with `swarm_delegate`. Kept apart
+  // from `mentions` because an agent name is not a path and must never be sent
+  // as one — the backend would try to read a file called "Scout".
+  const [agentMentions, setAgentMentions] = useState<string[]>([]);
+  // The roster, to offer names in the @ menu.
+  const [swarmAgents, setSwarmAgents] = useState<{ id: string; name: string; role?: string }[]>([]);
 
   // The plan-first flow: instruction -> plan (files it will touch) -> per-file
   // diffs the user applies one at a time.
@@ -738,6 +746,35 @@ export default function CodePage() {
   }, [send, workspacePath, wsState]);
 
   /**
+   * The swarm roster, so the composer can offer agent names after an "@".
+   *
+   * Fetched once when the socket is up rather than kept live on a push: the
+   * list changes only when the user creates or renames a desk, and a stale name
+   * in the menu costs a re-delegation while a missing fetch costs the feature
+   * entirely. A failure is swallowed — the composer still works without it, and
+   * a Code page that refuses to render because the roster is unavailable would
+   * be a worse trade.
+   */
+  useEffect(() => {
+    if (wsState !== 'connected') return;
+    let live = true;
+    (async () => {
+      try {
+        const r = await send('swarm.roster', {});
+        const agents = (r?.agents || []).map((a: any) => ({
+          id: String(a.id || ''),
+          name: String(a.name || a.id || ''),
+          role: String(a.role || ''),
+        })).filter((a: any) => a.name);
+        if (live) setSwarmAgents(agents);
+      } catch {
+        if (live) setSwarmAgents([]);
+      }
+    })();
+    return () => { live = false; };
+  }, [send, wsState]);
+
+  /**
    * Undo the last change Addled wrote.
    *
    * Two mechanisms, because both cases are real and the UI must not imply the
@@ -1075,6 +1112,10 @@ export default function CodePage() {
             ? [{ path: activePath, text: selectedText().slice(0, 4000) }]
             : []),
         ],
+        // Named swarm agents travel separately from files. The planner is told
+        // who the user meant as a stated fact, rather than being left to guess
+        // whether a word in the sentence happened to be an agent's name.
+        contextAgents: agentMentions.map(name => ({ name })),
         // Images and documents. The backend routes an image through the vision
         // model and reads a known document type, so a screenshot of an error is
         // as usable here as it is in Chat.
@@ -1478,14 +1519,33 @@ export default function CodePage() {
    * Already-mentioned files are left out so the menu cannot suggest something
    * that is visibly already attached.
    */
-  const mentionMatches = useMemo(() => {
+  /**
+   * Everything an "@" can reach: files in the workspace, and the swarm desks
+   * the user has named.
+   *
+   * Agents come FIRST because there are only ever a handful and the user who
+   * types "@Scout" is looking for exactly that — burying one bee under thirty
+   * files would make the feature look absent. Tagged with `kind` so the menu can
+   * draw the right marker and, more importantly, so a name is never sent as a
+   * path: the two reach the planner by different routes and must not be merged.
+   */
+  type MentionHit =
+    | { kind: 'file'; path: string; language?: string }
+    | { kind: 'agent'; name: string; role?: string };
+
+  const mentionMatches = useMemo<MentionHit[]>(() => {
     if (mentionQuery === null) return [];
     const q = mentionQuery.toLowerCase();
-    return files
+    const agents: MentionHit[] = swarmAgents
+      .filter(a => !agentMentions.includes(a.name))
+      .filter(a => !q || a.name.toLowerCase().includes(q))
+      .map(a => ({ kind: 'agent', name: a.name, role: a.role }));
+    const paths: MentionHit[] = files
       .filter(f => !mentions.includes(f.path))
       .filter(f => !q || f.path.toLowerCase().includes(q))
-      .slice(0, 30);
-  }, [mentionQuery, files, mentions]);
+      .map(f => ({ kind: 'file', path: f.path, language: f.language }));
+    return [...agents, ...paths].slice(0, 30);
+  }, [mentionQuery, files, mentions, swarmAgents, agentMentions]);
 
   /**
    * Whether the editor currently holds a selection worth attaching.
@@ -2488,7 +2548,8 @@ export default function CodePage() {
 
           {/* Attachments and mentions ride above the box, so what the request
               will carry is visible before it is sent. */}
-          {(attachments.length > 0 || mentions.length > 0 || pullFrom) && (
+          {(attachments.length > 0 || mentions.length > 0
+            || agentMentions.length > 0 || pullFrom) && (
             <div className="flex flex-wrap gap-1 px-3 pt-2">
               {attachments.map((a, i) => (
                 <span key={`${a.name}-${i}`}
@@ -2517,6 +2578,21 @@ export default function CodePage() {
                   >X</button>
                 </span>
               ))}
+              {/* An agent chip is drawn differently on purpose: a named desk is
+                  not a path, and a chip that looked like a file would suggest
+                  the planner is being told where to look rather than who. */}
+              {agentMentions.map(name => (
+                <span key={`agent:${name}`}
+                  className="inline-flex items-center gap-1 bg-[#1f6feb22] border border-[#1f6feb55] rounded px-2 py-1 text-[10px] text-[#58a6ff]"
+                  title={`Swarm agent — ${name}`}>
+                  🐝 {name}
+                  <button
+                    onClick={() => setAgentMentions(prev => prev.filter(n => n !== name))}
+                    className="text-[#8b949e] hover:text-[#f85149]"
+                    title="Remove this agent"
+                  >X</button>
+                </span>
+              ))}
               {pullFrom && activePath && (
                 <span
                   className="inline-flex items-center gap-1 bg-[#1f6feb22] border border-[#1f6feb55] rounded px-2 py-1 text-[10px] text-[#58a6ff]"
@@ -2536,20 +2612,34 @@ export default function CodePage() {
             {/* @-mention menu */}
             {mentionQuery !== null && mentionMatches.length > 0 && (
               <div className="absolute z-20 bottom-full mb-1 w-full max-h-48 overflow-y-auto bg-[#161b22] border border-[#30363d] rounded shadow-lg">
-              {mentionMatches.slice(0, 30).map(f => (
+              {mentionMatches.slice(0, 30).map(h => (
                 <button
-                  key={f.path}
+                  key={h.kind === 'agent' ? `agent:${h.name}` : h.path}
                   onClick={() => {
-                    setMentions(prev => prev.includes(f.path) ? prev : [...prev, f.path]);
+                    if (h.kind === 'agent') {
+                      setAgentMentions(prev => prev.includes(h.name) ? prev : [...prev, h.name]);
+                    } else {
+                      setMentions(prev => prev.includes(h.path) ? prev : [...prev, h.path]);
+                    }
                     setInstruction(prev => prev.replace(/@[^\s@]*$/, '').replace(/\s+$/, ''));
                     setMentionQuery(null);
                   }}
                   className="w-full text-left px-2 py-1 text-[11px] hover:bg-[#21262d] flex items-center gap-2"
-                  title={f.path}
+                  title={h.kind === 'agent' ? `Swarm agent — ${h.role || h.name}` : h.path}
                 >
-                  <span className="w-[6px] h-[6px] rounded-full shrink-0"
-                    style={{ background: langColor(f.language) }} />
-                  <span className="truncate text-[#c9d1d9]">{f.path}</span>
+                  {h.kind === 'agent' ? (
+                    <>
+                      <span className="shrink-0">🐝</span>
+                      <span className="truncate text-[#c9d1d9]">{h.name}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-[#8b949e]">agent</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="w-[6px] h-[6px] rounded-full shrink-0"
+                        style={{ background: langColor(h.language || '') }} />
+                      <span className="truncate text-[#c9d1d9]">{h.path}</span>
+                    </>
+                  )}
                 </button>
               ))}
             </div>
@@ -2657,8 +2747,12 @@ export default function CodePage() {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     if (mentionQuery !== null && mentionMatches.length) {
                       e.preventDefault();
-                      const f = mentionMatches[0];
-                      setMentions(prev => prev.includes(f.path) ? prev : [...prev, f.path]);
+                      const top = mentionMatches[0];
+                      if (top.kind === 'agent') {
+                        setAgentMentions(prev => prev.includes(top.name) ? prev : [...prev, top.name]);
+                      } else {
+                        setMentions(prev => prev.includes(top.path) ? prev : [...prev, top.path]);
+                      }
                       setInstruction(prev => prev.replace(/@[^\s@]*$/, '').replace(/\s+$/, ''));
                       setMentionQuery(null);
                       return;
@@ -2668,7 +2762,7 @@ export default function CodePage() {
                 }}
                 rows={3}
                 placeholder={bound
-                  ? 'Describe the change. Paste an image or drop a file. Type @ to name a file.'
+                  ? 'Describe the change. Paste an image or drop a file. Type @ to name a file or a swarm agent.'
                   : 'Bind a workspace first...'}
                 className="flex-1 min-w-0 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] resize-none focus:outline-none focus:border-[#3380FF]"
               />

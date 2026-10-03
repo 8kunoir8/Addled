@@ -160,6 +160,12 @@ class LocalLlmManager:
         self._vram_free_mb: int | None = None
         self._hf_deps_installing = False
         self._hf_deps_cache: tuple[bool, str] | None = None
+        # Why the model is deliberately held down, if it is. Empty means "not
+        # paused". A pause is NOT the same as the process having exited: a
+        # request arriving while paused must be refused rather than quietly
+        # reloading the weights, or a background bot would drag the model back
+        # mid-game and the pause would be decorative.
+        self._paused_reason = ""
 
     # ---- small helpers -------------------------------------------------------
 
@@ -327,9 +333,68 @@ class LocalLlmManager:
         return bool(self._cfg("autostart", default=True))
 
     def should_run(self) -> bool:
+        if self._paused_reason:
+            return False
         if self.keep_running():
             return True
         return self.autostart_on_select() and self.is_chosen()
+
+    def is_paused(self) -> bool:
+        """Whether the model is deliberately held down. See `pause_for`."""
+        return bool(self._paused_reason)
+
+    def pause_reason(self) -> str:
+        return self._paused_reason
+
+    async def pause_for(self, reason: str) -> bool:
+        """Hold the local model down while the user is busy, freeing its RAM.
+
+        Called on every engine tick while the condition holds, so it has to be
+        cheap and idempotent: pausing an already-paused model is a no-op, and so
+        is pausing one that is not running.
+
+        Recording the reason is the part that makes this a pause rather than a
+        stop. Without it the process would simply come back the moment anything
+        asked for it — a bot message or a scheduled task is enough — and the RAM
+        would be gone again by the time the user noticed.
+
+        Refuses to stop a model that is still LOADING. Killing it there throws
+        away a partially-read of several gigabytes and leaves the port held; the
+        next tick will pause it once it settles.
+        """
+        reason = str(reason or "").strip() or "busy"
+        if self._phase == "starting":
+            log.debug("Not pausing for %s: the model is still starting", reason)
+            return False
+        if not self._paused_reason:
+            self._paused_reason = reason
+            log.info("Local model paused (%s)", reason)
+        if self.is_running():
+            await self.stop()
+            self._broadcast("local.llmStatus", self.status())
+            return True
+        return False
+
+    async def resume_from_pause(self) -> bool:
+        """Clear a pause and start again, but only if it SHOULD be running.
+
+        The `should_run` check is the whole point. Starting unconditionally
+        would undo a deliberate choice: the user who turned the "keep it warm"
+        toggle off, or switched Addled to a cloud provider, would find the local
+        model loaded again the moment they closed a game.
+        """
+        if not self._paused_reason:
+            return False
+        was = self._paused_reason
+        self._paused_reason = ""
+        log.info("Local model resumed (was paused: %s)", was)
+        self._broadcast("local.llmStatus", self.status())
+        if self.should_run() and not self.is_running():
+            ok, problem = await self.start()
+            if not ok:
+                log.debug("Resume could not start the model: %s", problem)
+            return ok
+        return False
 
     def run_reason(self) -> str:
         if self.keep_running():
@@ -349,6 +414,10 @@ class LocalLlmManager:
             "pid": getattr(self._proc, "pid", None),
             "port": self.port(),
             "phase": self._phase,
+            # Surfaced so the UI can explain a model that will not start,
+            # instead of showing it as merely stopped. A user who does not know
+            # it is paused reads that as broken.
+            "paused": self._paused_reason,
             "downloading": self._downloading,
             "progress": self._progress,
             "detail": self._detail,
@@ -745,6 +814,15 @@ class LocalLlmManager:
         if self.is_running():
             self._last_used = time.monotonic()
             return None
+        # A pause outranks a request. This is the guard that makes the pause
+        # real: without it, starting the model is exactly what `ensure_running`
+        # does, so the first background request — a bot message, a scheduled
+        # reminder — would reload several gigabytes mid-game and the user would
+        # be no better off than if nothing had been paused at all.
+        if self._paused_reason:
+            return ("The local model is paused while you are "
+                    f"{self._paused_reason} — it will come back when you are "
+                    "done. Pick another provider in Settings to use one now.")
         if not paths.installed():
             if self.is_declined():
                 return ("The local model is not installed. Pick a provider in "

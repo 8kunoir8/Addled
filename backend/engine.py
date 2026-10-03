@@ -73,6 +73,13 @@ class Engine(QObject):
         self._voice_busy = False  # TTS is speaking — don't force 'idle'
         self._last_greeting = 0.0  # initiative: return-greeting cooldown
         self._last_mood = ""       # mood broadcast dedup
+        # Gaming pause: when to bring the local model back after the game goes
+        # away. 0 means "no resume pending". Stored as a deadline rather than a
+        # flag so a re-launched game simply moves it forward.
+        self._gaming_resume_at = 0.0
+        # Long enough to ride out a relaunch or a launcher patch, short enough
+        # that a user who stops playing is not waiting on it.
+        self._gaming_resume_delay = 30.0
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -164,6 +171,74 @@ class Engine(QObject):
 
         log.info("Engine subsystems initialized (observer, presence, decision, goals)")
 
+    def _sync_gaming_pause(self, blocked: bool, reason: str) -> None:
+        """Pause the local model while the user games, and resume after.
+
+        Gaming only. A meeting holds the same RAM but is usually short, and a
+        cold start reads several gigabytes off disk — pausing and resuming
+        around a fifteen-minute call can cost more than it saves, so that case
+        is deliberately left to the existing idle unload.
+
+        The resume is DELAYED on purpose. Leaving a game is very often followed
+        immediately by starting another, or by the launcher patching, which is
+        exactly when a multi-gigabyte reload would be most unwelcome. Waiting
+        also means a brief alt-tab does not thrash the model in and out of
+        memory, which is worse than either state on its own.
+        """
+        try:
+            enabled = config.get("safety", "pause_local_model_on_gaming",
+                                 default=True)
+        except Exception:  # noqa: BLE001
+            enabled = True
+        if not enabled:
+            return
+
+        gaming = blocked and reason == "gaming"
+        if gaming:
+            # Any tick while gaming arms the delay again, so the countdown only
+            # expires once the game has actually been gone for the full wait.
+            self._gaming_resume_at = 0.0
+            try:
+                from backend.local_llm.manager import local_llm
+                from backend.ws_server import get_server
+                # ALWAYS record the pause, whether or not the model happens to be
+                # running right now.
+                #
+                # This is the whole point of a pause rather than a stop. The
+                # local model is usually NOT loaded when a game starts — it loads
+                # on demand — so gating this on `is_running()` meant the common
+                # case recorded nothing, and then the first background request
+                # mid-game started the model as if nothing had happened. The
+                # pause has to be in place BEFORE anything asks for the model,
+                # which is exactly when the model is down.
+                get_server().run_soon(local_llm.pause_for("gaming"))
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not pause the local model: %s", e)
+            return
+
+        # Not gaming. If a pause is outstanding, start the clock rather than
+        # resuming at once.
+        try:
+            from backend.local_llm.manager import local_llm
+        except Exception:  # noqa: BLE001
+            return
+        if not local_llm.is_paused():
+            self._gaming_resume_at = 0.0
+            return
+        now = time.monotonic()
+        if not self._gaming_resume_at:
+            self._gaming_resume_at = now + self._gaming_resume_delay
+            log.debug("Local model will resume in %.0fs if the game stays closed",
+                      self._gaming_resume_delay)
+            return
+        if now >= self._gaming_resume_at:
+            self._gaming_resume_at = 0.0
+            try:
+                from backend.ws_server import get_server
+                get_server().run_soon(local_llm.resume_from_pause())
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not resume the local model: %s", e)
+
     async def _tick(self):
         """One engine tick (~5s)."""
         self._tick_count += 1
@@ -171,6 +246,17 @@ class Engine(QObject):
         # 1. Check presence guard — meeting / gaming / away?
         if self._presence_guard:
             blocked, reason = self._presence_guard.check()
+            # Free the local model's RAM while the user is gaming, and bring it
+            # back afterwards. Detection already existed and already quietened
+            # the agent — but the model kept several gigabytes resident the whole
+            # time, which is the resource the user actually wanted back.
+            #
+            # Driven from the engine tick rather than from the guard because the
+            # tick is where the transition is known (blocked -> not blocked), and
+            # a pause needs both edges. The call is DISPATCHED, not awaited: this
+            # runs on the engine's own loop and the manager's subprocess belongs
+            # to the WS loop, so awaiting here would drive it from the wrong one.
+            self._sync_gaming_pause(blocked, reason)
             if blocked:
                 if self._state != EngineState.SLEEPING:
                     self._set_state(EngineState.SLEEPING)

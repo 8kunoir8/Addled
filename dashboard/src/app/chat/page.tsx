@@ -78,6 +78,15 @@ export default function ChatPage() {
     useState<Record<string, string>>({});
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [processingFiles, setProcessingFiles] = useState(false);
+  // Swarm agents the user has named for this turn, and the roster to offer.
+  //
+  // Chat has no typed context field the way `code.plan` does, so the name has
+  // to reach the model in the message itself. It is therefore appended to the
+  // text that is SENT but kept out of the bubble the user reads — otherwise the
+  // conversation fills with `[agent: Scout]` markers the user never typed.
+  const [agentMentions, setAgentMentions] = useState<string[]>([]);
+  const [swarmAgents, setSwarmAgents] = useState<{ name: string; role?: string }[]>([]);
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [anchors, setAnchors] = useState<{type: string; text: string}[]>([]);
   const [workScope, setWorkScope] = useState('');
@@ -263,6 +272,29 @@ export default function ChatPage() {
   useEffect(() => subscribeQuestions(setQuestions), []);
   useEffect(() => subscribeQuestionErrors(setQuestionErrors), []);
 
+  // The swarm roster, so an agent can be named for a turn. Fetched once when
+  // the socket is up — the list only changes when a desk is created or renamed,
+  // and a stale name costs one re-delegation while a missing fetch costs the
+  // feature. A failure is swallowed: chat works perfectly well without it, and
+  // refusing to render because the roster is unavailable would be a bad trade.
+  useEffect(() => {
+    if (wsState !== 'connected') return;
+    let live = true;
+    (async () => {
+      try {
+        const r = await send('swarm.roster', {});
+        const agents = (r?.agents || []).map((a: any) => ({
+          name: String(a.name || a.id || ''),
+          role: String(a.role || ''),
+        })).filter((a: any) => a.name);
+        if (live) setSwarmAgents(agents);
+      } catch {
+        if (live) setSwarmAgents([]);
+      }
+    })();
+    return () => { live = false; };
+  }, [send, wsState]);
+
   // Answering from this page has to reach the backend the same way answering
   // from anywhere else does, so the store owns what is sent and this only
   // passes the call through.
@@ -394,8 +426,19 @@ export default function ChatPage() {
       // `source` marks the turn as this page's own, so the backend does not
       // announce it back to us — we have already drawn both bubbles, and the
       // push would show the whole exchange a second time.
+      //
+      // Named agents ride in the message text, because `chat.send` has no
+      // context field the way `code.plan` does. Stated as a plain fact so the
+      // model routes to that desk with `swarm_delegate` rather than guessing
+      // from the sentence — and NOT added to the bubble above, so the
+      // conversation does not fill with markers the user never typed.
+      const ask = agentMentions.length
+        ? `${text}\n\n[Named swarm agents for this request: `
+          + agentMentions.join(', ')
+          + '. Use swarm_delegate with that name if the work suits the desk.]'
+        : text;
       const result = await send('chat.send', {
-        message: text, attachments: sentAtts, source: 'dashboard',
+        message: ask, attachments: sentAtts, source: 'dashboard',
       });
       applyReply(result?.response || 'No response');
     } catch (err: any) {
@@ -596,10 +639,62 @@ export default function ChatPage() {
             ))}
           </div>
         )}
+        {/* Named swarm agents for this turn. Shown so what the request will
+            carry is visible before it is sent, and removable so a name does not
+            silently apply to every following message. */}
+        {agentMentions.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-2">
+            {agentMentions.map(name => (
+              <div key={name}
+                className="flex items-center gap-1.5 rounded-md pl-2 pr-1 py-1 text-xs text-[#58a6ff]"
+                style={{ background: '#1f6feb22', border: '1px solid #1f6feb55' }}>
+                <span>🐝</span>
+                <span className="max-w-[140px] truncate">{name}</span>
+                <button
+                  onClick={() => setAgentMentions(prev => prev.filter(n => n !== name))}
+                  title="Remove this agent"
+                  className="text-[#8b949e] hover:text-[#f85149] px-1">✕</button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="flex gap-2">
           <input ref={fileInputRef} type="file" multiple className="hidden"
             accept="image/*,.txt,.md,.json,.csv,.log,.py,.js,.ts,.tsx,.jsx,.html,.css,.xml,.yaml,.yml,.ini,.cfg,.sh,.bat,.ps1,.toml,.sql,.pdf,.docx,.xlsx,.pptx"
             onChange={e => { handleFiles(e.target.files); e.target.value = ''; }} />
+          {/* Ask a saved swarm desk to do this. Only offered when there is a
+              roster to choose from, so the button never opens an empty list. */}
+          {swarmAgents.length > 0 && (
+            <div className="relative">
+              <button
+                onClick={() => setAgentMenuOpen(o => !o)}
+                disabled={isLoading || wsState !== 'connected'}
+                title="Name a swarm agent for this request"
+                className="bg-[#161b22] border border-[#30363d] hover:border-[#484f58] disabled:opacity-50 rounded-lg px-3 py-2 text-sm text-[#8b949e] transition-colors"
+              >🐝</button>
+              {agentMenuOpen && (
+                <div className="absolute z-20 bottom-full mb-1 left-0 w-56 max-h-56 overflow-y-auto bg-[#161b22] border border-[#30363d] rounded shadow-lg">
+                  {swarmAgents.map(a => (
+                    <button
+                      key={a.name}
+                      onClick={() => {
+                        setAgentMentions(prev => prev.includes(a.name) ? prev : [...prev, a.name]);
+                        setAgentMenuOpen(false);
+                      }}
+                      className="w-full text-left px-3 py-1.5 text-xs hover:bg-[#21262d] flex items-center gap-2"
+                      title={a.role || a.name}
+                    >
+                      <span>{agentMentions.includes(a.name) ? '✓' : '🐝'}</span>
+                      <span className="truncate text-[#c9d1d9]">{a.name}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-[#8b949e] truncate max-w-[80px]">
+                        {a.role}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={isLoading || wsState !== 'connected' || processingFiles}

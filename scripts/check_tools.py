@@ -628,16 +628,28 @@ def run_shell_access_tests():
     from backend.actions.executor import ActionExecutor
     from backend.safety.destruction_gate import DestructionGate
     from backend.skills.registry import skill_registry
+    from backend.tool_brief import capabilities_block
 
-    ws = Path(ROOT, "backend", "ws_server.py").read_text(encoding="utf-8")
-    capabilities = (ws.split("capabilities_ctx")[1][:1500]
-                    if "capabilities_ctx" in ws else "")
+    # Asked of the prompt that is actually built, not of a string in a file.
+    # This used to grep `ws_server.py` for `capabilities_ctx`, which tied the
+    # test to where the text was stored: moving the block into `tool_brief`
+    # (so a persona could no longer drop it) broke the check while the behaviour
+    # it cares about was unchanged and in fact improved. Building the prompt is
+    # the only version that cannot pass on a stale copy.
+    prompt = capabilities_block(None)
     check("the capability list names the shell",
-          "- Shell:" in capabilities and "run_command" in capabilities,
+          "run_command" in prompt,
           "the prompt never mentions that commands can be run")
     check("and says the agent does have system access",
-          "DO have access to the user's system" in ws,
+          "DO have access to the user's system" in prompt,
           "nothing contradicts the 'I cannot access your system' answer")
+
+    # The block has to reach a persona turn too. A swarm agent passing a persona
+    # used to lose it, and then answered "those tools aren't accessible here".
+    ws = Path(ROOT, "backend", "ws_server.py").read_text(encoding="utf-8")
+    check("the capability block is appended on the persona path as well",
+          "capabilities_block(tools)" in ws,
+          "a persona turn would be told nothing about its tools")
 
     skill = skill_registry.get("run_command")
     check("run_command is registered", skill is not None)
