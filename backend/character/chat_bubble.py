@@ -293,6 +293,37 @@ class ChatBubble(QWidget):
         self._clear_actions()
         self._advance()
 
+    def resolve_decision(self, approval_id: str) -> bool:
+        """Drop a decision that was answered somewhere else.
+
+        A permission prompt can be answered from the chat page, the code page, a
+        bot, or here. Each surface draws its own copy, so answering one used to
+        leave every other showing a request that was already dealt with — and
+        clicking it then failed with "no such approval", which reads as a broken
+        button rather than a finished request.
+
+        Matches on the id, not "whatever is on screen". The bubble can be
+        showing a DIFFERENT decision from the one that was resolved — an
+        approval followed by a question is the real case — and clearing the
+        wrong card would hide a prompt the user still has to answer.
+
+        Returns whether it cleared anything, so a caller can tell a resolution
+        it handled from one it correctly ignored.
+        """
+        open_id = str(self._open_decision.get("approval_id") or "")
+        if not self._decision_open or not open_id:
+            return False
+        if open_id != str(approval_id or ""):
+            return False
+        self._clear_actions()
+        # `_advance`, not just a clear: anything queued behind this one — the
+        # question raised in the same turn is the case that happens — would
+        # otherwise be stranded with nothing on screen to trigger it.
+        self._advance()
+        log.debug("cleared the approval bubble answered elsewhere (%s)",
+                  approval_id)
+        return True
+
     def _on_later(self) -> None:
         self._clear_actions()
         self._advance()

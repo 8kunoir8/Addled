@@ -155,10 +155,58 @@ def publish(approval_id: str, action_type: str, params: dict | None = None) -> b
         return False
 
 def remember(approval_id: str) -> None:
-    """Drop one announcement once it has been answered."""
+    """Drop one announcement once it has been answered, and say so out loud.
+
+    The broadcast is the whole point of this being more than a `del`. A decision
+    can be answered from several places at once — the chat page, the code page,
+    a bot, or the bubble over the character — and each of them drew its own
+    copy. While this was silent, the surface that answered cleared its own card
+    and every other kept showing a prompt that had already been dealt with.
+    Clicking one then failed with "no such approval", which reads as a broken
+    button rather than a request that is already finished.
+
+    Announced from here rather than from each answer handler so the four ways a
+    request can end — approve, deny, always-allow and expiry — cannot disagree
+    about whether the other surfaces should be told.
+    """
+    removed = None
     for index, record in enumerate(_pending):
         if record["approval_id"] == approval_id:
-            del _pending[index]
+            removed = _pending.pop(index)
+            break
+    if removed is None:
+        # Never announced, or already answered. Nothing to tell anyone: a second
+        # broadcast would clear a card another surface may have just redrawn.
+        return
+    try:
+        from backend.ws_server import get_server
+        server = get_server()
+        if server is None:
+            return
+        # `outcome` lets a surface say WHY the prompt went away. A card that
+        # simply vanishes is unsettling when the user is looking at a different
+        # surface from the one that answered it.
+        server.broadcast_nowait("action.approvalResolved", {
+            "approval_id": approval_id,
+            "action_type": removed.get("action_type", ""),
+            "name": removed.get("name", ""),
+            "kind": removed.get("kind", ""),
+            "outcome": str(removed.get("outcome") or "answered"),
+        })
+    except Exception as e:  # noqa: BLE001
+        log.debug("approval resolution broadcast failed: %s", e)
+
+def set_outcome(approval_id: str, outcome: str) -> None:
+    """Record how a request was settled, for `remember` to announce.
+
+    Called by the answer handlers just before they resolve. Without it the
+    broadcast can only ever say "answered", and a prompt that was denied cannot
+    be told apart from one that was allowed — which is exactly the distinction
+    the user needs when they answered on a different surface.
+    """
+    for record in _pending:
+        if record["approval_id"] == approval_id:
+            record["outcome"] = str(outcome or "answered")
             return
 
 def pending() -> list[dict]:

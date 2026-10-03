@@ -2267,6 +2267,10 @@ def _register_default_handlers():
                               "conversation to find the request this chat "
                               "raised")}
         result = await executor.approve(approval_id)
+        # Recorded before the announcement so the other surfaces are told it was
+        # ALLOWED rather than just "answered" — a bubble that disappears means
+        # something different in each case.
+        approval_notice.set_outcome(approval_id, "allowed")
         approval_notice.remember(approval_id)
         return {"success": result.success, "action_type": result.action_type,
                 "summary": result.summary, "error": result.error,
@@ -2284,6 +2288,7 @@ def _register_default_handlers():
                               "conversation to find the request this chat "
                               "raised")}
         result = executor.deny(approval_id)
+        approval_notice.set_outcome(approval_id, "denied")
         approval_notice.remember(approval_id)
         return {"success": result.success, "summary": result.summary,
                 "error": result.error, "approvalId": approval_id,

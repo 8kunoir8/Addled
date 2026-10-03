@@ -5,8 +5,9 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState, useEffect } from 'react';
 import {
-  getApprovals, addApproval, addApprovals, subscribeApprovals,
-  subscribeApprovalErrors, makeAnswers, type ApprovalRequest,
+  getApprovals, addApproval, addApprovals, dropApproval, subscribeApprovals,
+  subscribeApprovalErrors, setApprovalError, makeAnswers,
+  type ApprovalRequest,
 } from '@/lib/approvalsStore';
 import {
   addQuestion, removeQuestion, setQuestions, subscribeQuestions,
@@ -86,6 +87,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       grantable: Boolean(p.grantable),
       command: p.command || '',
     });
+  }), [onNotification]);
+
+  // An approval answered on ANOTHER surface — the bubble over the character, a
+  // bot, or a second window. Every surface draws its own card from the same
+  // request, so without this the card here would sit waiting for an answer that
+  // has already been given, and pressing it would fail with "no such approval".
+  //
+  // Owned by the layout for the same reason the request subscription is: it is
+  // always mounted and `onNotification` keeps one handler per method.
+  useEffect(() => onNotification('action.approvalResolved', (p: any) => {
+    if (p?.approval_id) dropApproval(String(p.approval_id));
   }), [onNotification]);
 
   useEffect(() => subscribeApprovals(setApprovals), []);

@@ -589,6 +589,11 @@ def main():
         # `object` rather than a typed payload because Qt needs the type at
         # class-definition time and this is a plain dict of label/callback.
         decision = pyqtSignal(object)
+        # An approval that was answered somewhere else. Carries just the id, so
+        # the bubble can clear the right card rather than whichever is on
+        # screen — an approval followed by a question is the real case, and
+        # clearing the wrong one would bury a prompt still needing an answer.
+        decision_resolved = pyqtSignal(str)
 
     bridge = _UIBridge()
 
@@ -630,6 +635,21 @@ def main():
             log.warning("could not show a decision on the bubble: %s", e)
 
     bridge.decision.connect(_show_decision)
+
+    def _resolve_decision(approval_id: str) -> None:
+        """Clear a permission prompt answered on another surface.
+
+        The chat page, the code page, a bot and this bubble all draw their own
+        copy of the same request. Answering one used to leave the others showing
+        a prompt that was already dealt with — and pressing their button then
+        failed with "no such approval", which reads as broken rather than done.
+        """
+        try:
+            bubble.resolve_decision(str(approval_id or ""))
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not clear the resolved approval bubble: %s", e)
+
+    bridge.decision_resolved.connect(_resolve_decision)
 
     # What the floating character should do when a decision is raised.
     #
@@ -676,7 +696,18 @@ def main():
                     # A gated action can be answered from the dashboard later,
                     # so leaving it is legitimate — the request stays queued.
                     "closable": True,
+                    # Carried so `resolve_decision` can tell THIS card from any
+                    # other that might be on screen. Without the id the bubble
+                    # could only clear "whatever is showing", which would drop a
+                    # question raised in the same turn.
+                    "record": {"approval_id": approval_id},
                 })
+            elif method == "action.approvalResolved":
+                # Answered elsewhere — chat, the code page, or a bot. The bubble
+                # drew its own copy of the request and has to let it go, or it
+                # keeps asking for a decision that has already been made.
+                bridge.decision_resolved.emit(
+                    str(params.get("approval_id") or ""))
             elif method == "question.ask":
                 question_id = str(params.get("question_id") or "")
                 options = params.get("options") or []
