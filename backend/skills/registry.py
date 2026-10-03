@@ -668,17 +668,24 @@ class SkillRegistry:
             return len(self.enabled_list_all())
         return sum(1 for s in self.enabled_list_all() if s.name in only)
 
-    def filter_for_query(self, query: str, max_tools: int = 10) -> set[str]:
+    def filter_for_query(self, query: str, max_tools: int = 16) -> set[str]:
         """Select a concise subset of relevant skills for prompt-based tool calling.
 
         Instead of injecting 50+ tool schemas (~4,700 tokens) into the context
         of local models, selects core utilities plus skills relevant to the
         user's query.
 
-        ``max_tools`` defaults to 10: 4 core utilities are always included,
-        leaving up to 6 slots for wiki, SOP, MCP, or domain tools that match
-        the query. At ~80 tokens per schema that is ~800 tokens total — well
-        within an 8,192-token window even before budget pruning.
+        ``max_tools`` is 16, raised from 10 when the acquisition tools stopped
+        being gated behind a magic word. Reserving slots for them at 10 pushed
+        SEVEN real skills — `browser_extract`, `pdf_redact`, `memory_link`,
+        `wiki_ingest`, `wiki_write`, `self_propose`, `swarm_notes` — out of reach
+        entirely, which `check_reachability` caught. Stealing from real tools to
+        pay for the discovery ones is not a trade worth making.
+
+        Measured on the local model against its 8,192-token window: the
+        catalogue costs ~459 tokens at 10 and ~776 at 16. The extra 317 tokens
+        are under 4% of the window, which buys the seven skills back and keeps
+        the discovery tools always present.
         """
         import re
 
@@ -857,21 +864,41 @@ class SkillRegistry:
                 scores[name] = score
 
         if not scores:
-            return {name for name in core_tools if name in enabled}
+            # Nothing scored: still offer the utilities and the acquisition
+            # tools, for the same reason they are force-added below — a turn
+            # that matched nothing is exactly the turn that needs to be able to
+            # look for a capability.
+            return {n for n in (set(core_tools) | discovery_tools)
+                    if n in enabled}
 
         sorted_tools = sorted(scores.keys(), key=lambda n: scores[n], reverse=True)
         selected = list(sorted_tools[:max_tools])
-        if asks_for_tools:
-            for name in discovery_tools:
-                if name in enabled and name not in selected:
-                    selected.append(name)
-        # Force-include core utilities so the model can always read, write,
-        # search the web, and run a command — they are the four things every
-        # turn might need regardless of the query's topic.
-        for c in core_tools:
-            if c in enabled and c not in selected:
-                selected.append(c)
-        return set(selected[:max_tools])
+        # The acquisition tools are ALWAYS offered, not only when the user says
+        # a magic word.
+        #
+        # They used to be gated behind `asks_for_tools`, which fires on "tool",
+        # "skill", "mcp", "search" and similar. Measured consequence: asking for
+        # a TASK left them out entirely —
+        #     'convert this pdf to a spreadsheet' -> none offered
+        #     'find an mcp server for github'     -> all three
+        # — so the agent could only discover that it may acquire capability if
+        # the user happened to name the concept. That is the whole of why it
+        # looked passive: it was never shown the option. The gate saved ~240
+        # tokens and cost the feature its visibility, which is the wrong trade.
+        # `must` is never truncated. The slice below is what enforces the budget,
+        # and anything appended after it is lost — which is exactly what happened
+        # to the discovery tools on the first attempt at this fix: for "convert
+        # this pdf to a spreadsheet" the scored list alone filled all ten slots,
+        # so the two tools force-added afterwards were cut off by `[:max_tools]`
+        # and the query STILL offered none of them. Keeping them out of the
+        # scored pool and taking the budget from what is left is the only
+        # arrangement where "always offered" survives contact with a full list.
+        must: list[str] = []
+        for name in list(discovery_tools) + list(core_tools):
+            if name in enabled and name not in must and name not in selected:
+                must.append(name)
+        room = max(0, max_tools - len(must))
+        return set(selected[:room] + must)
 
     def to_prompt_tools(self, only: set[str] | None = None) -> str:
         """For providers without native tool support: the catalogue.
@@ -1122,9 +1149,17 @@ class SkillRegistry:
             "different trade-offs.\n\n"
             "Do NOT use it to be cautious. If a reasonable default exists, take "
             "it and say what you assumed — a user correcting one line is faster "
-            "than answering a question. Do not ask permission to proceed, do "
-            "not ask what you could discover by reading or searching, and do "
-            "not ask for information already in the conversation.\n\n"
+            "than answering a question. Do not ask what you could discover by "
+            "reading or searching, and do not ask for information already in "
+            "the conversation.\n\n"
+            "THE EXCEPTION, and it is the important one: DO ask before "
+            "changing what Addled can do. Installing a market skill, forging "
+            "new code, and adding an MCP server all fetch or generate code that "
+            "then runs on the user's machine, so consent is required rather "
+            "than good manners. The rule above about not asking permission "
+            "covers ordinary work; it does not cover acquiring a new "
+            "capability. Ask BEFORE it happens — installing and then reporting "
+            "takes the decision away from the user.\n\n"
             "The question goes to the user's dashboard as a card and your turn "
             "ends there; their answer arrives as the next message. Never call "
             "this and then carry on as if it had been answered.\n\n"
@@ -3669,7 +3704,10 @@ class SkillRegistry:
         self.register(SkillDefinition(
             "forge_skill",
             "Learn a new capability by searching the web and generating code. "
-            "Use when you need to do something that no existing tool can do.",
+            "Use when you need to do something that no existing tool can do.\n\n"
+            "Forging writes new code and runs it, so this asks the user first "
+            "and their answer arrives as the next message. Call it, then wait — "
+            "do not claim a skill was created until you are told it was.",
             {"type": "object", "properties": {
                 "task": {"type": "string",
                          "description": "What you need to accomplish (e.g., 'convert a PDF to text')"},
@@ -3719,7 +3757,45 @@ class SkillRegistry:
                         "note": ("Nothing was installed. Add one from "
                                  "Settings, MCP if it looks right.")}
 
-            result = await market.acquire_for(task)
+            # Ask before adding a server. An MCP server is a third-party program
+            # that runs as a local child process — the most consequential thing
+            # this tool can do, and it used to happen silently as a side effect
+            # of answering a question.
+            #
+            # The suggest pass runs first so the question can name what would be
+            # added rather than asking about something the model has not seen.
+            candidates = await market.suggest(task, limit=6)
+            usable = [c for c in candidates if c.get("runnable")]
+            if not usable:
+                names = "; ".join(
+                    f"{c.get('name')} ({c.get('blocked_reason')})"
+                    for c in candidates[:3])
+                return {"success": False,
+                        "error": ("nothing usable without more setup: " + names)
+                                 if candidates else "no MCP server matched that task",
+                        "candidates": candidates}
+            best = usable[0]
+            from backend.skills import tool_loop as _tl
+            if not _tl._consented(None):
+                asked = await _tl._ask_to_acquire(
+                    "add an MCP server",
+                    str(best.get("title") or best.get("name") or "a server"),
+                    "It is a third-party program that will run locally and "
+                    "offer new tools to Addled.",
+                    ["Add it", "Skip this"])
+                return {"success": False,
+                        "data": {"requires_answer": True,
+                                 "candidate": best,
+                                 **{k: v for k, v in asked.items()
+                                    if k == "question_id"}},
+                        "error": asked.get("error") or
+                                 ("This needs your permission first: an MCP "
+                                  "server is a third-party program that runs on "
+                                  "the user's machine. Ask them and wait for "
+                                  "their answer before adding anything."),
+                        "candidates": [c.get("name") for c in candidates[:5]]}
+
+            result = await market.install(str(best.get("name") or ""), auto=True)
             if not result.get("success"):
                 return {"success": False,
                         "error": result.get("error"),
@@ -3749,7 +3825,10 @@ class SkillRegistry:
         self.register(SkillDefinition(
             "find_mcp_server",
             "Find and start an MCP server for a capability no current tool "
-            "covers, then use its tools. Searches the official MCP registry.",
+            "covers, then use its tools. Searches the official MCP registry.\n\n"
+            "Adding a server changes what runs on the user's machine, so this "
+            "asks them first and their answer arrives as the next message. Call "
+            "it, then wait — do not claim anything was added until you are told.",
             {"type": "object", "properties": {
                 "task": {"type": "string",
                          "description": "What needs doing, in a few words"},

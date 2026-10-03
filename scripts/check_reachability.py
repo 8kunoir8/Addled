@@ -187,7 +187,13 @@ PHRASINGS: dict[str, list[str]] = {
 }
 
 
-def offered_for(query: str, max_tools: int = 10) -> set[str]:
+def offered_for(query: str, max_tools: int = 16) -> set[str]:
+    """What a real turn would offer this query.
+
+    The default must match `filter_for_query`'s own, or this check tests a
+    configuration the app never uses. It was pinned at 10 while the code moved
+    to 16, and reported seven skills as unreachable when they were not.
+    """
     return R.filter_for_query(query, max_tools=max_tools)
 
 

@@ -97,9 +97,87 @@ def forge_target_provider(provider=None):
     return better
 
 
+async def _ask_to_acquire(kind: str, what: str, detail: str,
+                          options: list[str]) -> dict:
+    """Ask before changing what Addled can do.
+
+    Installing a market skill and forging new code both fetch or generate
+    executable code that then runs on the user's machine. That used to happen as
+    a side effect of answering a question: `search_and_install` installed inside
+    the search and the loop set `"market": True` / `"installed_skill"`, which
+    nothing read. Nobody was asked and nobody was told.
+
+    Returns the question result. `requires_answer` is set on success, which is
+    the marker the loop stops on — the turn ends and the user's answer arrives
+    as the next message.
+
+    On an UNATTENDED source (a scheduled task, a swarm desk) `pending.ask`
+    refuses, and that refusal is returned as-is rather than raised. The caller
+    must treat it as "no consent" — never as "proceed". Installing code on the
+    say-so of nobody would be the same bug in a different costume.
+    """
+    try:
+        from backend.questions import pending
+        ctx = current_turn()
+        question = (f"I can {kind} for this: {what}. {detail} "
+                    f"Shall I go ahead?")
+        result = pending.ask(
+            question,
+            options=options,
+            source=ctx.get("source") or "",
+            conversation=ctx.get("conversation") or "",
+            context=f"{kind.title()} changes what Addled can run on this machine.",
+        )
+        if result.get("success"):
+            result["requires_answer"] = True
+        return result
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not ask before acquiring: %s", e)
+        return {"success": False, "error": f"could not ask first: {e}"}
+
+
+def _consented(question_result: dict) -> bool:
+    """Whether the user has said yes to acquiring something.
+
+    Read from THIS turn's own request text, which the pipeline publishes to
+    `_forge.request` for every turn. That is the user's words, and a new turn
+    carries them, so an answer typed after the question is visible here without
+    a flag that a fresh turn would not see.
+
+    Wording is a blunt instrument. The alternatives are worse: a module-level
+    flag would leak between conversations and survive a restart, and trusting
+    the model to withhold the call on its own is what produced the silent
+    install this exists to stop. A refusal always wins when both appear ("no,
+    don't install it"), because the safe reading of an ambiguous answer is the
+    one that changes nothing.
+    """
+    try:
+        from backend.config import config
+        low = str(config.get("_forge", "request", default="") or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+    if not low:
+        return False
+    if not _ACQUIRE_QUESTION_RE.search(low):
+        # No question was asked this turn, so there is no answer to read. Being
+        # asked is what makes a yes meaningful.
+        return False
+    no = ("no", "don't", "dont", "skip", "cancel", "stop", "never", "not now")
+    if any(re.search(rf"\b{w}\b", low) for w in no):
+        return False
+    yes = ("yes", "go ahead", "install it", "do it", "ok", "okay", "sure",
+           "proceed", "forge it", "add it", "install")
+    return any(re.search(rf"\b{w}\b", low) for w in yes)
+
+# The question this module asks, recognised in the answer. Matched on a phrase
+# that only the acquisition question uses, so an ordinary "yes" to something
+# else cannot be mistaken for consent to install code.
+_ACQUIRE_QUESTION_RE = re.compile(r"shall i go ahead|i can install|i can forge")
+
+
 async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
     """
-    Execute a skill by name. If not found, try the forge.
+    Execute a skill by name. If not found, try the market first, then the forge.
     Returns {"success": bool, "data": dict, "forged": bool, ...}
     """
     skill = skill_registry.get(name)
@@ -112,26 +190,51 @@ async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
             "forged": False,
         }
 
-    # Skill not found — try the market first, then the forge
-    log.info("Skill '%s' not found — attempting market search", name)
+    # Skill not found — find a market match, ASK, and install only on a yes.
+    log.info("Skill '%s' not found — looking for it in the market", name)
     try:
         from backend.config import config
         if config.get("skills", "market_search", default=True):
-            from backend.skills.market_search import search_and_install
-            installed_name = await search_and_install(
+            from backend.skills.market_search import find_match, install_match
+            candidate = await find_match(
                 name,
                 float(config.get("skills", "market_sim_threshold",
                                  default=0.45)))
-            if installed_name:
-                result = await skill_registry.execute(installed_name, params)
-                return {
-                    "success": result.success,
-                    "data": result.data,
-                    "error": result.error,
-                    "forged": False,
-                    "market": True,
-                    "installed_skill": installed_name,
-                }
+            if candidate:
+                if not _consented(None):
+                    # Nothing to install yet: ask, and let the answer come back
+                    # as the next turn. Returning here ENDS the acquisition —
+                    # the retry carries the consent.
+                    asked = await _ask_to_acquire(
+                        "install a market skill",
+                        str(candidate.get("name") or name),
+                        str(candidate.get("description") or "")[:200]
+                        + f" (from github.com/{candidate.get('repo')})",
+                        ["Install it", "Skip this"])
+                    return {
+                        "success": False,
+                        "data": {"requires_answer": True,
+                                 "candidate": candidate,
+                                 **{k: v for k, v in asked.items()
+                                    if k == "question_id"}},
+                        "error": asked.get("error") or
+                                 ("This needs your permission first: installing "
+                                  "a market skill runs code fetched from the "
+                                  "internet. Ask the user and wait for their "
+                                  "answer before installing anything."),
+                        "forged": False,
+                    }
+                installed_name = install_match(candidate)
+                if installed_name:
+                    result = await skill_registry.execute(installed_name, params)
+                    return {
+                        "success": result.success,
+                        "data": result.data,
+                        "error": result.error,
+                        "forged": False,
+                        "market": True,
+                        "installed_skill": installed_name,
+                    }
     except Exception as e:
         log.debug("market search failed: %s", e)
 
@@ -150,6 +253,27 @@ async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
                  if request else
                  f"A tool named '{name}' that accepts these parameters: "
                  f"{json.dumps(params)}")
+
+    # Forging WRITES AND RUNS new code, so it asks first for the same reason the
+    # market install does — arguably more, since the code did not exist anywhere
+    # until this moment and nothing has reviewed it.
+    if not _consented(None):
+        asked = await _ask_to_acquire(
+            "write and test a new skill",
+            f"a tool called '{name}'",
+            "It searches the web for a library, generates the code, and runs it "
+            "to check that it works.",
+            ["Write it", "Skip this"])
+        return {
+            "success": False,
+            "data": {"requires_answer": True,
+                     **{k: v for k, v in asked.items() if k == "question_id"}},
+            "error": asked.get("error") or
+                     ("This needs your permission first: forging writes new code "
+                      "and runs it. Ask the user and wait for their answer before "
+                      "generating anything."),
+            "forged": False,
+        }
 
     try:
         from backend.skills.forge import skill_forge

@@ -147,10 +147,18 @@ async def search(query: str, limit: int = 8) -> list[dict]:
     return out
 
 
-async def search_and_install(skill_name: str,
-                             threshold: float = 0.45) -> str | None:
-    """Search markets for a missing skill; install the best match.
-    Returns the installed skill's registry name, or None."""
+async def find_match(skill_name: str,
+                     threshold: float = 0.45) -> dict | None:
+    """The best market skill for this name, WITHOUT installing it.
+
+    Split out so a caller can ask the user before any code is fetched. The
+    install used to happen inside the search, which meant a match installed
+    itself and ran while the user was never told — the loop even set
+    `"market": True` and `"installed_skill"`, and nothing read either. Consent
+    needs a moment between finding and installing, and this is it.
+
+    Returns the candidate (name, repo, description, similarity, url) or None.
+    """
     from backend.config import config
     if not config.get("skills", "market_search", default=True):
         return None
@@ -178,13 +186,38 @@ async def search_and_install(skill_name: str,
     # to be a hardcoded 0.4, which meant the setting could not be tuned at all.
     if best is None or best_sim < threshold:
         return None
+    return {**best, "similarity": round(best_sim, 3)}
 
+
+def install_match(candidate: dict) -> str | None:
+    """Install a candidate `find_match` returned. Returns the skill's name.
+
+    Separate from the search so the decision to install is a distinct, callable
+    act rather than a side effect of looking.
+    """
+    repo = str((candidate or {}).get("repo") or "").strip()
+    if not repo:
+        return None
     try:
         from backend.skills.market import market
-        meta = market.install_from_github(best["repo"])
-        log.info("Installed market skill '%s' from %s (sim=%.2f)",
-                 meta["name"], best["repo"], best_sim)
+        meta = market.install_from_github(repo)
+        log.info("Installed market skill '%s' from %s", meta["name"], repo)
         return meta["name"]
     except Exception as e:
-        log.warning("Market install failed for %s: %s", skill_name, e)
+        log.warning("Market install failed for %s: %s", repo, e)
         return None
+
+
+async def search_and_install(skill_name: str,
+                             threshold: float = 0.45) -> str | None:
+    """Search markets for a missing skill; install the best match.
+
+    Kept as the one-call form for callers that have already established consent
+    (or do not need it, like the dashboard's own install button). It is now a
+    composition of `find_match` and `install_match`, so there is exactly one
+    implementation of each half and the pair cannot drift apart.
+    """
+    candidate = await find_match(skill_name, threshold)
+    if not candidate:
+        return None
+    return install_match(candidate)

@@ -284,10 +284,19 @@ def run_budget_tests():
     check("a tool question surfaces the discovery tools",
           {"find_mcp_server", "forge_skill", "list_forged"} & tool_ask,
           str(sorted(tool_ask)))
-    plain = skill_registry.filter_for_query("what is 2 plus 2", max_tools=6)
-    check("a plain question does not spend slots on discovery",
-          not ({"find_mcp_server", "forge_skill", "list_forged"} & plain),
+    # The discovery tools are offered for EVERY query, not only a tool-shaped
+    # one. This assertion used to say the opposite — "a plain question does not
+    # spend slots on discovery" — and that gate was the reason the agent looked
+    # passive: asked to do a task, it was never shown that it could look for a
+    # capability. The old check pinned the bug in place.
+    plain = skill_registry.filter_for_query("what is 2 plus 2", max_tools=16)
+    check("a plain question still offers the discovery tools",
+          {"find_mcp_server", "forge_skill", "list_forged"} & plain ==
+          {"find_mcp_server", "forge_skill", "list_forged"},
           str(sorted(plain)))
+    # They are cheap: the whole catalogue stays well inside the local window.
+    check("and offering them does not crowd out the core utilities",
+          {"read_file", "run_command"} <= plain, str(sorted(plain)))
 
     # A question about documentation must surface the wiki tools, or a local
     # model answers "I don't know" while the user's own wiki has the answer.
@@ -302,11 +311,13 @@ def run_budget_tests():
     check("a procedure question surfaces sop_lookup",
           "sop_lookup" in proc_ask, str(sorted(proc_ask)))
 
-    # The default max_tools is 10 (4 core + 6 relevant), not 6: enough for
-    # wiki, SOP, and a domain MCP tool to coexist.
+    # The default max_tools is 16: enough for wiki, SOP, a domain MCP tool and
+    # the three discovery tools to coexist. Raised from 10 when the discovery
+    # tools stopped being gated — reserving their slots at 10 pushed seven real
+    # skills out of reach, which check_reachability caught.
     default_q = skill_registry.filter_for_query("read a file and search the web")
-    check("default max_tools allows up to 10",
-          len(default_q) <= 10, f"len={len(default_q)}")
+    check("default max_tools allows up to 16",
+          len(default_q) <= 16, f"len={len(default_q)}")
 
 
 # ---- provider errors must explain themselves ---------------------------------
