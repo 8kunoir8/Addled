@@ -89,6 +89,7 @@ SUITES = [
     "check_forge_validation.py",
     "check_param_inference.py",
     "check_thinking_reply.py",
+    "check_pylibs_precedence.py",
     "check_reply_language.py",
     "check_packaging.py",
     "check_rtk.py",

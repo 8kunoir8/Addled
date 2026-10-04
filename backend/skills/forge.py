@@ -243,11 +243,64 @@ class SkillForge:
         self._forged: dict[str, SkillDefinition] = {}
         self._load_forged()
 
+    def _missing_dependency(self, path) -> str:
+        """The package a forged skill declares but cannot import, if any.
+
+        A skill is written with a `# Package: <name>` header. When the forge
+        could not install that package it used to carry on anyway and register
+        the skill regardless — so the file imports cleanly (the `import` is
+        inside the handler), loads on every start, and fails only when someone
+        calls it:
+
+            {'success': False, 'error': "Missing required package 'webcolors':
+             No module named 'webcolors'"}
+
+        That is inherited state, not a new bug: a skill forged by an older build
+        stays broken after an upgrade. Checking the declared package here is what
+        lets a bad skill be reported instead of quietly loading, and it makes an
+        existing broken skill discoverable rather than invisible.
+
+        Returns "" when the dependency is present or none is declared.
+        """
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace")[:400]
+        except OSError:
+            return ""
+        m = re.search(r"^#\s*Package:\s*(\S+)", head, re.MULTILINE)
+        if not m:
+            return ""
+        package = m.group(1).strip()
+        if not package or package.lower() in ("unknown", "none", "stdlib", "-"):
+            return ""
+        # The import name is usually the package name; a wheel can differ, so a
+        # miss here is only reported when the plain name is also absent.
+        mod = package.replace("-", "_").split("==")[0].split("[")[0]
+        try:
+            if importlib.util.find_spec(mod) is not None:
+                return ""
+        except (ImportError, ModuleNotFoundError, ValueError):
+            pass
+        return package
+
     def _load_forged(self):
-        """Load previously forged skills from disk."""
+        """Load previously forged skills from disk.
+
+        A skill whose declared package is missing is NOT registered. It cannot
+        work, so registering it only means every future start loads something
+        that will fail when called, and the failure looks like a broken skill
+        rather than the missing dependency it is.
+        """
         for f in FORGE_DIR.glob("*.py"):
             try:
                 name = f.stem
+                missing = self._missing_dependency(f)
+                if missing:
+                    log.warning(
+                        "Forged skill %s needs '%s', which is not installed — "
+                        "not loading it. Forge it again now that the forge "
+                        "installs dependencies into a writable location.",
+                        name, missing)
+                    continue
                 # Load the skill module dynamically
                 spec = importlib.util.spec_from_file_location(
                     f"forged_{name}", str(f))

@@ -208,6 +208,64 @@ def subdir(*parts: str) -> Path:
 PYLIBS_DIR = DATA_DIR / "pylibs"
 
 
+def _dist_info_names(directory: Path) -> set[str]:
+    """Package names with a `*.dist-info` in `directory`, normalised.
+
+    `-` and `_` mean the same thing to a wheel, so `huggingface_hub` and
+    `huggingface-hub` are one name here.
+    """
+    out: set[str] = set()
+    try:
+        for entry in directory.glob("*-*.dist-info"):
+            stem = entry.name[: -len(".dist-info")]
+            name, _, version = stem.rpartition("-")
+            if name and version:
+                out.add(name.lower().replace("_", "-"))
+    except OSError:
+        pass
+    return out
+
+def _duplicated_in_pylibs() -> set[str]:
+    """Packages present in BOTH `pylibs` and the bundled site-packages.
+
+    These are the ones where precedence matters, and `pylibs` must win.
+
+    Why `pylibs`, and not "whichever is newer". The bundled site-packages is a
+    snapshot taken when the installer was built; `pylibs` is filled at runtime
+    by the vision and browser installers, which resolve their own dependencies
+    together. When the two disagree, the bundled copy is the one that predates
+    the other installs — and it is not merely older, it CONTRADICTS them.
+    Measured on a real install, every package where the bundled copy was newer
+    was pinned by a `pylibs` package to the `pylibs` version:
+
+        browser_use     pypdf==6.16.2        bundled has 6.19.0
+        browser_use     requests==2.33.0     bundled has 2.34.2
+        browser_use     ollama==0.6.1        bundled has 0.6.2
+        browser_harness websockets==15.0.1   bundled has 17.0.1
+        browser_use     google-auth==2.48.0  bundled has 2.56.3
+
+    `google_genai` wants `websockets <17.0`, which the bundled 17.0.1 violates
+    outright. So "newer wins" would pick the incompatible copy, and the older
+    one is correct.
+
+    The bug this exists to fix, in the log on every start:
+
+        transformers embedder 'minilm' failed (cannot import name 'httpx' from
+        'huggingface_hub.utils' (...site-packages\\huggingface_hub\\utils\\...))
+
+    The bundled `huggingface_hub` 1.27.0 does not export `httpx`; the `pylibs`
+    1.33.0 does. `transformers` lives ONLY in `pylibs` and needs the newer one,
+    so it failed to import at all and the embedding backend silently degraded to
+    hashed n-grams.
+
+    This used to append `pylibs` unconditionally, on the principle that whatever
+    ships must keep winning. That is the right instinct for a package the app
+    genuinely depends on and a user fetch might downgrade — but it is the wrong
+    answer when the shipped snapshot is the stale side of the pair.
+    """
+    bundled = _dist_info_names(Path(sys.prefix) / "Lib" / "site-packages")
+    return _dist_info_names(PYLIBS_DIR) & bundled
+
 def add_pylibs_to_path() -> bool:
     """Put `PYLIBS_DIR` on `sys.path` so an install there can be imported.
 
@@ -217,28 +275,53 @@ def add_pylibs_to_path() -> bool:
     can write into is therefore only half the fix — it must also be somewhere
     the interpreter looks.
 
-    Idempotent, and appended rather than inserted: anything shipped with the app
-    must keep winning over an optional package fetched later.
+    Normally APPENDED, so a package shipped with the app keeps winning over an
+    optional one fetched later. The exception is a name that exists in both
+    directories: there the `pylibs` copy must come first, or the bundled copy
+    shadow it. See `_duplicated_in_pylibs`. Only when such a name exists is
+    `PYLIBS_DIR` inserted ahead of the bundled site-packages — a fresh install
+    with nothing installed yet is left exactly as it was.
 
-    Returns True when the directory is on the path, so the caller can say so.
+    Idempotent. Returns True when the directory is on the path.
     """
     if not PYLIBS_DIR.is_dir():
         try:
             PYLIBS_DIR.mkdir(parents=True, exist_ok=True)
         except OSError:
             return False
-    entry = str(PYLIBS_DIR)
-    if entry not in sys.path:
-        sys.path.append(entry)
-        # `find_spec` caches its misses per (name, path) — and a package imported
-        # once as "absent" would otherwise stay absent for the life of the
-        # process, so a freshly installed one needs the caches dropped.
-        try:
-            import importlib
 
-            importlib.invalidate_caches()
-        except Exception:  # noqa: BLE001 - never fatal
-            pass
+    entry = str(PYLIBS_DIR)
+    duplicated = _duplicated_in_pylibs()
+    if duplicated:
+        # A name in both places: the pylibs copy has to be found first. This
+        # cannot be done per package — putting `pylibs/pkg/` on sys.path makes
+        # Python look for `pkg` INSIDE it, which is a ModuleNotFoundError — so
+        # the directory itself moves ahead of the bundled site-packages.
+        if entry in sys.path:
+            sys.path.remove(entry)
+        # Ahead of the first bundled site-packages, but after the install root
+        # and anything the caller put there deliberately.
+        target = 0
+        for i, p in enumerate(sys.path):
+            if "site-packages" in p and "pylibs" not in p:
+                target = i
+                break
+            target = i + 1
+        sys.path.insert(target, entry)
+        log.info("pylibs precedes the bundled site-packages for %d package(s): %s",
+                 len(duplicated), ", ".join(sorted(duplicated)[:8]))
+    elif entry not in sys.path:
+        sys.path.append(entry)
+
+    # `find_spec` caches its misses per (name, path), and an import that already
+    # resolved to the bundled copy stays resolved — so the caches are dropped
+    # whether or not the order changed.
+    try:
+        import importlib
+
+        importlib.invalidate_caches()
+    except Exception:  # noqa: BLE001 - never fatal
+        pass
     return True
 
 
