@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import time
 from dataclasses import dataclass, field
 
@@ -45,6 +46,31 @@ class ActionResult:
     data: dict | None = None
 
 
+def _console_note_pending(approval_id: str,
+                          request: "ActionRequest") -> None:
+    """Record a queued command as `awaiting` on the console. Never raises.
+
+    A module function so the three queue sites cannot drift in how they report;
+    the panel reads the same shape whichever path raised the request.
+
+    Kept out of the console module because it needs the request's shape, and the
+    console deliberately knows nothing about actions - it takes plain strings so
+    it can be exercised without an executor.
+    """
+    try:
+        from backend.actions import console_log as console
+        console.record(console.make_entry(
+            command=ActionExecutor._console_command(request),
+            kind="shell",
+            tool=request.action_type,
+            status=console.AWAITING,
+            conversation=ActionExecutor._console_conversation(),
+            approval_id=approval_id,
+        ))
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not record pending command: %s", e)
+
+
 class ActionExecutor:
     """Unified dispatcher. Registers handlers for 55+ action types."""
 
@@ -66,6 +92,22 @@ class ActionExecutor:
         # out-of-tree caller from a build that had a waiting turn finds the
         # attribute it expects rather than an AttributeError.
         self._approval_waiters: dict[str, asyncio.Future] = {}
+
+    def _new_approval_id(self) -> str:
+        """A fresh approval id, unique beyond this process.
+
+        The counter alone was not enough: it starts at 0 with the process, so
+        `appr_1` was handed out again after every restart. A permission card is
+        answered BY ID, so a card left over from before a restart carried an id
+        that now named a different request -- and at best resolved to nothing,
+        which is the failure the user saw reported as "the approval never
+        arrived".
+
+        The counter is kept because it makes the log readable and ordered; the
+        random suffix is what stops a restart from reissuing a live id.
+        """
+        self._approval_counter += 1
+        return f"appr_{self._approval_counter}_{secrets.token_hex(4)}"
 
     def _lazy_init(self):
         if self._input is None:
@@ -191,6 +233,16 @@ class ActionExecutor:
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
         self._forget_origin(approval_id)
+        # Updates the row the gate already created, keyed on the same approval
+        # id. A refusal must be VISIBLE: a row that simply disappears is the
+        # silence that let a model claim a denied command was still pending.
+        try:
+            from backend.actions import console_log as _console
+            _console.update(approval_id, status=_console.DENIED,
+                            stderr="You denied this command.",
+                            duration_ms=0)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not record denial: %s", e)
         outcome = ActionResult(True, request.action_type,
                                summary="Action denied by user",
                                data={"approval_id": approval_id})
@@ -313,10 +365,10 @@ class ActionExecutor:
         if not self._gated(action_type, request.params):
             return await self.execute(request)
 
-        self._approval_counter += 1
-        approval_id = f"appr_{self._approval_counter}"
+        approval_id = self._new_approval_id()
         self._pending_approvals[approval_id] = request
         self._note_origin(approval_id, request)
+        _console_note_pending(approval_id, request)
         try:
             self._broadcast_approval_request(approval_id, request)
         except Exception as e:  # noqa: BLE001
@@ -417,10 +469,10 @@ class ActionExecutor:
         if self._is_granted(action_type, params or {}):
             return True
         request = ActionRequest(action_type=action_type, params=params or {})
-        self._approval_counter += 1
-        approval_id = f"appr_{self._approval_counter}"
+        approval_id = self._new_approval_id()
         self._pending_approvals[approval_id] = request
         self._note_origin(approval_id, request)
+        _console_note_pending(approval_id, request)
         try:
             self._broadcast_approval_request(approval_id, request)
         except Exception as e:  # noqa: BLE001
@@ -462,6 +514,30 @@ class ActionExecutor:
         """Tell the dashboard a decision is waiting, so it can be answered."""
         from backend.actions import approval_notice
         approval_notice.publish(approval_id, request.action_type, request.params)
+
+    @staticmethod
+    def _console_command(request: ActionRequest) -> str:
+        """The human-readable command behind a gated action.
+
+        A gated action is usually `run_command` and carries `command`; the
+        other content-classified one is a session write. Falling back to the
+        params keeps an unexpected action type from reporting an empty row.
+        """
+        params = request.params or {}
+        for key in ("command", "input", "text"):
+            value = str(params.get(key) or "").strip()
+            if value:
+                return value
+        return str(request.action_type)
+
+    @staticmethod
+    def _console_conversation() -> str | None:
+        """Which conversation asked, so the panel can filter to this chat."""
+        try:
+            from backend import chat_context
+            return chat_context.origin() or None
+        except Exception:  # noqa: BLE001
+            return None
 
     @staticmethod
     def _note_origin(approval_id: str, request: ActionRequest) -> None:
@@ -531,9 +607,14 @@ class ActionExecutor:
         # 2. Destruction gate classification
         if self._gate is not None and self._gated(request.action_type,
                                                   request.params):
-            self._approval_counter += 1
-            approval_id = f"appr_{self._approval_counter}"
+            approval_id = self._new_approval_id()
             self._pending_approvals[approval_id] = request
+            # Recorded for the same reason the two entry points do it: an
+            # approval with no origin cannot be answered from the chat that
+            # asked, which is the only way a bot can answer at all. This site
+            # queued the request and left no trace of who raised it.
+            self._note_origin(approval_id, request)
+            _console_note_pending(approval_id, request)
             return ActionResult(False, request.action_type,
                 error="Destructive action awaiting approval",
                 data={"approval_id": approval_id, "action": request.action_type,

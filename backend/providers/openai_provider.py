@@ -327,6 +327,17 @@ class OpenAIProvider(BaseProvider):
                                 content = delta.get("content", "")
                                 if content:
                                     yield content
+                                # A native tool call rides this same stream. A
+                                # stream is typed `AsyncIterator[str]`, so there
+                                # is no field to put it in - the sentinel is how
+                                # the reader learns a call happened, which stops
+                                # the round's narration being emitted as the
+                                # answer. Imported lazily to keep this module
+                                # free of a `skills` import at module load.
+                                if delta.get("tool_calls"):
+                                    from backend.skills.tool_loop import (
+                                        STREAM_TOOL_CALL)
+                                    yield STREAM_TOOL_CALL
                             except json.JSONDecodeError:
                                 continue
         except Exception:

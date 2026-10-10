@@ -49,6 +49,22 @@ _CHARS_PER_TOKEN_CONSERVATIVE = 6.0
 #   False     — the endpoint demonstrably drops it
 _KEEP, _DROP = True, False
 
+# Endpoints known to discard the `system` role, so the fold applies on the very
+# first turn rather than after one has been lost to it.
+#
+# Every entry here is a recording of a direct measurement, not a guess. The
+# module docstring carries the measurement for 9router: a 200-word system
+# message added exactly 0 `prompt_tokens` while the same text in a user turn
+# added 403, and its shipped bundle hoists system text into a variable it never
+# re-attaches. Learning that again costs a turn every time it is forgotten.
+#
+# A default only. `record` still overwrites it from the endpoint's own reported
+# token count, and that verdict is persisted -- so a fix in the proxy, or a
+# different build, is picked up automatically.
+_KNOWN_DROP = {
+    "9router",
+}
+
 _verdicts: dict[str, bool] = {}
 _lock = threading.Lock()
 
@@ -91,7 +107,13 @@ def _stored() -> dict:
 
 
 def verdict_for(provider) -> bool | None:
-    """The remembered verdict for this provider, or None if not yet known."""
+    """The remembered verdict for this provider, or None if not yet known.
+
+    Order matters: what was OBSERVED and stored wins, then the seed for an
+    endpoint already measured elsewhere, then unknown. The seed is consulted
+    last-but-one on purpose -- a stale seed must never overrule a real
+    measurement, or a proxy that fixed its behaviour would stay folded forever.
+    """
     key = _provider_key(provider)
     with _lock:
         if key in _verdicts:
@@ -102,6 +124,14 @@ def verdict_for(provider) -> bool | None:
         with _lock:
             _verdicts[key] = val
         return val
+    if key in _KNOWN_DROP:
+        # No measurement on this machine yet, but this endpoint is known to drop
+        # the system role. Acting on it now is what stops the FIRST turn of a
+        # fresh install -- and of every launch made before a detection -- from
+        # silently talking to a model that was never given its tool catalogue.
+        with _lock:
+            _verdicts[key] = _DROP
+        return _DROP
     return None
 
 

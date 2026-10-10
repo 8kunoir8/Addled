@@ -986,6 +986,62 @@ def _pending_for(params: dict) -> list[dict]:
         return []
 
 
+def _approval_state_note(params: dict) -> str:
+    """The truth about what is waiting on the user, for the model's prompt.
+
+    Reported live on 2026-10-10: the model answered "I asked to run two commands
+    ... and they're still waiting on your approval. The card is above the
+    composer" when NOTHING had run and NOTHING was pending — no tool call had
+    been made at all that turn. The user went looking for a permission card
+    that did not exist, which is indistinguishable from a broken UI.
+
+    The console makes that lie *visible*; this stops the lie forming. The model
+    cannot see the approval queue, so it invented one. Told the real count —
+    including a count of zero — a fabricated queue contradicts the prompt it is
+    answering under, and the false claim is denied the room to appear.
+
+    Returns "" when the state cannot be read, so a failure here is simply an
+    unstated fact rather than a broken turn. The distinction matters and is the
+    reason this does not lean on `_pending_for`: that helper swallows a failure
+    and returns `[]`, which is indistinguishable from a genuinely empty queue -
+    and reporting an unreadable queue as "nothing is waiting" would state a
+    falsehood of exactly the kind this exists to stop. So the store is read
+    directly here and an error yields no note at all.
+    """
+    try:
+        from backend.approvals import pending
+        from backend import chat_sources, chat_context
+        ambient = chat_context.origin()
+        source = chat_sources.normalise(params.get("source")
+                                        or ambient.get("source"))
+        conversation = str(params.get("conversation")
+                           or params.get("conversationId")
+                           or ambient.get("conversation") or "")
+        if not conversation:
+            return ""
+        waiting = list(pending.for_conversation(source, conversation))
+    except Exception as e:  # noqa: BLE001
+        # Unreadable is UNKNOWN, not empty. Say nothing rather than assert none.
+        log.debug("could not read the pending-approval state: %s", e)
+        return ""
+    if waiting:
+        names = []
+        for e in waiting[:5]:
+            label = e.get("action_type") or e.get("name") or "a command"
+            command = e.get("command")
+            names.append(f"{label}" + (f" (`{command}`)" if command else ""))
+        more = (f" (and {len(waiting) - 5} more)" if len(waiting) > 5 else "")
+        return (
+            "\n\n[Awaiting approval] These commands are queued and have NOT "
+            "run yet, waiting on the user to approve them in the dashboard: "
+            + "; ".join(names) + more + ".")
+    return (
+        "\n\n[Approvals] Nothing is waiting on the user's approval right now. "
+        "Do not tell the user a command is queued or pending unless you have "
+        "just called a tool and this turn returned `requires_approval`. If "
+        "nothing has run, say so.")
+
+
 def _questions_for(params: dict) -> list[dict]:
     """Questions this turn left waiting, described for a caller to render.
 
@@ -1951,6 +2007,9 @@ async def _run_chat_pipeline_inner(
             except Exception as e:  # noqa: BLE001
                 log.debug("chat.delta broadcast failed: %s", e)
 
+        sys_prompt = sys_prompt + _approval_state_note(params)
+
+
         # A caller with no UI (a check, a bot, the Code page's own planner) gets
         # no callback at all, so nothing is queued and nothing is broadcast.
         _on_delta = _emit_delta if params.get("stream") else None
@@ -2069,6 +2128,14 @@ async def _run_chat_pipeline_inner(
                 "memoryRecall": bool(memory_ctx),
                 "role": role,
                 "model": route_model or "",
+                # Whether this turn STOPPED to wait for the user, carried out
+                # rather than dropped. `tool_loop` sets both flags and its own
+                # comment says the pipeline reads them; only the answer half
+                # ever was. Without this a turn that stopped for a decision is
+                # reported as a finished exchange, so a caller cannot tell "it
+                # answered" from "it is waiting on you".
+                "awaitingApproval": bool(result.get("awaiting_approval")),
+                "awaitingAnswer": bool(result.get("awaiting_answer")),
             }
         return {"response": response_text,
                 "tokens": result.get("tokens", 0), "conversationId": None,
@@ -2081,6 +2148,15 @@ async def _run_chat_pipeline_inner(
 async def start_ws_server(host: str = "127.0.0.1", port: int = 9876):
     """Start the singleton WebSocket server."""
     _register_default_handlers()
+    # Hand the console a way to reach the socket. Injected rather than imported
+    # because the console module must not import this one - the cycle would
+    # resolve unpredictably depending on which side was imported first.
+    try:
+        from backend.actions import console_log as _console
+        _console.set_broadcast(
+            lambda method, params: _server.broadcast_nowait(method, params))
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not wire the console broadcast: %s", e)
     await _server.start(host, port)
 
 
@@ -2565,6 +2641,13 @@ def _register_default_handlers():
         # to carry only a count, so a bot was told "approval needed" with no id
         # to answer with — it could not build a button even if it wanted to.
         if isinstance(result, dict):
+            # Whether the TURN is waiting, as distinct from what is queued: the
+            # two lists above say "there is a card to draw", these say "the
+            # agent stopped mid-task for it". A bridge that only reads the
+            # lists cannot tell an interruption from a completed turn that
+            # happens to have something pending from earlier.
+            result["awaitingApproval"] = bool(result.get("awaitingApproval"))
+            result["awaitingAnswer"] = bool(result.get("awaitingAnswer"))
             try:
                 result["pendingApprovals"] = _pending_for(params)
             except Exception as e:  # noqa: BLE001
@@ -2684,6 +2767,85 @@ def _register_default_handlers():
         pending = executor.pending_approvals()
         return {"success": True, "pending": pending, "count": len(pending)}
 
+    async def console_list(params: dict, ws) -> dict:
+        """Everything the console has recorded, oldest first.
+
+        Read by a dashboard that has just opened or reloaded. Without it the
+        panel would show only what happened while the tab was already watching,
+        which reads as "Addled has done nothing" to someone who just restarted
+        - the same false silence this feature exists to remove.
+        """
+        from backend.actions import console_log as console
+        limit = params.get("limit")
+        try:
+            limit = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            limit = None
+        snap = console.snapshot(
+            conversation=params.get("conversation") or None,
+            limit=limit,
+        )
+        return {"success": True, **snap}
+
+    async def console_clear(params: dict, ws) -> dict:
+        """Forget the recorded commands - all of them, or one conversation."""
+        from backend.actions import console_log as console
+        removed = console.clear(params.get("conversation") or None)
+        return {"success": True, "removed": removed}
+
+    async def console_run(params: dict, ws) -> dict:
+        """Run a command the USER typed into the console.
+
+        Goes through the session layer the model uses, so there is one shell and
+        one behaviour rather than a second, private execution path that would
+        drift from the first. Output is recorded by the session's own console
+        hook, so a typed command appears on the panel exactly like a model-run
+        one.
+        """
+        command = str(params.get("command") or "").strip()
+        if not command:
+            return {"success": False, "error": "No command given."}
+        from backend.actions import session as session_mod
+        name = str(params.get("session") or "console").strip() or "console"
+        # Opened on demand: the prompt has to work as the first thing a user
+        # does, without a separate step they were never told about.
+        opened = await session_mod.sessions.open(name)
+        if not opened.get("success"):
+            return {"success": False, "error": opened.get("error") or "No shell."}
+        try:
+            wait_s = float(params.get("wait_s") or 30.0)
+        except (TypeError, ValueError):
+            wait_s = 30.0
+        result = await session_mod.sessions.send(name, command,
+                                                 wait_s=min(wait_s, 600.0))
+        return {"success": bool(result.get("success")),
+                "stdout": result.get("stdout") or "",
+                "stderr": result.get("stderr") or "",
+                "exit_code": result.get("exit_code"),
+                "running": bool(result.get("running")),
+                "session": name,
+                "error": result.get("error")}
+
+    async def console_input(params: dict, ws) -> dict:
+        """Send raw input to a running session - the answer to a prompt.
+
+        Needed for the thing that makes a terminal usable: a command that stops
+        to ask a question. `console_run` waits for the exit marker and gives up;
+        this writes the reply and collects what comes next.
+        """
+        text = str(params.get("input") or "")
+        if not text:
+            return {"success": False, "error": "No input given."}
+        from backend.actions import session as session_mod
+        name = str(params.get("session") or "console").strip() or "console"
+        result = await session_mod.sessions.send(name, text)
+        return {"success": bool(result.get("success")),
+                "stdout": result.get("stdout") or "",
+                "exit_code": result.get("exit_code"),
+                "running": bool(result.get("running")),
+                "session": name,
+                "error": result.get("error")}
+
     async def approvals_list(params: dict, ws) -> dict:
         """Everything granted standing permission, plus what is still queued.
 
@@ -2739,10 +2901,34 @@ def _register_default_handlers():
                     "error": ("name is required, or an approvalId whose "
                               "request is still known")}
 
+        # A content-classified action is remembered by the COMMAND, not by
+        # the skill. `run_command` cannot answer for itself -- the danger is in
+        # the argument -- so granting it by name released every later command,
+        # including ones the user was never shown. `_is_granted` already reads a
+        # command-keyed grant from the TOOL bucket; this is what puts one there.
+        grant_kind, grant_name = kind, name
+        try:
+            from backend.approvals import policy as _p
+            if _p.is_protected(name):
+                entry = pending_origins.get(approval_id) if approval_id else None
+                command = ""
+                if entry:
+                    command = str(entry.get("command") or "").strip()
+                if not command:
+                    from backend.actions.executor import executor as _ex
+                    _req = _ex._pending_approvals.get(approval_id)
+                    if _req is not None:
+                        command = str((_req.params or {}).get("command") or "").strip()
+                if command:
+                    # The command the user was shown, and only that one.
+                    grant_kind, grant_name = _p.TOOL, command
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not key the grant to a command: %s", e)
+
         if session_only:
-            result = policy.allow_for_session(kind, name)
+            result = policy.allow_for_session(grant_kind, grant_name)
         else:
-            result = policy.always_allow(kind, name)
+            result = policy.always_allow(grant_kind, grant_name)
         if not result.get("success"):
             result.setdefault("success", False)
             return result
@@ -6169,6 +6355,10 @@ def _register_default_handlers():
     _server.register("action.approve", action_approve)
     _server.register("action.deny", action_deny)
     _server.register("action.pending", action_pending)
+    _server.register("console.list", console_list)
+    _server.register("console.clear", console_clear)
+    _server.register("console.run", console_run)
+    _server.register("console.input", console_input)
     _server.register("approvals.list", approvals_list)
     _server.register("approvals.alwaysAllow", approvals_always_allow)
     _server.register("approvals.revoke", approvals_revoke)

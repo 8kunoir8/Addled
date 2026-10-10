@@ -91,6 +91,13 @@ class LMStudioProvider(BaseProvider):
                             content = delta.get("content", "")
                             if content:
                                 yield content
+                            # A native tool call shares this stream; the
+                            # sentinel is the only channel a `str` iterator has.
+                            # See STREAM_TOOL_CALL.
+                            if delta.get("tool_calls"):
+                                from backend.skills.tool_loop import (
+                                    STREAM_TOOL_CALL)
+                                yield STREAM_TOOL_CALL
                         except json.JSONDecodeError:
                             continue
         except httpx.ConnectError:

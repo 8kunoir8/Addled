@@ -1023,9 +1023,23 @@ class SkillRegistry:
                                          "invalid_params": True})
 
         if getattr(skill, "requires_approval", False):
-            result = await self._execute_gated(name, skill, params)
-            if result is not None:
-                return result
+            # The flag says "this skill is one that can ask", not "ask every
+            # time". For a skill whose danger depends on its ARGUMENTS --
+            # `run_command` and `session_send` are both in
+            # `DESTRUCTIVE_ACTIONS` for this reason -- the gate has already
+            # decided, and letting its answer through is what stops
+            # `Get-Command ffmpeg` from raising a permission card.
+            #
+            # A skill the gate says is safe here is one whose danger cannot be
+            # read from the request at all; those still ask below.
+            #
+            # Falling through, NOT `return None`: this function IS the caller,
+            # and returning here would skip the handler entirely -- a safe
+            # command would run nothing and report nothing.
+            if self._needs_approval(name, params):
+                result = await self._execute_gated(name, skill, params)
+                if result is not None:
+                    return result
 
         try:
             result = await skill.handler(params)
@@ -1041,6 +1055,31 @@ class SkillRegistry:
         except Exception as e:
             log.exception("Skill %s failed", name)
             return SkillResult(False, name, error=str(e))
+
+    @staticmethod
+    def _needs_approval(name: str, params: dict) -> bool:
+        """Does the gate want to ask for THIS call?
+
+        True for anything the gate cannot clear: a name in `DESTRUCTIVE_ACTIONS`
+        that is not content-classified, an unreadable gate, or a call whose
+        arguments the classifier reads as destructive.
+
+        Never raises, and an error means ASK rather than proceed -- a gate that
+        cannot be consulted must not be treated as permission, which is the same
+        direction `_is_granted` already takes.
+        """
+        try:
+            from backend.actions.executor import executor
+            executor._lazy_init()
+            gate = executor._gate
+            if gate is None:
+                return True
+            # The skill's name IS the action type the gate classifies;
+            # `run_command` and `session_send` are matched by name there.
+            return bool(gate.requires_approval(name, params or {}))
+        except Exception as e:  # noqa: BLE001
+            log.debug("gate could not classify %s (%s); asking", name, e)
+            return True
 
     async def _execute_gated(self, name: str, skill,
                              params: dict) -> SkillResult | None:

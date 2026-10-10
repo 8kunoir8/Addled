@@ -1,3 +1,97 @@
+# Addled 1.0.38
+
+**A terminal you can see, and the reason you could not see it.** The dashboard
+gains a command console — every terminal command Addled runs, with its output,
+streamed to the page live. Building it surfaced a bug that had been quietly
+eating whole turns: when Addled was asked to use the terminal it *announced* the
+work in prose and then called nothing at all. No permission card, no output,
+nothing on the console — because there was genuinely nothing. That is fixed, and
+so is the follow-up failure it exposed.
+
+## The command console
+
+A panel that shows terminal work as it happens, rather than telling you later
+that it happened:
+
+- **Every command, as it runs.** `chat.command` carries the command line, its
+  status (`running` / `ok` / `failed` / `awaiting` / `denied`) and its output.
+  The panel updates on the same WebSocket the rest of the dashboard uses.
+- **Two layers, honestly kept apart.** Read-only commands stream straight
+  through. A command that needs approval appears as *awaiting* immediately, then
+  resolves to *ok* or *denied* on the same row once you decide — so the console
+  never claims a result for something you have not allowed yet.
+- **Replayable.** `console.list` reads back what happened in a conversation, so
+  opening the page late does not mean seeing nothing.
+- **Redacted.** Secret-shaped values are stripped before anything leaves the
+  backend, the same rules the rest of Addled already applies.
+
+## The bug the console exposed
+
+Reported plainly: *"when Addled receives a terminal-use task it's not working,
+not showing permission ask and not shown on dashboard terminal."* Each of those
+was real, and each had a different cause:
+
+1. **A streamed tool call was dropped.** The provider read `delta["content"]`
+   and discarded `delta["tool_calls"]`. The live gateway streams *prose plus a
+   real tool call* in one delta, so the loop saw only the prose and emitted the
+   announcement as the answer. A provider now signals that a delta carried a
+   call, and the round re-runs on the path that actually executes it.
+2. **A command fenced off with a leading comment was refused.** This model
+   writes `# check the CLI` above its command; the parser treated the whole
+   block as a comment. Leading comments are now stepped over.
+3. **The streamed round skipped the "you said you would, but nothing ran" check
+   entirely** — the check sat below an early return that streaming always took.
+4. **That same check was also disabled on the dashboard**, gated on a tool
+   *filter* that is `None` whenever every skill is enabled. It now asks the real
+   question: was a catalogue given to the model?
+5. **The check itself matched the wrong words.** It looked for a fixed list of
+   verbs, and the model wrote "Deleting…", "Firing…", "Going ahead with…" — none
+   of them on the list. Detection is now grammatical (a gerund with an immediacy
+   marker, a stated intent, a few idioms) rather than a word list the model can
+   outrun.
+
+## The follow-up round that failed with a 400
+
+Once calls actually ran, the *second* request of a turn — the one carrying the
+result back — was rejected by the gateway:
+
+```
+HTTP 400 {"code":11133,"msg":"Invalid request parameters",
+          "extError":{"code":"model_param_invalid"}}
+```
+
+The OpenAI tool protocol is a **pair**: a tool result is only valid if it
+answers an assistant tool call with the **same id**. Addled sent results with no
+id, in two ways — a call the model wrote as text (which is how every turn on this
+gateway arrives: it is not in the native list, so it takes the prompt path
+*every* time, and those parsed calls have no id), and a native call from a
+gateway that omits one. Ids are now **made** when the model does not supply one,
+and the assistant call is built from the calls that actually executed, so the
+pair is complete by construction on every path. An id the gateway *did* supply
+is reused verbatim.
+
+## Notes
+
+- An upgrade keeps your setup: settings, memory, skills, tools, MCP servers and
+  the swarm roster all live beside the install, and the installer ships no copy
+  of any of them.
+- Nothing about the console reaches the model. It is a record of what ran, not a
+  prompt.
+
+## Verification
+
+107 check suites pass (one is skipped here because this workspace is not configured for it, and `check_reachability.py` fails on a clean checkout too — unchanged by this release). The fixes were each driven against the **installed app over its real
+WebSocket**, not just in unit tests:
+
+- A benign terminal task records `chat.command status=ok tool=run_command` with
+  real output, and the reply is the real answer.
+- A destructive, explicitly authorised command records `status=awaiting` with an
+  `approval_id` — the permission card that was missing — and reports the true
+  state instead of claiming it was already running.
+- The id-pairing fix was checked against the live gateway itself: the messages
+  built before the fix return **HTTP 400 code 11133**; the same messages after it
+  return **HTTP 200**.
+
 # Addled 1.0.37
 
 **Build your own tools.** Settings → CLI Tools lets you ask Addled to write a

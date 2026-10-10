@@ -282,6 +282,84 @@ def run():
         executor._pending_approvals.clear()
         executor._approval_waiters.clear()
 
+        # ---- a session grant remembers the COMMAND, not the skill -----------
+        # Exercised through the real handler, because the defect was in what the
+        # BUTTON records -- `approvals_always_allow` was storing the skill name
+        # under the skill bucket, and `_gated("run_command", ...)` then released
+        # every command for the rest of the sitting.
+        policy.clear_session()
+        import backend.ws_server as _W
+        from backend.approvals import pending as _origins
+        from backend.actions.executor import executor as _ex2
+        from backend import chat_context as _ctx
+
+        async def _grant_for_one_command():
+            _origins.clear()
+            _ex2._pending_approvals.clear()
+            _ctx.set_origin("dashboard", "conv_grant_probe")
+            _r = await _ex2.request_approval(
+                "run_command", {"command": "Get-ChildItem C:"})
+            _aid = _r["approval_id"]
+            _W._register_default_handlers()
+            _h = _W._server._handlers["approvals.alwaysAllow"]
+            _e = _origins.get(_aid) or {}
+            _res = await _h({"kind": _e.get("kind"), "name": "run_command",
+                             "approvalId": _aid, "session": True}, None)
+            return _res
+
+        _granted = asyncio.run(_grant_for_one_command())
+        check("the grant is keyed to the command, not the skill",
+              _granted.get("kind") == "tool"
+              and "Get-ChildItem" in str(_granted.get("name")),
+              f"granted {_granted.get('kind')}={_granted.get('name')!r}")
+
+        check("the command the user allowed is remembered",
+              _ex2._gated("run_command",
+                          {"command": "Get-ChildItem C:"}) is False,
+              "the approved command prompts again, so the grant is useless")
+        # NOT "another safe command is gated": a harmless command is never
+        # gated whatever the grants, because the gate reads the CONTENT. What
+        # the grant must not do is cover a command the gate WOULD have asked
+        # about -- which is the destructive set asserted below.
+        check("a harmless command is not gated either way",
+              _ex2._gated("run_command",
+                          {"command": "Get-Command ffmpeg"}) is False,
+              "a safe command is being gated")
+        for _danger in ("Remove-Item C:\\x -Recurse -Force", "format C:",
+                        "rm -rf /tmp/x"):
+            check(f"and a destructive one is still gated: {_danger!r}",
+                  _ex2._gated("run_command", {"command": _danger}) is True,
+                  "the destructive command was released by a name-keyed grant")
+        policy.clear_session()
+
+        # ---- an approval id is not reusable across a restart ----------------
+        # The checks above all pass with an id that repeats after every
+        # restart, because they only ever look inside one process. A restart is
+        # two executors, and the id has to differ between them or a card from
+        # before the restart addresses a request it never saw.
+        from backend.actions.executor import ActionExecutor as _AE
+        _old, _new = _AE(), _AE()
+        _old_ids = {_old._new_approval_id() for _ in range(3)}
+        _new_ids = {_new._new_approval_id() for _ in range(3)}
+        check("approval ids do not repeat across a restart",
+              not (_old_ids & _new_ids),
+              f"a fresh process reissued {_old_ids & _new_ids}")
+
+        # A stale id must be UNKNOWN, not "some other live request".
+        _stale = sorted(_old_ids)[0]
+        _kept = _new._new_approval_id()
+        from backend.actions.executor import ActionRequest as _AR
+        _new._pending_approvals[_kept] = _AR(
+            action_type="run_command", params={"command": "echo hi"})
+        _res = asyncio.run(_new.approve(_stale))
+        check("a stale approval id resolves to nothing",
+              _res.success is False and "No pending approval" in (_res.error or ""),
+              f"success={_res.success} error={_res.error}")
+        check("and it did not consume the live request",
+              _kept in _new._pending_approvals,
+              "a stale id released a request it did not name")
+        _new._pending_approvals.clear()
+
         # ---- the executor consults the policy ------------------------------
         from backend.actions.executor import executor
         policy.clear()
@@ -405,6 +483,75 @@ def run():
         finally:
             approval_notice._live_ids = real_import
             approval_notice._pending.clear()
+
+        # ------------------------------------------------- the prompt's truth
+        # The model cannot see the approval queue, so on 2026-10-10 it invented
+        # one: "two commands are still waiting on your approval" when nothing
+        # had run and nothing was pending, sending the user to look for a card
+        # that did not exist. The turn now carries the real state, and a count
+        # of zero is stated as zero so the fabricated queue contradicts the
+        # prompt it is answering under.
+
+        from backend import ws_server
+
+        # The note has to actually reach the prompt. A correct function nobody
+        # calls is the failure mode this guards against - the same shape as a
+        # guard that is defined and never consulted.
+        _ws_src = open(os.path.join(ROOT, "backend", "ws_server.py"),
+                       encoding="utf-8", errors="replace").read()
+        check("the approval state is wired into the turn's prompt",
+              "sys_prompt = sys_prompt + _approval_state_note(params)" in _ws_src,
+              "the note is built but never added to the prompt - it would "
+              "change nothing the model sees")
+
+        empty = ws_server._approval_state_note({"source": "chat",
+                                                "conversation": "conv_probe_none"})
+        check("with nothing pending, the prompt says nothing is waiting",
+              "Nothing is waiting" in empty,
+              f"got {empty!r} — a false 'still pending' claim would go uncorrected")
+        check("and it forbids claiming a queue",
+              "Do not tell the user a command is queued" in empty,
+              f"got {empty!r}")
+
+        # With something really queued, the note names it — so a genuine wait is
+        # reported rather than denied, which is the other direction of the same
+        # fact and just as important.
+        from backend.approvals import pending as _pend
+        _real_for_conv = _pend.for_conversation
+        _pend.for_conversation = lambda source, conversation: [{
+            "approval_id": "appr_probe_queue", "action_type": "run_command",
+            "kind": "tool", "grantable": False,
+            "command": "Remove-Item -Recurse -Force ./build",
+        }]
+        try:
+            queued = ws_server._approval_state_note(
+                {"source": "chat", "conversation": "conv_probe_q"})
+        finally:
+            _pend.for_conversation = _real_for_conv
+        check("with something pending, the prompt names it",
+              "Remove-Item" in queued and "NOT run" in queued,
+              f"got {queued!r}")
+        check("and a real queue is not denied",
+              "Nothing is waiting" not in queued,
+              f"got {queued!r}")
+
+        # The note must never cost the turn: an unreadable queue yields "".
+        _real2 = _pend.for_conversation
+
+        def _boom(source, conversation):
+            raise RuntimeError("queue unreadable")
+
+        _pend.for_conversation = _boom
+        try:
+            broken = ws_server._approval_state_note(
+                {"source": "chat", "conversation": "conv_probe_q2"})
+        finally:
+            _pend.for_conversation = _real2
+        check("an unreadable approval queue does not break the turn",
+              broken == "", f"got {broken!r}")
+        check("and an unreadable queue is NOT reported as 'nothing pending'",
+              "Nothing is waiting" not in broken,
+              f"got {broken!r} — unknown state must not be stated as empty")
     finally:
         # Put the real list back, whatever the checks did to it.
         policy.clear()

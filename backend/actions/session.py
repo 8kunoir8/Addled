@@ -81,6 +81,33 @@ class Session:
             "idleSeconds": int(time.time() - self.last_used),
         }
 
+def _console_record(command: str, *, session: str, status: str,
+                    stdout: str = "", stderr: str = "",
+                    exit_code: int | None = None,
+                    duration_ms: int | None = None) -> None:
+    """Report a session command to the console. Never raises.
+
+    A session is the same act as `run_command` - a command on the user's
+    machine, with input and output - so it belongs on the same panel, in the
+    same shape. Reported as kind="session" so the panel can say which of the
+    two it was without guessing from the text.
+    """
+    try:
+        from backend.actions import console_log as console
+        entry = console.make_entry(
+            command=command, kind="session", tool="session_send",
+            status=status,
+        )
+        entry["session"] = session
+        entry["stdout"] = stdout or ""
+        entry["stderr"] = stderr or ""
+        entry["exit_code"] = exit_code
+        entry["duration_ms"] = duration_ms
+        console.record(entry)
+    except Exception as e:  # noqa: BLE001
+        log.debug("console session capture failed: %s", e)
+
+
 class SessionManager:
     """Owns the live shells. One per process; see the module-level `sessions`."""
 
@@ -161,6 +188,7 @@ class SessionManager:
             trailer = f"; echo \"{marker} $?\""
         payload = command.rstrip("\n") + "\n" + trailer.lstrip("; ") + "\n"
 
+        _t0 = time.time()
         async with sess.lock:
             sess.last_used = time.time()
             sess.buffer = ""
@@ -189,6 +217,10 @@ class SessionManager:
             except (ValueError, IndexError):
                 exit_code = 0
             stdout = out[:OUTPUT_CAP]
+            _console_record(command, session=name,
+                            status="ok" if exit_code in (0, None) else "failed",
+                            stdout=stdout, exit_code=exit_code,
+                            duration_ms=int((time.time() - _t0) * 1000))
             return {
                 "success": True,
                 "stdout": stdout,
@@ -201,6 +233,8 @@ class SessionManager:
         # No marker: either it is slow, or it is an interactive program waiting
         # for input. Say which, so the model does not just retry blindly.
         got = sess.buffer[:OUTPUT_CAP]
+        _console_record(command, session=name, status="running", stdout=got,
+                        duration_ms=int((time.time() - _t0) * 1000))
         return {
             "success": True,
             "stdout": got,
@@ -222,6 +256,9 @@ class SessionManager:
         async with sess.lock:
             out = sess.buffer
             sess.buffer = ""
+        if out.strip():
+            _console_record("(read)", session=name, status="ok",
+                            stdout=out[:OUTPUT_CAP])
         return {"success": True, "stdout": out[:OUTPUT_CAP],
                 "session": sess.info()}
 

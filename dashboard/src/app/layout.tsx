@@ -15,6 +15,8 @@ import {
 } from '@/lib/questionsStore';
 import ApprovalCard from '@/components/ApprovalCard';
 import QuestionCard from '@/components/QuestionCard';
+import CommandConsole from '@/components/CommandConsole';
+import { upsertCommand, type CommandEntry } from '@/lib/consoleStore';
 import "./globals.css";
 
 const NAV_ITEMS = [
@@ -26,6 +28,7 @@ const NAV_ITEMS = [
   { href: '/skills', label: 'Skills', icon: '🧩' },
   { href: '/goals', label: 'Goals', icon: '🎯' },
   { href: '/code', label: 'Code', icon: '💻' },
+  { href: '/console', label: 'Console', icon: '▶' },
   { href: '/swarm', label: 'Swarm', icon: '🐝' },
   { href: '/browser', label: 'Browser', icon: '🌐' },
   { href: '/calendar', label: 'Calendar', icon: '📅' },
@@ -99,6 +102,18 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   // always mounted and `onNotification` keeps one handler per method.
   useEffect(() => onNotification('action.approvalResolved', (p: any) => {
     if (p?.approval_id) dropApproval(String(p.approval_id));
+  }), [onNotification]);
+
+  // Every command Addled runs, and every one it did not.
+  //
+  // Owned by the layout for the same reason approvals are: `onNotification`
+  // keeps exactly ONE handler per method, so a page-level subscriber would be
+  // replaced by whichever page mounted next, and a command run while that
+  // happened would be lost from the console. The drawer and the /console page
+  // both read the store this writes to.
+  useEffect(() => onNotification('chat.command', (p: any) => {
+    if (!p?.id) return;
+    upsertCommand(p as CommandEntry);
   }), [onNotification]);
 
   useEffect(() => subscribeApprovals(setApprovals), []);
@@ -289,6 +304,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               {children}
             </main>
           </div>
+
+        {/* The console drawer. Every page but its own full view, so a command
+            run from the Code page or a swarm is not silent. */}
+        {pathname !== '/console' && <CommandConsole variant="drawer" />}
 
         {/* Permission request, for pages that are not the chat.
             The chat renders its own copy in the message stream, next to the

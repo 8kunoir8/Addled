@@ -563,6 +563,49 @@ _cfg.load()          # put the real settings back in memory
 import shutil as _shutil  # noqa: E402
 _shutil.rmtree(_tmp_cfg.parent, ignore_errors=True)
 
+# ---- the seam: the classifier must actually be REACHED ----------------------
+# Everything above tests the classifier in isolation. The bug the user hit was
+# that `run_command` never got there: the skill's `requires_approval=True` sent
+# every call to the approval path, so a read-only `Get-Command` asked for
+# permission and the destructive path was the only one exercised. A gate check
+# that only asks the gate cannot see that.
+#
+# Both directions are asserted, because either one alone is passed by a broken
+# build: "no prompt" is also true if nothing is gated, and "prompts" is also
+# true if everything is.
+print()
+print("The skill path reaches the gate (and still stops the dangerous ones)")
+import asyncio as _aio  # noqa: E402
+from backend.skills.registry import skill_registry as _reg  # noqa: E402
+
+
+def _run(name, params):
+    return _aio.new_event_loop().run_until_complete(_reg.execute(name, params))
+
+
+_safe = _run("run_command", {"command": "Get-Command ffmpeg -ErrorAction SilentlyContinue"})
+check("a read-only command RUNS through the registry",
+      getattr(_safe, "success", False) is True,
+      f"success={getattr(_safe, 'success', None)} -- the gate should have cleared it")
+check("and it did not raise a permission card",
+      not (getattr(_safe, "data", None) or {}).get("requires_approval"),
+      str(getattr(_safe, "data", None))[:160])
+
+_danger = _run("run_command", {"command": "Remove-Item C:\\__no_such_probe__ -Recurse -Force"})
+check("a destructive command is REFUSED with requires_approval",
+      (getattr(_danger, "data", None) or {}).get("requires_approval") is True,
+      f"data={str(getattr(_danger, 'data', None))[:160]}")
+check("and it did not run",
+      getattr(_danger, "success", None) is False,
+      "a gated command must not report success")
+
+# A name whose danger is not in its arguments keeps asking, so the fix cannot be
+# mistaken for "the flag no longer matters".
+_uncond = _run("delete_file", {"path": "C:\\__no_such_probe__.txt"})
+check("a skill gated by NAME still asks",
+      (getattr(_uncond, "data", None) or {}).get("requires_approval") is True,
+      f"data={str(getattr(_uncond, 'data', None))[:160]}")
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")

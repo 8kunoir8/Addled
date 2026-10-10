@@ -6,13 +6,18 @@ that carries narration would print text the model itself discards two seconds
 later. Both look like working streaming. Neither is.
 
 There is a second trap, and it is the reason this check drives the real
-`chat_with_tools` rather than the helper. The provider API makes streaming a
-question of WHICH round, not whether to stream: `chat_stream` yields `str` only
-(see `deepseek_provider.chat_stream`, which reads `delta["content"]` and nothing
-else), so a streamed round physically cannot report a tool call. A tool round
-offered to the stream would therefore never call its tool - it would answer in
-prose and the turn would silently stop working. So this check asserts a tool
-round emits ZERO deltas and still calls its tool.
+`chat_with_tools` rather than the helper. `chat_stream` yields `str` only, so a
+streamed round used to be able to say nothing about a NATIVE tool call — and the
+OpenAI-compatible providers read `delta["content"]` and dropped
+`delta["tool_calls"]` on the floor. A round that streamed prose AND a tool call
+(the 9router/Voxagent shape, measured live on 2026-10-10) therefore answered in
+prose and silently stopped working.
+
+That hole is closed with `STREAM_TOOL_CALL`, a sentinel a provider yields when a
+delta carries a tool call, and this check is what holds it closed: a round
+carrying the sentinel must be REFUSED so the caller falls back to the batch call
+where the call can run. A tool-call round must still run its tool and must never
+show its syntax to the user.
 
 Run from the project root:
     .\\python-bundle\\python.exe -s .\\scripts\\check_streaming.py
@@ -430,6 +435,100 @@ def main() -> int:
     check("a round whose text is a tool call is not accepted as an answer",
           guarded is None,
           f"_stream_round accepted {guarded!r} - the call syntax would be shown")
+
+    # ------------------------------------------------- native call on a stream
+    # The 9router/Voxagent shape, measured live on 2026-10-10: a turn streams
+    # `content="I'll check that."` AND a real `tool_calls` array. The stream
+    # carries only `str`, so the provider reports the call with
+    # `STREAM_TOOL_CALL`; before this, the call was discarded by `chat_stream`
+    # and the announcement was emitted as the FINAL ANSWER - the user's "check
+    # if whisper is installed" ran nothing, raised no permission card, and left
+    # the console empty while the model said it was checking.
+    async def native_call_on_stream():
+        class P:
+            provider_id = "fake"
+            has_native_tools = True
+
+            def __init__(self):
+                self.n = 0
+                self.stream_calls = 0
+
+            async def chat(self, messages, model=None, max_tokens=4096,
+                           temperature=0.7, tools=None):
+                self.n += 1
+                if self.n == 1:
+                    # The real call, only on the batch path.
+                    return _Result(
+                        "I'll check that.",
+                        tool_calls=[{"id": "c1", "type": "function",
+                                     "function": {"name": "run_command",
+                                                  "arguments":
+                                                  json.dumps({"command":
+                                                              "whisper --version"})}}])
+                return _Result("Not installed.")
+
+            async def chat_stream(self, messages, model=None, max_tokens=4096,
+                                  temperature=0.7):
+                self.stream_calls += 1
+                # Exactly what 9router sent: the narration, then the marker
+                # that a native tool call shared this stream.
+                yield "I'll check that."
+                yield tool_loop.STREAM_TOOL_CALL
+
+        p = P()
+        seen: list[str] = []
+        ran: list[dict] = []
+        real_execute = tool_loop.execute_skill
+
+        async def spy_execute(name, params, provider):
+            ran.append({"name": name, "params": params})
+            return {"success": True, "data": {}}
+
+        tool_loop.execute_skill = spy_execute
+        try:
+            out = await tool_loop.chat_with_tools(
+                p, [{"role": "user", "content": "check if whisper is installed"}],
+                tools=[], on_delta=seen.append)
+        finally:
+            tool_loop.execute_skill = real_execute
+        return out, seen, ran, p
+
+    out, seen, ran, p = asyncio.run(native_call_on_stream())
+    check("a native tool call on a stream still runs its tool",
+          bool(ran) and ran[0]["name"] == "run_command",
+          f"ran={ran} — the call was lost and the narration became the answer")
+    check("the marker never reaches the screen",
+          not any(tool_loop.STREAM_TOOL_CALL in s for s in seen),
+          f"deltas={seen!r}")
+    check("the narration is not emitted as the final answer",
+          "I'll check that." not in "".join(seen),
+          f"the announcement became the answer: {seen!r}")
+    check("the turn ends on the real answer, not the announcement",
+          "Not installed." in (out.get("response") or ""),
+          f"response={out.get('response')!r}")
+
+    # The guard on its own: a single streamed round carrying the marker must be
+    # REFUSED, so the caller falls back to the batch call. Without this the
+    # end-to-end case above could pass for the wrong reason.
+    async def stream_round_refuses_native():
+        class P:
+            provider_id = "fake"
+            has_native_tools = True
+
+            async def chat_stream(self, messages, model=None, max_tokens=4096,
+                                  temperature=0.7):
+                yield "On it."
+                yield tool_loop.STREAM_TOOL_CALL
+
+        r = await tool_loop._stream_round(
+            P(), [{"role": "user", "content": "x"}], None, None, "")
+        return r
+
+    refused = asyncio.run(stream_round_refuses_native())
+    check("a round carrying a native tool call is not accepted as an answer",
+          refused is None,
+          f"_stream_round accepted {refused!r} - the call would be dropped")
+
 
     # And the ordinary turn - the commonest one there is - must stream.
     async def plain_answer():

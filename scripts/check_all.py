@@ -33,6 +33,7 @@ SUITES = [
     "check_meeting_summarise.py",
     "check_meeting_recall.py",
     "check_system_role.py",
+    "check_console.py",
     "check_meeting_actions.py",
     "check_remote.py",
     "check_remote_gateway.py",

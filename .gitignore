@@ -51,3 +51,11 @@ backend/voice/models/
 # `backend/memory`, which is already covered above, and because a tool copied to
 # the repository root for testing must not be committable.
 /cli_tools/
+
+# ── scratch data dirs the check suites create ────────────────────────────────
+# `check_system_role.py` and `check_gate_hygiene.py` point `ADDLED_DATA_DIR` at
+# a directory under the repo root so a run cannot touch the real install's
+# state. They are created on demand and hold only a throwaway settings.json and
+# an empty skill cache, but `git status` otherwise reads them as new work.
+.check_tmp_*/
+.livetest/

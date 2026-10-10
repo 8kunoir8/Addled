@@ -169,6 +169,43 @@ def run_compaction_checks() -> None:
           bool(body) and "note_activity" in body.group(0))
 
 
+    # ---- an interrupted turn must be visible to the caller ---------------
+    # `awaiting_approval` was set by `tool_loop` and read nowhere, so a turn
+    # that stopped for permission was reported to every caller as a finished
+    # exchange. Its sibling `awaiting_answer` is read by the pipeline, so the
+    # two are meant to be symmetric -- this asserts the half that was missing,
+    # at each seam the flag has to cross.
+    ws = Path(ROOT, "backend", "ws_server.py").read_text(encoding="utf-8")
+    loop_src = Path(ROOT, "backend", "skills", "tool_loop.py").read_text(
+        encoding="utf-8")
+
+    check("the tool loop still raises the flag to be carried",
+          "awaiting_approval" in loop_src,
+          "the branch that asks for permission stopped marking the turn")
+
+    # The body lives in `_run_chat_pipeline_inner`; the public
+    # `run_chat_pipeline` is a thin wrapper that delegates to it.
+    def _body(name: str) -> str:
+        m = re.search(r"def " + name + r"\(.*?(?=\n(?:    )?(?:async )?def )",
+                      ws, re.S)
+        return m.group(0) if m else ""
+
+    pipeline = _body("_run_chat_pipeline_inner") or _body("run_chat_pipeline")
+    check("the pipeline carries awaiting_approval out",
+          "awaitingApproval" in pipeline
+          and "awaiting_approval" in pipeline,
+          "the flag is dropped at the pipeline boundary, so no caller can see it")
+    check("and it carries the answer half too, symmetrically",
+          "awaitingAnswer" in pipeline and "awaiting_answer" in pipeline,
+          "the two flags were meant to travel together")
+
+    # `chat_send` is a NESTED handler, so it is indented inside
+    # `_register_default_handlers` and cannot be found by a top-level anchor.
+    send = _body("chat_send")
+    check("chat.send exposes it on the reply",
+          "awaitingApproval" in send,
+          "a bridge is told what is queued but not that the TURN is waiting")
+
 def main() -> int:
     run_node_probe()
     run_compaction_checks()

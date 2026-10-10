@@ -590,6 +590,77 @@ def _last_user_text(messages: list[dict]) -> str:
 # first, and each one costs a model call in a turn the user is waiting on.
 MAX_VERIFY_NUDGES = 1
 
+# A turn that says it is about to act and then emits nothing.
+#
+# The other half of the 2026-10-10 report, and the half with no syntax to catch.
+# The reply was "On it - searching for Flux model files under the aethelgard
+# tree now" with no call, no fence and no tag, so every reader in this file
+# returned `[]` and the turn was returned to the user as the answer. It reads
+# as work in progress and is in fact a dead end: the user's next message was
+# "how is it ?", and the model could only admit "nothing has been searched."
+#
+# Detection is STRUCTURAL, not a phrase list. A list of words would fire on
+# ordinary answers - "I'll explain how X works" is not a promise to act - so the
+# nudge only happens when all of these hold: tools were offered this turn, the
+# model called none of them, nothing has run yet, and the text claims the action
+# is under way. That is the shape of a dropped call and nothing else.
+#
+# One, because a model that is going to act does it on the first ask, and a
+# second costs a model call in a turn the user is waiting on.
+MAX_PROMISE_NUDGES = 1
+
+# A claim that the work is happening NOW, rather than a description of what
+# could be done. Tensed deliberately: "I'll run it" is a plan, "I ran it" is a
+# false completion (a different defect), and "running it now" is the one this
+# catches.
+#
+# The frame, not the verb. Three live attempts on the install produced three
+# different wordings for the same intent -- "Deleting that temp folder now",
+# "Firing the delete now", "Going ahead with the delete now" -- and each one
+# was missed by a verb whitelist that did not happen to contain it. Enumerating
+# verbs is a race the model wins by inventing the next one, so the test is
+# grammatical instead: an ACTION GERUND leading a clause, with an immediacy
+# marker ("now", "right now", "as we speak") inside that clause. Any verb at
+# all qualifies, which is the point -- the marker is what makes it a claim of
+# present action. "Deleting files is dangerous" has a gerund and no marker and
+# is an explanation; "the running total is 42" has no leading gerund.
+_PROMISE_GERUND = re.compile(
+    r"(?:^|[.!?]\s+|,\s+|\band\s+|\bi'?m\s+|\bi am\s+)"
+    r"\w+ing\b[^.!?\n]{0,40}?\b(?:now|right now|as we speak)\b",
+    re.IGNORECASE)
+
+# A stated intention to act, in the first person: "Let me fire the command",
+# "I'll carry it out". The verb is anything, for the same reason as above; what
+# keeps "I'll explain how the parser works" out is the caller's other tests (a
+# tool was offered, none was called, nothing has run) together with the
+# short-reply cap -- an explanation runs long, a promise is one line.
+_PROMISE_INTENT = re.compile(
+    r"\b(?:let me|i'?ll|i will|i'?m going to)\s+(?:\w+\s+){0,3}?\w+",
+    re.IGNORECASE)
+
+# Announcing that the action is going ahead, with no subject at all. These are
+# idioms rather than a verb class, so they are listed: they are finite and the
+# model's own.
+_PROMISE_IDIOM = re.compile(
+    r"\b(?:on it|going ahead|firing|executing|carrying it out|"
+    r"following through|taking care of it)\b", re.IGNORECASE)
+
+# Verbs that describe TALKING about something rather than doing it. This is a
+# deny-list, deliberately the opposite shape from the verb whitelist this code
+# used to carry: the frames above do not enumerate what a promise can say, and
+# this only removes the narrow case an explanation shares with a promise's
+# opening ("I'll explain how X works"). Closed and tiny on purpose.
+_EXPLAINS_PAT = re.compile(
+    r"\b(?:explain|describe|summari[sz]e|clarify|outline|walk you through|"
+    r"note that|mention|point out|answer|tell you about)\b", re.IGNORECASE)
+
+# Offering to carry the action out, as a sentence of its own rather than a verb
+# phrase: "I'll carry it out and confirm it's gone".
+_CARRY_OUT_PAT = re.compile(
+    r"\b(?:i'?ll|i will|let me)\s+(?:go ahead and\s+)?"
+    r"(?:carry|follow through|take care of)\b", re.IGNORECASE)
+
+
 # Parameter names that mean "this call touched a file on disk".
 #
 # Keyed on the ARGUMENT rather than the tool name on purpose. A tool-name list
@@ -654,6 +725,70 @@ def _turn_verified(tool_results: list[dict]) -> bool:
                 if result.get("stdout") or result.get("stderr") or result.get("exit_code") is not None:
                     return True
     return False
+
+
+def _announced_work(text: str) -> bool:
+    """Whether this reply claims the action is happening now.
+
+    Only ever consulted in the one shape that makes it meaningful - see
+    `MAX_PROMISE_NUDGES`. On its own the phrase means nothing; a reply that
+    says "let me explain" and then explains is doing exactly what it said.
+    """
+    if not text:
+        return False
+    stripped = str(text).strip()
+    if not stripped:
+        return False
+    # The gerund and idiom frames are precise - a leading action gerund with an
+    # immediacy marker does not occur in an explanation, and the idioms are the
+    # model's own words - so they are tested on the whole reply. The live
+    # destructive reply was one promise then explanation, and another live turn
+    # put the promise in the SECOND sentence ("Understood - your call. Firing
+    # the delete now"), which a first-sentence-only test would miss.
+    if _PROMISE_GERUND.search(stripped) or _PROMISE_IDIOM.search(stripped):
+        return True
+    if _CARRY_OUT_PAT.search(stripped):
+        return True
+    # The first-person intent frame ("let me...", "I'll...") is broad, so it
+    # needs both guards: a length cap (an explanation runs long, a promise is
+    # one line) and a deny-list of verbs that describe talking rather than
+    # acting. The deny-list is deliberately tiny and closed - the point of the
+    # other frames is to avoid enumerating what a promise CAN say; this only
+    # removes what it demonstrably does not ("I'll explain how the parser
+    # works").
+    if len(stripped) > 700:
+        return False
+    if _EXPLAINS_PAT.search(stripped):
+        return False
+    return bool(_PROMISE_INTENT.search(stripped))
+
+
+def _tools_were_offered(only: set[str] | None) -> bool:
+    """Whether this turn gave the model a tool catalogue to call.
+
+    The promise nudge needs this to mean what its comment says - "tools have
+    been offered" - and it used to test `only` directly, which is the OPPOSITE:
+    `only` is None for every enabled skill, so the nudge was skipped on exactly
+    the surface that needs it most. Measured live on 2026-10-10: the dashboard
+    sent `tools=None`, the model answered a destructive request with "Running it
+    now - it may come back asking you to approve", called nothing, and the nudge
+    never fired because `None` is falsy. The user got an announcement instead of
+    a permission card, which is the whole bug this guard exists for.
+
+    None means the full catalogue, and a non-empty set means that subset; both
+    are "tools were offered". An empty set is the only case where the model was
+    given nothing to call, and there the nudge would be asking for the
+    impossible - so it is the one case that returns False. A failure resolving
+    the catalogue means ASK rather than skip, the same direction every other
+    guard here takes.
+    """
+    if only is not None and not only:
+        return False
+    try:
+        return bool(skill_registry.to_openai_tools(only))
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not resolve the tool catalogue (%s); nudging anyway", e)
+        return True
 
 
 # What each tool is doing, said in the user's terms rather than the tool's.
@@ -880,6 +1015,7 @@ async def chat_with_tools(
 
     rounds = 0
     verify_nudges = 0
+    promise_nudges = 0
     # Every tool result from every round. The per-round list below is what the
     # failure and round-cap paths reason about; this accumulates so a normal
     # text reply still reports what was actually called.
@@ -921,9 +1057,20 @@ async def chat_with_tools(
             result = await _call_prompt_tools(provider, full_messages, model,
                                               only, reply_directive)
 
-        # The streamed round carried no tool call, so its text IS the answer.
-        # Emit it, now that it is known to be the answer, and finish.
-        if result.get("streamed"):
+        # The streamed round carried no tool call, so its text IS normally the
+        # answer - emit it and finish.
+        #
+        # EXCEPT when it claims the action is under way. That is the one shape
+        # where a no-call round is not an answer: measured live on 2026-10-10,
+        # the dashboard's streaming round returned "Deleting that temp folder
+        # now ... tap Allow on the card above the composer" with no call and no
+        # card, and this early return emitted it as the finished turn - skipping
+        # the promise nudge below entirely, because a streamed round never
+        # reached it. The nudge was unreachable on the ONE surface it was built
+        # for. A promise-like round is therefore NOT returned here; it falls
+        # through to the nudge, which retries and, failing that, answers.
+        if result.get("streamed") and not _announced_work(
+                result.get("response", "")):
             if on_delta is not None:
                 try:
                     on_delta(result.get("response", ""))
@@ -970,6 +1117,37 @@ async def chat_with_tools(
                     "tool_results": all_tool_results,
                     "unreadable": unreadable,
                 }
+            # A turn that says it is acting and then emits nothing. The gap the
+            # `malformed` path cannot cover, because there is no syntax to catch:
+            # "On it - searching now" with no call, no fence and no tag.
+            #
+            # Gated on the whole shape rather than the phrase. It needs tools to
+            # have been offered, NO call this round, NOTHING run yet this turn,
+            # and the text to claim the action is under way. A first-round reply
+            # with no call is otherwise a perfectly good answer - it is the claim
+            # of action on top of it that makes it a dropped call.
+            if (promise_nudges < MAX_PROMISE_NUDGES
+                    and not all_tool_results
+                    and _tools_were_offered(only)
+                    and _announced_work(result.get("response", ""))):
+                promise_nudges += 1
+                full_messages.append({
+                    "role": "assistant",
+                    "content": result.get("response", ""),
+                })
+                full_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You said you were running or searching for that, but "
+                        "no tool was called, so nothing has actually started and "
+                        "there is no result to report. Either call the tool now "
+                        "in this shape, with no other text:\n"
+                        + skill_registry.PROMPT_CALL_FORMAT +
+                        "\n\nOr, if no tool is needed, answer the question "
+                        "directly instead of describing what you would do."),
+                })
+                log.info("Promise nudge: announced action, nothing called")
+                continue
             # Show your work before you claim it works.
             #
             # A turn that changed files and ran nothing is the turn that says "I
@@ -1008,6 +1186,17 @@ async def chat_with_tools(
                               all_tool_results
                               or result.get("tool_results", []),
                               result.get("response", ""))
+            # A streamed round held back for the promise nudge and then accepted
+            # as the answer (budget spent, or the phrase was an ordinary answer).
+            # Its deltas were buffered and never emitted, so emit them now or the
+            # streaming surface shows nothing while the transcript gains a reply.
+            # Guarded on `streamed` so a batch round is not emitted twice.
+            if result.get("streamed") and on_delta is not None:
+                try:
+                    on_delta(result.get("response", ""))
+                except Exception:
+                    log.debug("stream listener failed", exc_info=True)
+
             return {
                 "response": result.get("response", ""),
                 "tokens": result.get("tokens", 0),
@@ -1055,16 +1244,61 @@ async def chat_with_tools(
         # would lose the answer instead of reporting an unknown tool.
         valid = [(tc, res) for tc, res in executed
                  if skill_registry.get(tc["name"])]
-        valid_ids = {tc.get("id") for tc, _ in valid if tc.get("id")}
-        raw_tool_calls = [raw for raw in (result.get("raw_tool_calls") or [])
-                          if raw.get("id") in valid_ids]
-        if raw_tool_calls:
-            # Keep the assistant tool_call message in history
-            # (required by OpenAI-compatible APIs for the follow-up request)
+        # Pair every tool result with an assistant tool_call, and give each one
+        # an id. The OpenAI tool protocol is a PAIR: a `role:"tool"` message is
+        # only valid if it answers an assistant `tool_calls` entry with the
+        # same id. Two shapes here broke that, and the failure was the same
+        # 400 from the live gateway on 2026-10-10:
+        #
+        #   9router -> HTTP 400 {"code":11133, "msg":"Invalid request
+        #   parameters", "extError":{"code":"model_param_invalid"}}
+        #
+        # 1. A text-written call (the fallback path, and providers without
+        #    native tools) is parsed from prose and has NO id at all.
+        # 2. A native call from a gateway that omits the id.
+        #
+        # In both cases the old code filtered `raw_tool_calls` by id, so an
+        # id-less call echoed NO assistant message but still emitted a
+        # `role:"tool"` message - a tool result with no call, which is exactly
+        # `model_param_invalid`. Reproduced against the running 9router: a
+        # `role:"tool"` with no `tool_call_id` returns 11133; the same request
+        # with an id returns 200.
+        #
+        # So the id is now MADE here when the model did not supply one, and the
+        # assistant call is built from the executed calls rather than from
+        # whatever the provider happened to echo. Every valid result therefore
+        # has a matching call, by construction, on every path.
+        raw_by_id = {raw.get("id"): raw
+                     for raw in (result.get("raw_tool_calls") or [])
+                     if raw.get("id")}
+        paired: list[tuple[dict, dict, str]] = []
+        for index, (tc, exec_result) in enumerate(valid):
+            call_id = tc.get("id") or "addled_call_%d" % index
+            tc["id"] = call_id
+            paired.append((tc, exec_result, call_id))
+        if paired:
+            # Keep the assistant tool_call message in history (required by
+            # OpenAI-compatible APIs for the follow-up request). A call the
+            # gateway echoed is reused verbatim; one it did not (or that had no
+            # id) is rendered in the OpenAI shape so the pair is complete.
+            assistant_tool_calls = []
+            for tc, _res, call_id in paired:
+                raw = raw_by_id.get(call_id)
+                if raw is not None:
+                    assistant_tool_calls.append(raw)
+                else:
+                    assistant_tool_calls.append({
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc.get("params", {})),
+                        },
+                    })
             assistant_message: dict = {
                 "role": "assistant",
                 "content": result.get("response") or None,
-                "tool_calls": raw_tool_calls,
+                "tool_calls": assistant_tool_calls,
             }
             # Thinking-mode models (DeepSeek v4) reject the follow-up request
             # unless the reasoning_content they returned is passed back. Only
@@ -1074,10 +1308,11 @@ async def chat_with_tools(
             if reasoning:
                 assistant_message["reasoning_content"] = reasoning
             full_messages.append(assistant_message)
-        for tc, exec_result in valid:
-            # Add to message history so provider sees the result
+        for tc, exec_result, call_id in paired:
+            # Add to message history so provider sees the result. The id is
+            # always present, so the pair above is always matched.
             full_messages.append(
-                _tool_result_message(tc["name"], exec_result, tc.get("id")))
+                _tool_result_message(tc["name"], exec_result, call_id))
         all_tool_results.extend(tool_results)
 
         # An MCP approval gate is built for one retry: the model asks, the user
@@ -1221,6 +1456,22 @@ def _with_directive(messages: list[dict], directive: str) -> list[dict]:
                "content": (last.get("content") or "") + "\n\n" + directive}
     return out
 
+# A sentinel a streaming provider yields when a delta carries a NATIVE tool
+# call. `chat_stream` is typed `AsyncIterator[str]`, so it has no channel to
+# report one - and the OpenAI-compatible implementations read only
+# `delta["content"]`, so a round of `content="I'll check that."` PLUS a
+# `tool_calls` array lost the call entirely: the stream returned the
+# announcement, `_stream_round` saw no call in the text, and the announcement
+# was emitted as the final answer. Measured live against 9router/Voxagent on
+# 2026-10-10 - the user's "check if whisper is installed" turn, where the model
+# DID send two valid `run_command` calls and nothing ran, no permission card
+# appeared, and nothing reached the console.
+#
+# A NUL-prefixed marker cannot collide with model text: a stream of real
+# content never contains a NUL, and the value is discarded before either the
+# buffer or `on_delta` sees it.
+STREAM_TOOL_CALL = "\x00\x00addled:tool_call\x00\x00"
+
 
 async def _streamed_answer(provider, messages: list[dict],
                            model: str | None = None,
@@ -1247,10 +1498,19 @@ async def _streamed_answer(provider, messages: list[dict],
     a headless run costs exactly what it cost before.
     """
     chunks: list[str] = []
+    # Whether any delta in this stream carried a NATIVE tool call. The
+    # provider reports it with `STREAM_TOOL_CALL` rather than in the text,
+    # because a stream of content and a tool call share one channel. A True
+    # here means this round is a tool round and the caller must NOT treat the
+    # text as the answer - see `_stream_round`.
+    saw_tool_call = False
     try:
         async for piece in provider.chat_stream(
                 messages, model=model, max_tokens=max_tokens, temperature=0.7):
             if not piece:
+                continue
+            if piece == STREAM_TOOL_CALL:
+                saw_tool_call = True
                 continue
             chunks.append(piece)
             if on_delta is not None:
@@ -1261,27 +1521,28 @@ async def _streamed_answer(provider, messages: list[dict],
                     log.debug("stream listener failed", exc_info=True)
     except Exception as e:
         log.warning("Streamed answer failed: %s", e)
-        if not chunks:
+        if not chunks and not saw_tool_call:
             return {"response": "", "tokens": 0, "stream_failed": True}
 
     text = "".join(chunks)
-    # A stream that ends without a single chunk is a FAILURE, not an empty
-    # answer, and it has to be flagged as one.
-    #
-    # `chat_stream` on the OpenAI-compatible providers catches every exception
-    # and yields `""`, so a provider that times out or drops the connection
-    # looks identical here to one that answered with nothing. Returning a plain
-    # empty result let the caller treat it as a successful reply: the batch
-    # fallback below was skipped because no `stream_failed` key was set, and the
-    # user got a blank message with no error. Measured against a server that
-    # accepts the connection and never replies, the headless path reported
-    # `[Provider error: The model did not finish within 6s ...]` while the
-    # streamed path — the one the dashboard chat page uses — returned `''`.
-    #
-    # Flagging it means the caller retries on the batch path, which reports the
-    # real reason.
+    # A tool call with no prose is a COMPLETE round, not an empty one: the
+    # OpenAI shape allows `content: null` alongside `tool_calls`, and a model
+    # that has nothing to say before acting sends exactly that. Returning
+    # `stream_failed` here would send the caller to the batch path for a round
+    # that was never a failure - and, worse, would have thrown away the fact
+    # that a call happened, which is the whole thing this flag exists to carry.
+    if saw_tool_call:
+        return {"response": text, "tokens": len(text) // 4,
+                "stream_tool_call": True}
     if not text:
         return {"response": "", "tokens": 0, "stream_failed": True}
+
+    # A stream that ends without a single chunk is a FAILURE, not an empty
+    # answer, and it has to be flagged as one - a provider that times out or
+    # drops the connection, and one that answered with nothing, look identical
+    # here, and the flag is what sends the caller to the batch path for the
+    # real reason.
+    text = _strip_control_tags(text)
     # Rough: providers report real counts only on the batch path, and a stream
     # gives none. ~4 chars/token is the same estimate the compaction code uses.
     return {"response": text, "tokens": len(text) // 4}
@@ -1313,16 +1574,20 @@ async def _stream_round(provider, messages: list[dict], model, only,
         return None
     if streamed.get("stream_failed"):
         return None
+    # A native tool call was seen in the stream: this round is a TOOL round, so
+    # its text is narration, not the answer, and it must go back to the batch
+    # path where the call can actually be read and executed. This is the check
+    # the text parsers below cannot make - 9router/Voxagent streams
+    # `content="I'll check that."` alongside a real `tool_calls` array, so the
+    # text alone reads as an answer and the call was lost.
+    if streamed.get("stream_tool_call"):
+        return None
     text = streamed.get("response") or ""
     if not text.strip():
         return None
     # Either call syntax means this round is a tool round, not an answer.
     if _parse_tool_response(text)["calls"] or _extract_tool_calls(text):
         return None
-    # A `native` provider would have put its call in `tool_calls`, which a
-    # stream cannot carry - so a round that needed one comes back here as prose
-    # and we cannot tell. That is why this is only used where the caller has
-    # already accepted the cost: the batch path re-runs and catches it.
     return {"response": text, "tokens": streamed.get("tokens", 0),
             "streamed": True}
 
@@ -1350,7 +1615,12 @@ async def _call_native_tools(provider, messages: list[dict],
     if final and on_delta is not None:
         streamed = await _streamed_answer(provider, messages, model,
                                           on_delta=on_delta)
-        if not streamed.get("stream_failed"):
+        # A tool call in a round that was TOLD to answer in plain text: the
+        # model ignored the instruction. Falling through to the batch call
+        # keeps the call rather than emitting narration that claims work which
+        # never happened - the same loss, one path over.
+        if not streamed.get("stream_failed") \
+                and not streamed.get("stream_tool_call"):
             return streamed
 
     try:
@@ -1536,7 +1806,7 @@ async def _call_prompt_tools(provider, messages: list[dict],
     if final and on_delta is not None:
         streamed = await _streamed_answer(provider, modified_messages, model,
                                           max_tokens=max_tokens)
-        if not streamed.get("stream_failed"):
+        if not streamed.get("stream_failed") and not streamed.get("stream_tool_call"):
             stream_text = streamed.get("response") or ""
             if not _parse_tool_response(stream_text)["calls"] \
                     and not _extract_tool_calls(stream_text):
@@ -1547,6 +1817,8 @@ async def _call_prompt_tools(provider, messages: list[dict],
                 return {"response": stream_text,
                         "tokens": streamed.get("tokens", 0)}
             stream_text = ""  # it was a tool call; fall through to the batch path
+        else:
+            stream_text = ""  # a native tool call, or the stream failed; batch path
 
     try:
         result = await provider.chat(
@@ -1582,10 +1854,14 @@ async def _call_prompt_tools(provider, messages: list[dict],
         visible_response = response_text
         for block in parsed["blocks"]:
             visible_response = visible_response.replace(block, "")
-        visible_response = visible_response.strip()
+        visible_response = _strip_control_tags(visible_response).strip()
 
         return {
-            "response": visible_response or response_text,
+            # Falling back to `response_text` only when NOTHING is left, which
+            # is the case where the reply was the call and nothing else. The
+            # control tags are removed on both sides of it, so the fallback can
+            # never hand back the tag this just stripped.
+            "response": visible_response or _strip_control_tags(response_text),
             "tokens": tokens,
             "tool_calls": tool_calls,
             "malformed": parsed["malformed"],
@@ -1851,6 +2127,113 @@ _DSML_PARAM = re.compile(
     re.DOTALL | re.IGNORECASE)
 
 
+# A plain fence whose body is a real command. The model's habit when it does not
+# use the JSON the catalogue asks for, and invisible until now: the fence parsed
+# as nothing, was not flagged malformed, and the command was shown to the user
+# as prose while nothing ran.
+#
+# Deliberately strict. A fence is also how a model SHOWS a command it is not
+# running ("you would run this:"), and folding every one would execute things
+# the user was only being shown. So the first word must be a program or a known
+# PowerShell cmdlet, and the body must be a command line rather than prose.
+_SHELL_FIRST_WORDS = frozenset({
+    # Shells and interpreters
+    "cmd", "powershell", "pwsh", "bash", "sh", "zsh", "python", "python3",
+    "node", "deno", "bun", "ruby", "perl", "php", "dotnet", "java",
+    # Package and build tools
+    "pip", "pip3", "npm", "npx", "pnpm", "yarn", "uv", "uvx", "poetry",
+    "cargo", "rustc", "go", "make", "cmake", "gradle", "mvn",
+    "winget", "choco", "scoop", "git", "gh", "docker", "kubectl", "terraform",
+    # Core Windows cmdlets and console tools - what this machine's transcripts
+    # actually contain.
+    "get-childitem", "get-item", "get-itemproperty", "get-command",
+    "get-process", "get-service", "get-content", "get-location", "get-date",
+    "get-help", "get-member", "get-module", "get-psdrive", "get-volume",
+    "set-location", "set-item", "set-itemproperty", "set-content",
+    "new-item", "new-itemproperty", "remove-item", "copy-item", "move-item",
+    "rename-item", "select-object", "where-object", "sort-object",
+    "format-table", "format-list", "measure-object", "select-string",
+    "start-process", "stop-process", "invoke-item", "invoke-webrequest",
+    "invoke-restmethod", "test-path", "test-connection", "resolve-path",
+    "join-path", "split-path", "convertto-json", "convertfrom-json",
+    "import-module", "write-output", "write-host", "out-file", "out-string",
+    "measure-command", "start-sleep", "tasklist", "taskkill", "dir", "ls",
+    "cat", "type", "echo", "where", "which", "whoami", "hostname", "ipconfig",
+    "netstat", "ping", "curl", "wget", "tree", "cls", "clear", "date", "set",
+    "reg", "sc", "net", "wmic", "systeminfo", "robocopy", "xcopy", "attrib",
+})
+
+
+def _call_from_shell_fence(text: str) -> dict | None:
+    """Read a plain fenced block that holds a real command as `run_command`.
+
+    Returns None unless the whole block is a command. Returning a call for
+    something that was only being explained would RUN it, which is the failure
+    mode worth being strict about - the opposite mistake (missing one) leaves
+    the reply as an answer, which is where it already was.
+    """
+    if not text or "```" not in text:
+        return None
+    for match in re.finditer(
+            r"```([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)(?:```|\Z)",
+            text, re.DOTALL):
+        language = (match.group(1) or "").lower()
+        # A tagged fence already went through the format readers above; only an
+        # untagged (or explicitly shell-tagged) block is a candidate here.
+        if language not in ("", "ps1", "powershell", "shell", "sh", "bash",
+                            "cmd", "bat"):
+            continue
+        body = match.group(2).strip()
+        if not body or len(body) > 4000:
+            continue
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        if not lines or len(lines) > 40:
+            continue
+        # A single bare verb is a name being mentioned, not a command being run:
+        # "the tool is `dir`" and "run `dir`" are the same two characters.
+        # Requiring an argument or a second line keeps the reader to the shape
+        # that actually means act.
+        if len(lines) == 1 and len(lines[0].split()) < 2:
+            continue
+        # A shell fence routinely OPENS with a comment, and the model writes
+        # them habitually - measured live on 2026-10-10, the whisper check came
+        # back as:
+        #
+        #     ```bash
+        #     # Check for whisper CLI command
+        #     which whisper
+        #     ```
+        #
+        # Rejecting on the first line therefore discarded a real command and
+        # showed the fence to the user as the answer, with nothing run. So the
+        # first *command* line is what the checks below read: leading comments
+        # (and blanks) are stepped over, and only a body that is ALL comment
+        # falls out. The rejection rules themselves are unchanged and still
+        # apply to the line that actually carries the command.
+        command_lines = [ln for ln in lines if not ln.startswith("#")]
+        if not command_lines:
+            continue
+        first = command_lines[0]
+        # Plainly an answer rather than a command: JSON, a quoted string, a
+        # sentence. (A bare comment is handled above; a first line that is
+        # prose is still refused here.)
+        if first.startswith(("{", "[", "\"", "'")):
+            continue
+        head = re.split(r"[\s|;&]+", first, 1)[0].strip().lower().lstrip("-")
+        if head not in _SHELL_FIRST_WORDS:
+            continue
+        # Only a real skill, the rule every reader here follows: an unknown name
+        # starts the market-and-forge path and writes a generated file under a
+        # name the model invented.
+        name = _normalise_tool_name("run_command")
+        if not name or not skill_registry.get(name):
+            return None
+        declared = _declared_params(name)
+        return {"name": name,
+                "params": {(declared[0] if declared else "command"): body}}
+    return None
+
+
 # `<tool_call>` wrappers, seen live as `<tool_call>meeting_list</tool_call>`.
 # The JSON form inside the tag already parsed (the fenced-json path finds the
 # object); the bare-name and attribute forms did NOT, and -- like DSML -- they
@@ -1862,6 +2245,86 @@ _TOOLCALL_SELF = re.compile(
     r"<tool_call\b[^>]*\bname\s*=\s*[\"\']([A-Za-z_][A-Za-z0-9_.-]*)[\"\'][^>]*/?>",
     re.IGNORECASE)
 
+
+# Control tags the model invents and wraps its own bookkeeping in. Caught live
+# on 2026-10-10 in a reply that admitted the search never ran:
+#
+#     "... nothing has been searched.
+#      Let me run it properly now.
+#      <budget:token_budget>2000</budget:token_budget>"
+#
+# `budget:` appears nowhere in this codebase -- the model writes it from
+# training, the same way it writes DSML and `<run_command>`. Nothing consumed
+# it and nothing removed it, so it was stored in the history and shown to the
+# user as part of the answer.
+#
+# The shape is a colon-namespaced element, which is what makes this safe to do
+# broadly: `<budget:token_budget>` cannot be mistaken for content, while a URL
+# (`<http://...>`), a comparison (`a < b`) and a real control-flow tag from a
+# language the user asked for (`<div:class>`) are all left alone. Only the
+# namespaced element is removed, and its body with it -- an empty pair left
+# behind would be a worse artifact than the tag.
+_CTRL_ELEMENT = re.compile(
+    r"<([A-Za-z_][A-Za-z0-9_.-]*):([A-Za-z_][A-Za-z0-9_.-]*)\b[^>]*>"
+    r".*?</\1:\2\s*>", re.DOTALL)
+_CTRL_TAG = re.compile(
+    r"</?[A-Za-z_][A-Za-z0-9_.-]*:[A-Za-z_][A-Za-z0-9_.-]*\b[^>]*/?>")
+
+
+def _strip_control_tags(text: str) -> str:
+    """Remove the model's own control tags from anything the user will read."""
+    if not text or ":" not in text or "<" not in text:
+        return text
+    cleaned = _CTRL_TAG.sub("", _CTRL_ELEMENT.sub("", text))
+    return cleaned if cleaned != text else text
+
+
+# `` `name`: `argument` `` -- the model's markdown habit.
+#
+# Caught on the live install (2026-10-10). Asked to check for ffmpeg, this model
+# answered "`run_command`: `ffmpeg -version`" and nothing ran: the shape was
+# unknown, so `_parse_tool_response` reported neither a call nor a malformed one
+# and the reply became a plain answer. The user was told to click Allow on a
+# card that had never been raised.
+#
+# Anchored to the start of a line, and to a real skill name, so prose that
+# mentions a tool in backticks is not mistaken for a call.
+_MARKDOWN_CALL = re.compile(
+    r"^\s*`([A-Za-z_][A-Za-z0-9_.-]*)`\s*:\s*`([^`]*)`\s*$", re.MULTILINE)
+
+# Deliberately LOOSER than the parser above: the same opening shape with extra
+# text on the line, which the parser refuses to bind but must not ignore. Used
+# only to report a call attempt as unreadable, never to run anything.
+_MARKDOWN_MAYBE = re.compile(
+    r"^\s*`([A-Za-z_][A-Za-z0-9_.-]*)`\s*:", re.MULTILINE)
+
+def _call_from_markdown(text: str) -> dict | None:
+    """A call written `` `name`: `argument` ``, the model's own markdown habit.
+
+    Only a real skill is accepted, for the reason `_call_from_syntax` gives: an
+    unknown name would start the market-and-forge path on the strength of a
+    guess, writing a generated skill file under a nonsense name.
+
+    The single backticked argument is bound to the skill's declared parameter --
+    usually `command` -- so `run_command` receives `{"command": "ffmpeg -version"}`
+    rather than nothing.
+    """
+    match = _MARKDOWN_CALL.search(str(text or ""))
+    if not match:
+        return None
+    name = _normalise_tool_name(match.group(1))
+    if not name:
+        return None
+    if not skill_registry.get(name):
+        return None
+    argument = match.group(2).strip()
+    if not argument:
+        return {"name": name, "params": {}}
+    declared = _declared_params(name)
+    if declared:
+        # The skill names its parameters; bind the one argument to the first.
+        return {"name": name, "params": {declared[0]: _literal(argument)}}
+    return {"name": name, "params": {"command": _literal(argument)}}
 
 def _call_from_toolcall_tag(text: str) -> dict | None:
     """A call wrapped in `<tool_call>` tags, naming the tool bare.
@@ -1970,6 +2433,13 @@ def _looks_like_call(text: str) -> bool:
     for m in re.finditer(r"<([A-Za-z_][A-Za-z0-9_.-]*)[\s>]", inner):
         if skill_registry.get(_normalise_tool_name(m.group(1))):
             return True
+    # `` `name`: `...` `` naming a real skill. Same reason as the tag above: if
+    # the markdown reader could not parse it, it must be reported so one
+    # corrective round is offered -- silently answering in prose is what the
+    # live install did, and the user saw a permission prompt that never existed.
+    for m in _MARKDOWN_MAYBE.finditer(inner):
+        if skill_registry.get(_normalise_tool_name(m.group(1))):
+            return True
     return False
 
 
@@ -2039,6 +2509,21 @@ def _parse_tool_response(text: str) -> dict:
                 calls.append(bare)
                 blocks.append(text.strip())
         if not calls:
+            # The model's markdown habit, before the tag readers: it is the one
+            # shape that has no tag to catch, and the one that was being lost
+            # in silence.
+            md_call = _call_from_markdown(text)
+            if md_call:
+                calls.append(md_call)
+                blocks.append(text.strip())
+        if not calls:
+            # A plain fence holding a real command: the shape the user's Flux
+            # search was written in, and the one that ran nothing.
+            fence_call = _call_from_shell_fence(text)
+            if fence_call:
+                calls.append(fence_call)
+                blocks.append(text.strip())
+        if not calls:
             # DSML before the generic XML form: a DSML reply also parses as
             # nothing under `_call_from_xml` (its tags are `<|DSML| invoke>`,
             # not `<name>`), so order does not change the result for DSML --
@@ -2064,6 +2549,13 @@ def _parse_tool_response(text: str) -> dict:
                 # call in its prose ("Let me do it."), and showing that plus the
                 # markup would leak the call to the user.
                 blocks.append(text.strip())
+        if not calls and not malformed and _looks_like_call(text):
+            # Nothing parsed, and the reply still looks like a call. Reported so
+            # one corrective round is offered. Before this, `malformed` was only
+            # ever filled inside the fenced-block loop above, so a call written
+            # as bare text was invisible -- the user's 2026-10-10 reply had no
+            # fence, and the call was silently dropped into the answer.
+            malformed.append(str(text).strip())
 
     return {"calls": calls, "blocks": blocks, "malformed": malformed}
 

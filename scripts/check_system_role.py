@@ -244,6 +244,65 @@ check("an unknown provider is passed through untouched",
 check("enabled=False disables folding even for a known dropper",
       system_role.prepare(drop, SYSTEM, enabled=False) is SYSTEM)
 
+print("\nA known dropper folds from the FIRST turn")
+
+# The failure this guards (reported 2026-10-10): asked to check for whisper, the
+# live app replied "On it - checking now" and ran NOTHING. 9router discards the
+# `system` role, so the turn carried no tool catalogue; the model answered from
+# training and the next turn invented an approval that was never queued.
+#
+# A verdict is learned by measuring a turn that still HAS the system prompt, so
+# the first encounter always loses that turn - and persistence only helped AFTER
+# a detection. Here it had at 16:25, while the app had restarted at 16:12, so the
+# 16:20 turn ran unfolded. Known endpoints must fold immediately instead.
+
+_KNOWN = "9router"
+check("9router is recorded as a known dropper",
+      _KNOWN in system_role._KNOWN_DROP,
+      "the measured finding must not have to be re-learned at a turn's cost")
+
+# Simulate a genuine first launch: nothing in memory, nothing in settings.
+_saved_verdicts = dict(system_role._stored())
+_config = None
+try:
+    from backend.config import config as _config
+    _config.set("providers", "system_role_verdicts", value={})
+except Exception:  # noqa: BLE001
+    pass
+system_role.reset()
+system_role._memo = {}
+
+_first = _Prov(_KNOWN)
+check("a known dropper is folded on the FIRST turn, with no verdict stored",
+      all(m.get("role") != "system"
+          for m in system_role.prepare(_first, [dict(m) for m in SYSTEM])),
+      "the first turn must not be spent teaching the app what it already knew")
+check("and its catalogue text survives the fold",
+      all(BIG in str(m.get("content") or "")
+          for m in system_role.prepare(_first, [dict(m) for m in SYSTEM])),
+      "folding must move the instructions, not drop them")
+
+# The seed must not become a blanket: everything else is still untouched.
+system_role.reset(); system_role._memo = {}
+_other = _Prov("some-other-proxy")
+check("an unrelated provider is still passed through untouched",
+      system_role.prepare(_other, SYSTEM) is SYSTEM,
+      "the seed names known endpoints, not all of them")
+
+# And it stays a DEFAULT - a real measurement must win, or a proxy that fixes
+# itself would remain folded forever.
+system_role.reset()
+_measured = _Prov(_KNOWN)
+system_role.record(_measured, 5000, SYSTEM)
+check("a real measurement overrides the seed",
+      system_role.drops_system_role(_measured) is False,
+      "observed truth beats a recorded default")
+
+system_role.reset(); system_role._memo = {}
+if _config is not None:
+    _config.set("providers", "system_role_verdicts", value=_saved_verdicts)
+
+
 
 print("\nPersistence — a verdict survives a restart")
 

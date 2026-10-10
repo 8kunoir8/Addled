@@ -9,9 +9,52 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 log = logging.getLogger("addled.terminal")
+
+
+def _console_record(command: str, result: dict, *, argv: list | None = None,
+                    cwd: str | None = None, tool: str | None = None,
+                    started: float | None = None,
+                    conversation: str | None = None) -> None:
+    """Report one finished command to the console. Never raises.
+
+    Kept as a module function rather than inlined twice so `execute` and
+    `execute_argv` cannot drift in how they report - the two must produce
+    identical entry shapes or the console reads differently depending on which
+    kind of command ran.
+    """
+    try:
+        from backend.actions import console_log as console
+        import time as _t
+
+        ok = bool(result.get("success"))
+        if result.get("error") and "timed out" in str(result.get("error", "")).lower():
+            status = console.TIMEOUT
+        else:
+            status = console.OK if ok else console.FAILED
+
+        entry = console.make_entry(
+            command=command,
+            argv=argv,
+            kind="argv" if argv else "shell",
+            tool=tool or ("run_command" if not argv else "tool"),
+            cwd=cwd,
+            status=status,
+            conversation=conversation,
+        )
+        entry["exit_code"] = result.get("exit_code")
+        entry["stdout"] = str(result.get("stdout") or "")
+        entry["stderr"] = str(result.get("stderr") or "")
+        if result.get("error") and not entry["stderr"]:
+            entry["stderr"] = str(result.get("error"))
+        if started is not None:
+            entry["duration_ms"] = int((_t.monotonic() - started) * 1000)
+        console.record(entry)
+    except Exception as e:  # noqa: BLE001
+        log.debug("console capture failed: %s", e)
 
 # Commands that are always safe to run
 SAFE_COMMANDS = {
@@ -99,6 +142,10 @@ class TerminalExecutor:
             command = command.replace(" && ", " ; ")
             command = command.replace("~/", "$HOME/")
 
+        # Timed from here so the console can report a real duration rather than
+        # a number invented at display time.
+        _t0 = time.monotonic()
+
         # Optional RTK compression for high-output commands (graceful fallback)
         rtk_path = _find_rtk()
         command, rewritten = _rtk_rewrite(command, rtk_path)
@@ -129,17 +176,23 @@ class TerminalExecutor:
                     cwd=cwd,
                 )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            return {
+            out = {
                 "success": proc.returncode == 0,
                 "stdout": stdout.decode("utf-8", errors="replace")[:50000],
                 "stderr": stderr.decode("utf-8", errors="replace")[:10000],
                 "exit_code": proc.returncode,
                 "rewritten": rewritten,
             }
+            _console_record(command, out, cwd=cwd, started=_t0)
+            return out
         except asyncio.TimeoutError:
-            return {"success": False, "error": f"Command timed out after {timeout}s"}
+            out = {"success": False, "error": f"Command timed out after {timeout}s"}
+            _console_record(command, out, cwd=cwd, started=_t0)
+            return out
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            out = {"success": False, "error": str(e)}
+            _console_record(command, out, cwd=cwd, started=_t0)
+            return out
 
     async def execute_argv(self, argv: list[str], cwd: str | None = None,
                            timeout: int = 30) -> dict:
@@ -158,6 +211,7 @@ class TerminalExecutor:
         """
         if not argv or not str(argv[0]).strip():
             return {"success": False, "error": "Empty command"}
+        _a0 = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
                 *[str(a) for a in argv],
@@ -167,14 +221,23 @@ class TerminalExecutor:
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(),
                                                     timeout=timeout)
-            return {
+            out = {
                 "success": proc.returncode == 0,
                 "stdout": stdout.decode("utf-8", errors="replace")[:50000],
                 "stderr": stderr.decode("utf-8", errors="replace")[:10000],
                 "exit_code": proc.returncode,
                 "rewritten": False,
             }
+            _console_record(" ".join(str(a) for a in argv), out, argv=list(argv),
+                            cwd=cwd, started=_a0)
+            return out
         except asyncio.TimeoutError:
-            return {"success": False, "error": f"Command timed out after {timeout}s"}
+            out = {"success": False, "error": f"Command timed out after {timeout}s"}
+            _console_record(" ".join(str(a) for a in argv), out, argv=list(argv),
+                            cwd=cwd, started=_a0)
+            return out
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            out = {"success": False, "error": str(e)}
+            _console_record(" ".join(str(a) for a in argv), out, argv=list(argv),
+                            cwd=cwd, started=_a0)
+            return out
