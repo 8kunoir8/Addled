@@ -1,3 +1,78 @@
+# Addled 1.0.39
+
+**The installer got smaller, and honest about how much.** The download drops
+from 651.9 MB to 618.2 MB — about 34 MB, or 5%. That is a real saving, but it
+is worth being precise about where it came from, because the obvious headline
+(“the interpreter was shipping 654 MB of bytecode”) does not survive contact
+with the numbers.
+
+The bundled interpreter *was* shipping its bytecode cache, and two lines of
+`electron-builder.yml` already excluded that cache from the app's own code while
+the block that copies the interpreter did not. But that cache was 5,188 tiny
+`.pyc` files totalling **87 MB of actual content**; the “654 MB” figure was
+`du`, which counts allocated filesystem clusters, not bytes. Most of that mass
+was never in the download to begin with — LZMA does not compress slack.
+
+So the saving is the 87 MB of real bytecode, plus `*.dist-info` metadata and
+`tests/` that are never imported, less a little back for the pre-compile step —
+arriving as 34 MB off the installer once compression is accounted for.
+
+## What shipped, and why it was there
+
+Nothing the app uses was removed. The Python packages that are large —
+PyQt6 for the character avatar, `googleapiclient` for the Gemini SDK, the
+`faster-whisper` stack for speech — are large because they are used, and they
+stay.
+
+| Shipped before | Shipped now |
+| --- | --- |
+| `__pycache__`: 5,188 `.pyc` files, 87 MB of content | None |
+| `*.dist-info`: package metadata, never imported | None |
+| `tests/` and the `pythonwin` IDE | None |
+| Interpreter bytecode cache | Compiled once, on install |
+
+## The part that could have gone wrong
+
+Stripping a cache only works if something puts it back. The app installs to
+`C:\Program Files`, which it **cannot write to** after installation, so simply
+deleting the cache would have made every launch recompile numpy and PyQt6 from
+source — a slow first import, forever, on every start.
+
+So the installer now compiles the interpreter's bytecode **once**, during
+installation, where it does have write access (`electron/installer-precompile.nsh`,
+running `scripts/precompile_bundle.py` under the bundled interpreter). It is
+best-effort by design: if the compile fails, the install succeeds anyway and the
+app compiles what it needs on first import. A slower start is worth far less
+than a failed install.
+
+## Notes
+
+- **The compile order is deliberate.** The hook is `customInstall`, which
+  electron-builder expands *after* it extracts the application files. A hook that
+  ran earlier would compile an empty directory and report success.
+- **`compression` is a top-level electron-builder option, not an `nsis` one.**
+  Under `nsis` it fails schema validation outright. It lives at the top of the
+  config, where it is correct.
+- **The NSIS include lives under `electron/`, not `build/`.** `build/` is
+  gitignored, so an include kept there would not be in the repository — a fresh
+  clone could not rebuild the same installer.
+- **Still deferred, on purpose:** migrating off the deprecated
+  `google-generativeai` SDK (≈120 MB) and making the voice models a separate
+  download (≈340 MB). Both are larger changes with user-visible behaviour, and
+  neither belongs in a size-only release.
+
+## Verification
+
+- `scripts/check_packaging.py` passes, so the shrunken bundle still ships every
+  file the app loads and no file it must not.
+- The pre-compile was exercised against a synthetic bundle: it creates
+  `__pycache__/*.pyc` where expected, skips cleanly when the interpreter is
+  absent, and never exits non-zero.
+- Measured installer size before and after, and confirmed `__pycache__` is
+  absent from the unpacked resources and present again after an install run.
+
+---
+
 # Addled 1.0.38
 
 **A terminal you can see, and the reason you could not see it.** The dashboard

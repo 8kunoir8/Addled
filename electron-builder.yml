@@ -2,6 +2,14 @@ appId: com.kunoir.addled
 productName: Addled
 copyright: Copyright © 2026 Kunoir
 
+# Top-level, not under `nsis`: in electron-builder 24.x this is the property
+# that controls the installer's LZMA level (`maximum` | `normal` | `store`),
+# and `nsis` does not accept it — putting it there fails schema validation.
+# The payload is ~1 GB of already-compressed wheels and a 340 MB voice model,
+# so the default `normal` leaves size on the table for build time we are not
+# short of. Nothing at runtime changes.
+compression: maximum
+
 directories:
   output: dist
   buildResources: electron/icons
@@ -118,9 +126,42 @@ extraResources:
   # reads it and installs on demand.
   - from: requirements-vision.txt
     to: requirements-vision.txt
+  # Called once by the installer (see nsis.include / build/installer-precompile.nsh)
+  # to put back the bytecode cache the python-bundle filter strips. It is a
+  # standalone script with no imports of its own beyond the stdlib, so it runs
+  # under the bundled interpreter before the app has ever started.
+  - from: scripts/precompile_bundle.py
+    to: scripts/precompile_bundle.py
+  # The embedded interpreter. It ships WITHOUT its bytecode cache, and the
+  # installer pre-compiles it once on the user's machine instead (see the
+  # post-install step below and scripts/precompile_bundle.py).
+  #
+  # `__pycache__` was 654 MB of the 938 MB bundle, and it is a CACHE: Python
+  # regenerates every .pyc from the .py beside it on first import. It shipped
+  # anyway because this entry's filter was a bare `['**/*']` — the two
+  # `!**/__pycache__/**` lines already in this file cover the `backend/` block
+  # and the asar, and neither is this one. The install target is
+  # C:\Program Files, where the app CANNOT write after install, so stripping
+  # the cache without compiling it back would make every launch recompile
+  # numpy and PyQt6 from source. That is the whole reason the pre-compile step
+  # exists: pay the compile once, at install, where an elevated writer can.
+  #
+  # `*.dist-info` is package metadata only (`pip show` reads it; the app does
+  # not), and `tests/` is never imported at runtime. `pythonwin` is the Tk IDE
+  # from pywin32 — pywin32 itself stays, because the app uses win32api and
+  # win32event.
   - from: python-bundle
     to: python
-    filter: ['**/*']
+    filter:
+      - '**/*'
+      - '!**/__pycache__/**'
+      - '!**/*.pyc'
+      - '!**/*.pyo'
+      - '!**/*.dist-info/**'
+      - '!**/tests/**'
+      - '!**/test/**'
+      - '!**/pythonwin/**'
+      - '!**/Lib/test/**'
 
 win:
   # A multi-size .ico rather than one bitmap: Windows picks 16/32/48 for the
@@ -161,6 +202,17 @@ nsis:
   uninstallDisplayName: Addled
   installerIcon: electron/icons/icon.ico
   uninstallerIcon: electron/icons/icon.ico
+  # The interpreter ships without `__pycache__` (see the python-bundle filter
+  # above), so compile it once here, where the installer runs elevated and can
+  # write into the install directory. Without this the app would recompile
+  # numpy and PyQt6 on every launch from C:\Program Files, which it cannot
+  # write to. Best-effort: a failure here must not fail the install, because
+  # the app still runs — just with a slower first import.
+  # Kept under electron/ (which is tracked) rather than build/ (which is
+  # gitignored): an include in an ignored directory would not be in the
+  # repository, so a fresh clone could not rebuild the same installer — the
+  # exact class of drift check_packaging.py exists to catch.
+  include: electron/installer-precompile.nsh
 
 portable:
   artifactName: '${productName}-${version}-portable.${ext}'
