@@ -629,6 +629,35 @@ _PLAN_TOOLS = ("code_read", "search_in_files", "read_file", "list_dir",
                "search_files", "file_info",
                "wiki_search", "wiki_read", "sop_lookup", "sop_list")
 
+
+def _code_page_tools(base: tuple[str, ...]) -> list[str]:
+    """The Code page's tool list, plus every CLI tool the user has built.
+
+    The two lists above are deliberately read-only — the planner may look at the
+    project but not change it — and a built CLI tool is arbitrary code with no
+    such guarantee. It is added anyway, by decision: a tool the user wrote and
+    reviewed is one they chose to have available, and the Code page is one of
+    the surfaces the feature promises it works from.
+
+    Resolved HERE rather than appended to the constants, because a tool can be
+    built at any point during a session. A tuple frozen at import time would
+    only ever contain the tools that existed when the backend started, so a tool
+    built five minutes ago would be missing from the page that built it.
+
+    A tool that fails to load is skipped rather than raising: this runs on the
+    path of every plan and edit, and a broken tool directory must not be able to
+    break the Code page.
+    """
+    names = list(base)
+    try:
+        from backend.cli_tools.registry import cli_tools
+        names.extend(t.name for t in cli_tools.list_all()
+                     if t.name not in names)
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not add CLI tools to the code-page list: %s", e)
+    return names
+
+
 # How many reviewed edits one `code.apply_plan` call may write. The page warns
 # from 8 files, so reaching this means something is wrong rather than thorough.
 _MAX_PLAN_APPLIES = 40
@@ -997,6 +1026,84 @@ def _questions_for(params: dict) -> list[dict]:
         return []
 
 
+# The tools plan mode may use, listed explicitly rather than derived.
+#
+# Derived from a name pattern it picked up `memory_link` and `memory_unlink`,
+# which write, so the derivation is not safe here. A plan that modifies the
+# system while it is being made is not a plan, and the failure is silent: the
+# write would look like part of the research. A short list that is wrong by
+# omission costs the planner one lookup; a list that is wrong by inclusion
+# changes the user's machine.
+# A SUPERSET of the tuple this used to be, never a replacement for it.
+#
+# The original was `("code_read", "search_in_files", "read_file", "list_dir",
+# "search_files", "file_info", "wiki_search", "wiki_read", "sop_lookup",
+# "sop_list")`, and rewriting it dropped four of those - including `sop_lookup`,
+# which is how a planner reads the procedures Addled has already learned. A plan
+# that cannot see the accumulated procedures is a plan that repeats mistakes the
+# system had already stopped making, and nothing would have reported it: the tool
+# list is a constant, so a missing entry looks exactly like a deliberate one.
+# `check_parity.py` caught it, which is the only reason it is not live.
+_PLAN_TOOLS = [
+    # The original list, verbatim.
+    "code_read", "search_in_files", "read_file", "list_dir",
+    "search_files", "file_info",
+    "wiki_search", "wiki_read", "sop_lookup", "sop_list",
+    # Added: the ones plan mode needed and the code page's planner did not have.
+    "self_read",
+    "web_search", "web_fetch",
+    "memory_get", "memory_graph", "memory_related",
+    "session_list", "session_read",
+    "skill_search", "skill_view",
+    "pdf_read", "word_read", "excel_read", "pptx_read",
+]
+
+# What plan mode says to the model. The craft rule is borrowed from Hermes and
+# Claude Code, and it is the difference between a plan and a summary: a plan is
+# written for someone with no context and no judgement, so it has to be concrete
+# enough that they cannot get it wrong.
+_PLAN_PROMPT = (
+    "You are in PLAN MODE. Research the request, then write a plan.\n\n"
+    "You have READ-ONLY tools. You cannot change anything in this mode, and you "
+    "must not try: a plan that modifies the system while it is being written is "
+    "not a plan.\n\n"
+    "Write the plan for someone who has never seen this codebase and will "
+    "follow it literally. Name the files. Quote the exact commands. State what "
+    "to run to check it worked. If a choice has two reasonable answers, say "
+    "which one to take and why, because the person following this will not be "
+    "able to ask you. If something has to happen in a particular order, say so. "
+    "If you are missing information you cannot get with the tools you have, "
+    "say so under a heading 'Unknowns' rather than guessing.\n\n"
+    "Finish with the plan itself, as numbered steps."
+)
+
+
+def _write_plan_file(request: str, plan: str) -> str:
+    """Save a plan under memory/plans/ and return its path.
+
+    Named by date and a slug of the request, so a plan is findable by what it
+    was FOR rather than by a number. Never raises: a plan the user can read in
+    the reply is still a plan, and failing the turn over the file would lose the
+    useful part to save the convenient one.
+    """
+    import re as _re
+    from backend import app_paths
+
+    slug = _re.sub(r"[^a-z0-9]+", "-", str(request or "plan").lower()).strip("-")
+    slug = (slug[:40] or "plan").strip("-")
+    stamp = time.strftime("%Y-%m-%d-%H%M")
+    directory = app_paths.subdir("plans")
+    path = directory / f"{stamp}-{slug}.md"
+    try:
+        path.write_text(f"# Plan: {str(request or '').strip()}\n\n{plan}\n",
+                        encoding="utf-8")
+        log.info("Wrote a plan to %s", path)
+        return str(path)
+    except OSError as e:
+        log.warning("could not write the plan file: %s", e)
+        return ""
+
+
 async def run_chat_pipeline(
     message: str,
     params: dict | None = None,
@@ -1033,6 +1140,28 @@ async def run_chat_pipeline(
     """
     params = params or {}
     from backend.config import config
+
+    # Plan mode, reachable from any surface that talks to Addled, not just
+    # the Code page. A prefix rather than a setting because planning is a
+    # decision about THIS request - the same user wants a plan for a risky
+    # change and an answer for a small one, in the same session.
+    _plan_mode = False
+    _stripped = message.lstrip()
+    for _prefix in ("/plan", "#plan"):
+        if _stripped.lower().startswith(_prefix):
+            _plan_mode = True
+            message = _stripped[len(_prefix):].lstrip()
+            break
+    if _plan_mode:
+        # Read-only tools, and a role that means "scope this", whatever the
+        # message looks like. `force_role` rather than a @tag so a user who
+        # typed /plan cannot end up on the chat model by forgetting one.
+        tools = list(_PLAN_TOOLS)
+        force_role = "plan"
+        persona = (persona or "") + ("\n\n" if persona else "") + _PLAN_PROMPT
+        # A plan is not conversation: it should not fill the history, the
+        # journal or the mood events with research it discarded.
+        params = {**params, "plan_mode": True}
 
     # Who is asking travels beside the call, not inside it. A tool call reaches
     # the approval gate with only its own arguments, and an approval has to be
@@ -1082,6 +1211,29 @@ async def run_chat_pipeline(
         # again" contains "no"; "silently delete it" is about the command, not
         # the answer. Deciding those needs an understanding of the sentence,
         # which is what the model is for; a matcher would be wrong both ways.
+
+        # The character's expression, and the tag taken back out of the reply.
+        #
+        # This has to run BEFORE the empty-reply check below. A model that
+        # writes nothing but a tag — which a deliberately terse character will
+        # do — would otherwise be answered with "I couldn't process that
+        # request." and the tag would be shown to the user verbatim.
+        #
+        # Skipped for persona callers: their output is a contract (JSON, code
+        # edits) and rewriting it here would corrupt it.
+        if (not persona and announce and _engine_ref is not None
+                and isinstance(response, dict)):
+            raw = response.get("response") or ""
+            if raw:
+                try:
+                    from backend.character.trigger import decide
+                    emotion, cleaned = decide(raw)
+                    response["response"] = cleaned
+                    if emotion != "neutral":
+                        response["emotion"] = emotion
+                        _engine_ref.set_emotion(emotion)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("could not read the emotion from the reply: %s", e)
         if isinstance(response, dict):
             if _is_deliberately_silent(response.get("response")):
                 response["response"] = ""
@@ -1111,6 +1263,20 @@ async def run_chat_pipeline(
                 _engine_ref.sig_agent_state.emit("error")
             except Exception:
                 pass
+
+        # A plan is an artefact, not a reply. Written to disk so it survives
+        # the conversation it was made in - the reason to plan a risky
+        # change is to follow it later, possibly after a restart, and a plan
+        # that only exists in the scrollback is one the user has to copy out
+        # by hand. Recorded in the reply as well, so the surface can say
+        # where it went.
+        if _plan_mode and isinstance(response, dict) and text.strip():
+            try:
+                _plan_path = _write_plan_file(message, text)
+                if _plan_path:
+                    response["plan_path"] = str(_plan_path)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not write the plan file: %s", e)
         return response
     finally:
         if announce and _engine_ref is not None:
@@ -1269,6 +1435,32 @@ async def _run_chat_pipeline_inner(
                 sys_prompt = sys_prompt + "\n\n" + caps
         except Exception as e:  # noqa: BLE001
             log.debug("could not build the capabilities block: %s", e)
+        # The character's face, offered to the model as vocabulary. This is how
+        # an emotion is chosen: rather than a separate classifier guessing at
+        # the reply after the fact, the model that just read the conversation
+        # says how the moment landed, by writing one of these tags inline.
+        # The reply is parsed and the tag stripped in `run_chat_pipeline`.
+        #
+        # Not done for a persona caller. A swarm worker or the code planner is
+        # not the character, its output is parsed by contract, and an extra tag
+        # in that text is a bug rather than an expression.
+        if not persona:
+            try:
+                from backend.character.trigger import emotion_menu
+                menu = emotion_menu()
+                if menu:
+                    sys_prompt = sys_prompt + (
+                        "\n\nHow you feel is shown on the character's face. "
+                        "Begin your reply with exactly one tag from this list, "
+                        "then your message:\n"
+                        + menu +
+                        "\nChoose the tag that matches the moment. Use "
+                        "[neutral] for ordinary, functional replies — most "
+                        "turns are neutral, and a face that reacts to "
+                        "everything reads as insincere."
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not build the emotion menu: %s", e)
         # Context window sizing: local models get a lean 6-message (3-turn) window
         # so remaining tokens belong to memory and tools; cloud gets 20 turns.
         provider_id = getattr(provider, "provider_id", "") or ""
@@ -1342,6 +1534,17 @@ async def _run_chat_pipeline_inner(
         session_ctx = await relevance.summaries_block(message)
         if session_ctx:
             sys_prompt = sys_prompt + "\n\n" + session_ctx
+
+        # Meeting notes: what was decided in meetings the user recorded.
+        # Gated like the session summaries — a meeting is long, specific and
+        # other people's words, so it earns its tokens only when the turn is
+        # about it.
+        try:
+            meeting_ctx = await relevance.meetings_block(message)
+            if meeting_ctx:
+                sys_prompt = sys_prompt + "\n\n" + meeting_ctx
+        except Exception as e:
+            log.debug("meeting context failed: %s", e)
 
         # Rolling conversation continuity (long chats — compaction summaries)
         from backend.memory.compaction import build_rolling_context
@@ -1503,30 +1706,38 @@ async def _run_chat_pipeline_inner(
             except Exception as e:
                 log.debug("project injection failed: %s", e)
 
-        # Live screen awareness: let the model know what the observer sees
+        # Live screen awareness: let the model know what the observer sees --
+        # but only as far as the user has allowed. See `observer.screen_in_chat`
+        # in config: the description used to go into every turn regardless of
+        # what was asked, so anything on screen became context for an unrelated
+        # request. `"on_request"` is the default because a description is the
+        # ANSWER to "what do you see", and otherwise it is a leak with no job.
         screen_note = None
-        if _engine_ref:
+        screen_policy = str(config.get("observer", "screen_in_chat",
+                                       default="on_request") or "on_request").lower()
+        if _engine_ref and screen_policy != "never":
             info = _engine_ref.last_screen_info()
             asks_about_screen = any(
                 kw in message.lower() for kw in
                 ("what do you see", "what can you see", "screen", "desktop",
                  "what's on my screen", "what am i looking at"))
-            detail = (info or {}).get("detail")
-            if asks_about_screen and not detail:
-                # User explicitly asks what it sees and there is no recent
-                # vision result — capture a fresh one right now.
-                detail = await _engine_ref.fresh_screen_detail()
-            ctx = (info or {}).get("context")
-            if detail or ctx not in (None, "unknown", "unchanged", "private"):
-                parts = []
-                if ctx not in (None, "unknown", "unchanged", "private"):
-                    parts.append(f"the user's current activity context: {ctx}")
-                if detail:
-                    parts.append(f"recent screen description: {detail}")
-                if parts:
-                    screen_note = ("[Live screen awareness] " + "; ".join(parts) +
-                                   ". Use this when the user asks what you can see "
-                                   "or what they are doing.")
+            if screen_policy == "always" or asks_about_screen:
+                detail = (info or {}).get("detail")
+                if asks_about_screen and not detail:
+                    # User explicitly asks what it sees and there is no recent
+                    # vision result — capture a fresh one right now.
+                    detail = await _engine_ref.fresh_screen_detail()
+                ctx = (info or {}).get("context")
+                if detail or ctx not in (None, "unknown", "unchanged", "private"):
+                    parts = []
+                    if ctx not in (None, "unknown", "unchanged", "private"):
+                        parts.append(f"the user's current activity context: {ctx}")
+                    if detail:
+                        parts.append(f"recent screen description: {detail}")
+                    if parts:
+                        screen_note = ("[Live screen awareness] " + "; ".join(parts) +
+                                       ". Use this when the user asks what you can see "
+                                       "or what they are doing.")
         if screen_note:
             user_messages.insert(0, {"role": "user", "content": screen_note})
 
@@ -1698,6 +1909,63 @@ async def _run_chat_pipeline_inner(
             log.debug("reply-language detection failed: %s", e)
             reply_lang = ""
 
+        # Stream the answer as it is written.
+        #
+        # Only the final round streams - the point in the turn where the text
+        # stops being narration the model may discard and becomes the reply the
+        # user keeps. A tool round cannot stream at all: `chat_stream` yields
+        # text only, so it carries no tool calls, and a round that might call a
+        # tool has to stay on the batch call. See `_streamed_answer`.
+        #
+        # `chat.delta` is a hint, never the record: the finished reply still
+        # arrives as a normal `chat.send` reply and replaces whatever the deltas
+        # drew. So a dropped or duplicated delta costs a flicker, not a wrong
+        # answer - which is what makes it safe to fire these without tracking
+        # delivery.
+        _stream_conversation = (params.get("conversation")
+                                or params.get("conversationId") or "")
+
+        def _emit_delta(piece: str) -> None:
+            # The emotion tag is stripped from the reply FURTHER DOWN this
+            # function, after the turn returns - which is too late for a delta,
+            # because a delta is drawn the moment it is sent. Measured live: the
+            # streamed text arrived as "[neutral] I called the read_file tool..."
+            # and the finished reply arrived without the tag, so the user watched
+            # "[neutral]" appear and then vanish.
+            #
+            # Stripping here rather than deferring the whole delta is the honest
+            # fix: the tag is a protocol artefact the model writes for the
+            # character, never something the user should see at any point.
+            try:
+                from backend.character.trigger import parse_tag
+                _emotion, piece = parse_tag(piece)
+            except Exception:
+                pass  # an unstripped delta beats a lost one
+            if not piece:
+                return
+            try:
+                _server.broadcast_nowait("chat.delta", {
+                    "conversation": _stream_conversation,
+                    "delta": piece,
+                })
+            except Exception as e:  # noqa: BLE001
+                log.debug("chat.delta broadcast failed: %s", e)
+
+        # A caller with no UI (a check, a bot, the Code page's own planner) gets
+        # no callback at all, so nothing is queued and nothing is broadcast.
+        _on_delta = _emit_delta if params.get("stream") else None
+
+        # What the tool round is doing, on the channel the vision and voice
+        # steps already use. Same gate: a caller with no UI asked for none of
+        # this, so it gets no broadcasts.
+        def _emit_activity(what: str) -> None:
+            try:
+                _server.broadcast_nowait("chat.activity", {"what": what})
+            except Exception as e:  # noqa: BLE001
+                log.debug("chat.activity broadcast failed: %s", e)
+
+        _on_activity = _emit_activity if params.get("stream") else None
+
         # Use the provider-agnostic tool-use loop
         result = await chat_with_tools(
             provider=provider,
@@ -1708,6 +1976,8 @@ async def _run_chat_pipeline_inner(
             model=route_model,
             tools=tools,
             reply_directive=reply_lang,
+            on_delta=_on_delta,
+            on_activity=_on_activity,
             # A turn the caller said not to record must not be learned either.
             # Those flags mean "this is my own internal call, not something the
             # user asked for" — the Code page's planner is the case that matters
@@ -3298,6 +3568,29 @@ def _register_default_handlers():
         await get_server().broadcast("state.changed", {"state": state})
         return {"success": True, "state": state}
 
+    async def character_set_emotion(params: dict, ws) -> dict:
+        """Set the character's expression directly.
+
+        Separate from `character.setState` because the two are independent: the
+        state says what the app is doing and the emotion says how it feels, so
+        a caller can hold a state while changing the expression.
+
+        Returns the resolved name, which is how a caller distinguishes a real
+        emotion from a typo — an unknown name falls back to neutral rather than
+        raising, because this is reachable from settings and from the model.
+        """
+        from backend.ws_server import get_server
+        name = params.get("emotion", params.get("name", "neutral"))
+        applied = name
+        if _engine_ref:
+            applied = _engine_ref.set_emotion(name)
+        await get_server().broadcast("character.emotion", {"emotion": applied})
+        return {"success": True, "emotion": applied, "requested": name}
+
+    async def character_emotions_list(params: dict, ws) -> dict:
+        from backend.character.emotions import emotion_names
+        return {"emotions": emotion_names()}
+
     # ---- Phase 3: Observer status ---------------------------------------------
 
     async def observer_status(params: dict, ws) -> dict:
@@ -3833,7 +4126,7 @@ def _register_default_handlers():
             found = await _run_chat_pipeline_inner(
                 find_message,
                 persona=find_persona,
-                tools=list(_PLAN_TOOLS),
+                tools=_code_page_tools(_PLAN_TOOLS),
                 record=False,
                 force_role="reasoning",
                 # Finding the files IS the work, so this is deliberately more
@@ -4178,7 +4471,7 @@ def _register_default_handlers():
             result = await _run_chat_pipeline_inner(
                 message,
                 persona=persona,
-                tools=list(_CODE_EDIT_TOOLS),
+                tools=_code_page_tools(_CODE_EDIT_TOOLS),
                 # A code edit is a task — its raw output should not appear in
                 # the chat history (it is a code block, not a conversation),
                 # but the instruction and outcome belong in long-term memory
@@ -5081,6 +5374,112 @@ def _register_default_handlers():
         return {"date": day["date"], "entries": day["entries"][-100:],
                 "summary": day["summary"]}
 
+    # ---- meetings ----------------------------------------------------------
+    # The store and the summariser already existed; these are the read and
+    # action surfaces the Meetings page needs. Listing omits transcripts for
+    # the same reason the store does: 50 meetings with their text is megabytes
+    # of JSON to draw a sidebar.
+
+    async def meetings_list(params: dict, ws) -> dict:
+        from backend.meetings import store
+        meetings = store.list_meetings(limit=int(params.get("limit", 50)))
+        return {"meetings": meetings, "stats": store.stats()}
+
+    async def meetings_get(params: dict, ws) -> dict:
+        from backend.meetings import store
+        meeting_id = str(params.get("id") or "")
+        meeting = store.get(meeting_id)
+        if meeting is None:
+            return {"success": False, "error": f"No meeting with id '{meeting_id}'."}
+        return {"success": True, "meeting": meeting}
+
+    async def meetings_transcribe(params: dict, ws) -> dict:
+        """Create a meeting from a recording. The page's primary action."""
+        import asyncio as _asyncio
+
+        from backend.meetings import store
+        from backend.voice.stt import transcribe_file
+
+        path = str(params.get("path") or "").strip()
+        if not path:
+            return {"success": False, "error": "Pass the path to a recording."}
+        result = await _asyncio.to_thread(transcribe_file, path)
+        if not result.get("success"):
+            return result
+        text = result.get("text") or ""
+        if not text.strip():
+            return {"success": False,
+                    "error": ("That recording transcribed to nothing — it may "
+                              "have no speech in it, or be silent.")}
+        title = str(params.get("title") or "").strip()
+        if not title:
+            from pathlib import Path
+            title = Path(path).stem.replace("_", " ").replace("-", " ").strip()
+        meeting = store.create(title or "Meeting", source="file")
+        meeting = store.set_transcript(meeting["id"], text,
+                                       segments=result.get("segments") or [],
+                                       language=result.get("language") or "")
+        return {"success": True, "meeting": meeting}
+
+    async def meetings_summarise(params: dict, ws) -> dict:
+        """Summarise a meeting, streaming progress back to the page."""
+        from backend.meetings import store
+        from backend.meetings import summarise as summariser
+
+        meeting_id = str(params.get("id") or "")
+        meeting = store.get(meeting_id)
+        if meeting is None:
+            return {"success": False, "error": f"No meeting with id '{meeting_id}'."}
+        if not (meeting.get("transcript") or "").strip():
+            return {"success": False, "error": "That meeting has no transcript."}
+
+        # A long meeting takes real time to summarise, and a silent button is
+        # indistinguishable from a broken one. This is the same broadcast hop
+        # `chat.activity` uses, so the page can say what is happening.
+        def progress(what: str) -> None:
+            try:
+                get_server().broadcast_nowait("meetings.progress",
+                                              {"id": meeting_id, "what": what})
+            except Exception:  # noqa: BLE001
+                pass  # a closed page must not cost the user their summary
+
+        progress("Summarising…")
+        result = await summariser.summarise(
+            meeting.get("transcript") or "",
+            segments=meeting.get("segments") or None)
+        if not result.get("success"):
+            return {"success": False, "error": result.get("error")}
+        stored = store.set_summary(
+            meeting_id, result["summary"], decisions=result["decisions"],
+            actions=result["actions"], open_questions=result["open_questions"])
+        # Make it answerable: put the summary into semantic recall so a later
+        # "what did we decide about X?" can reach it. A failure here does not
+        # fail the summarise — the summary is saved either way.
+        try:
+            store.index(meeting_id)
+        except Exception as e:
+            log.debug("could not index meeting %s: %s", meeting_id, e)
+        return {"success": True, "meeting": stored,
+                "partial": result.get("partial", False),
+                "parts_ok": result.get("parts_ok"),
+                "blocks": result.get("blocks")}
+
+    async def meetings_delete(params: dict, ws) -> dict:
+        from backend.meetings import store
+        meeting_id = str(params.get("id") or "")
+        return {"success": store.delete(meeting_id), "id": meeting_id}
+
+    async def meetings_rename(params: dict, ws) -> dict:
+        from backend.meetings import store
+        meeting_id = str(params.get("id") or "")
+        title = str(params.get("title") or "").strip()
+        if not title:
+            return {"success": False, "error": "A meeting needs a title."}
+        meeting = store.update(meeting_id, title=title)
+        if meeting is None:
+            return {"success": False, "error": f"No meeting with id '{meeting_id}'."}
+        return {"success": True, "meeting": meeting}
+
     async def profile_get(params: dict, ws) -> dict:
         from backend.memory.user_profile import get_profile
         return {"profile": get_profile()}
@@ -5391,6 +5790,159 @@ def _register_default_handlers():
             return {"success": False, "error": str(exc)}
         return {"success": True}
 
+    # ---- CLI Tools — capabilities the user builds and reviews --------------
+
+    async def cli_tools_list(params: dict, ws) -> dict:
+        """Every built tool, with its stats, for the Settings table.
+
+        `stats` is what the run counters are FOR: a tool the agent calls often
+        and a tool nobody has ever used look identical in a name list, and the
+        difference is what tells the user which one is worth keeping.
+        """
+        from backend.cli_tools.registry import cli_tools
+        tools = []
+        for tool in sorted(cli_tools.list_all(), key=lambda t: t.name):
+            entry = tool.to_dict()
+            entry["stats"] = tool.stats_dict()
+            tools.append(entry)
+        return {"tools": tools, "count": len(tools),
+                "directory": str(cli_tools.tools_dir())}
+
+    async def cli_tools_get(params: dict, ws) -> dict:
+        """One tool's manifest and its source, for the review pane."""
+        from backend.cli_tools.registry import cli_tools
+        slug = str(params.get("slug") or "")
+        tool = cli_tools.get(slug)
+        if tool is None:
+            return {"success": False, "error": f"No tool named '{slug}'."}
+        entry = tool.to_dict()
+        entry["stats"] = tool.stats_dict()
+        # The source is the point of this call: it is the review before the
+        # user writes anything to disk, and after, it is what they read to
+        # decide whether to keep the tool.
+        try:
+            entry["source"] = tool.bin_path.read_text(encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            entry["source"] = ""
+            entry["source_error"] = f"could not read the program: {e}"
+        return {"success": True, "tool": entry}
+
+    async def cli_tools_draft(params: dict, ws) -> dict:
+        """Ask the model to write a tool. Writes nothing to disk.
+
+        Deliberately separate from `apply`, so the code is shown before it can
+        be saved. Without the split, the first time a user saw what had been
+        written was after it was already callable.
+        """
+        from backend.cli_tools.builder import draft
+        capability = str(params.get("capability", params.get("request", "")))
+        if not capability.strip():
+            return {"success": False,
+                    "error": "Describe what the tool should do."}
+        try:
+            provider = get_provider()
+        except Exception:
+            provider = None
+        try:
+            build = await draft(capability,
+                                slug=params.get("slug") or None,
+                                provider=provider,
+                                name_hint=params.get("nameHint") or None)
+        except Exception as e:  # noqa: BLE001
+            log.exception("CLI tool draft failed")
+            return {"success": False, "error": f"The draft failed: {e}"}
+        return build.to_dict()
+
+    async def cli_tools_apply(params: dict, ws) -> dict:
+        """Write a drafted tool to disk and register it.
+
+        The `source` from the page is what is written, so an edit the user made
+        is respected rather than the model's original being saved over it.
+        """
+        from backend.cli_tools.builder import BuildResult, apply
+        from backend.cli_tools.spec import CliToolSpec
+
+        raw_spec = params.get("spec")
+        source = params.get("source")
+        slug = str(params.get("slug") or "")
+        if not raw_spec and not slug:
+            return {"success": False, "error": "Nothing to save."}
+        try:
+            spec = CliToolSpec.from_dict(raw_spec) if raw_spec else None
+        except Exception as e:  # noqa: BLE001
+            return {"success": False,
+                    "error": f"The tool definition is not valid: {e}"}
+        if spec is None:
+            return {"success": False,
+                    "error": "The tool definition is missing from the request."}
+        build = BuildResult(True, slug=spec.slug, spec=spec,
+                            source=str(source or ""))
+        try:
+            result = await apply(build, source=source)
+        except Exception as e:  # noqa: BLE001
+            log.exception("CLI tool apply failed")
+            return {"success": False, "error": f"Could not save the tool: {e}"}
+        return result
+
+    async def cli_tools_test(params: dict, ws) -> dict:
+        """Run a tool once and report what happened.
+
+        Answers "does this actually work?" with a run rather than an opinion:
+        the manifest can be perfect while the program fails on its first real
+        call, and the user should find that out here and not from a chat reply.
+        """
+        from backend.cli_tools.builder import smoke_test
+        from backend.cli_tools.registry import cli_tools
+        slug = str(params.get("slug") or "")
+        tool = cli_tools.get(slug)
+        if tool is None:
+            return {"success": False, "error": f"No tool named '{slug}'."}
+        # `None` and `{}` mean different things to `smoke_test`, and the
+        # difference is the whole reason the Test button failed for every tool
+        # with a required flag. `None` is "the caller has no values, use the
+        # tool's own recorded example"; `{}` is "deliberately call it with no
+        # arguments". Coercing a MISSING `params` to `{}` — which is what this
+        # did — turned every bare Test click into the second, so `smoke_test`'s
+        # fallback never ran and the tool was told "nothing to run".
+        call = params.get("params")
+        if not isinstance(call, dict):
+            call = None
+        try:
+            return await smoke_test(tool.spec, tool.source_dir, call)
+        except Exception as e:  # noqa: BLE001
+            log.exception("CLI tool smoke test failed")
+            return {"success": False, "error": f"The test could not run: {e}"}
+
+    async def cli_tools_remove(params: dict, ws) -> dict:
+        from backend.cli_tools.registry import cli_tools
+        slug = str(params.get("slug") or "")
+        if not slug:
+            return {"success": False, "error": "No tool named."}
+        try:
+            return cli_tools.remove(
+                slug, delete_files=bool(params.get("deleteFiles", True)))
+        except Exception as e:  # noqa: BLE001
+            log.exception("CLI tool removal failed")
+            return {"success": False,
+                    "error": f"Could not remove '{slug}': {e}"}
+
+    async def cli_tools_suggest(params: dict, ws) -> dict:
+        """A starting point for the form, from what the user asked for.
+
+        The chat page deep-links here with the capability it could not serve, so
+        the field arrives filled in with the words the user already used rather
+        than an empty box they have to restate the problem into.
+        """
+        from backend.cli_tools.builder import _keywords, _slug_from
+        capability = str(params.get("capability", params.get("q", ""))).strip()
+        if not capability:
+            return {"success": True, "slug": "", "keywords": []}
+        try:
+            return {"success": True, "slug": _slug_from(capability),
+                    "keywords": _keywords(capability)}
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": str(e)}
+
     # ---- Skill Forge — self-extending capabilities --------------------------
 
     async def forge_create(params: dict, ws) -> dict:
@@ -5629,6 +6181,8 @@ def _register_default_handlers():
     _server.register("voice.speak", voice_speak)
     _server.register("voice.voices", voice_voices)
     _server.register("character.setState", character_set_state)
+    _server.register("character.setEmotion", character_set_emotion)
+    _server.register("character.emotions", character_emotions_list)
     _server.register("observer.status", observer_status)
     _server.register("system.status", system_status)
     _server.register("system.getProviders", system_get_providers)
@@ -5726,6 +6280,12 @@ def _register_default_handlers():
     _server.register("mood.status", mood_status)
     _server.register("journal.list", journal_list)
     _server.register("journal.today", journal_today)
+    _server.register("meetings.list", meetings_list)
+    _server.register("meetings.get", meetings_get)
+    _server.register("meetings.transcribe", meetings_transcribe)
+    _server.register("meetings.summarise", meetings_summarise)
+    _server.register("meetings.delete", meetings_delete)
+    _server.register("meetings.rename", meetings_rename)
     _server.register("profile.get", profile_get)
     _server.register("profile.update", profile_update)
     _server.register("bots.status", bots_status)
@@ -5769,6 +6329,15 @@ def _register_default_handlers():
     # Skill Forge
     _server.register("forge.create", forge_create)
     _server.register("forge.list", forge_list)
+
+    # CLI Tools — built by the user on the Settings page
+    _server.register("cliTools.list", cli_tools_list)
+    _server.register("cliTools.get", cli_tools_get)
+    _server.register("cliTools.draft", cli_tools_draft)
+    _server.register("cliTools.apply", cli_tools_apply)
+    _server.register("cliTools.test", cli_tools_test)
+    _server.register("cliTools.remove", cli_tools_remove)
+    _server.register("cliTools.suggest", cli_tools_suggest)
 
     # Skill management
     _server.register("skills.list", skills_list)

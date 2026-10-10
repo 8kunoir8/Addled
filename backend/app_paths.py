@@ -207,6 +207,19 @@ def subdir(*parts: str) -> Path:
 # happened. Installing into the writable data directory avoids that.
 PYLIBS_DIR = DATA_DIR / "pylibs"
 
+# Where CLI tools the user (or the agent) builds are kept.
+#
+# Under DATA_DIR for the same reason `pylibs` is: a tool is the user's own
+# work, and an upgrade replaces program files. Building tools into the install
+# tree would mean the first upgrade either loses them or fails to write them at
+# all under `Program Files`.
+#
+# Deliberately NOT inside `memory/`, even though that is also DATA_DIR: the
+# deploy and packaging guards treat `backend/memory/` as the state directory,
+# and a tool is not state — it is a program. Keeping it a sibling makes the
+# distinction visible in the path.
+CLI_TOOLS_DIR = DATA_DIR / "cli_tools"
+
 
 def _dist_info_names(directory: Path) -> set[str]:
     """Package names with a `*.dist-info` in `directory`, normalised.

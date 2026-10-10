@@ -175,6 +175,168 @@ def _consented(question_result: dict) -> bool:
 _ACQUIRE_QUESTION_RE = re.compile(r"shall i go ahead|i can install|i can forge")
 
 
+async def _try_cli_tool(name: str, params: dict) -> dict | None:
+    """Run the user's own CLI tool for this call, if one matches.
+
+    Returns None when nothing matches, so the caller continues down the chain.
+    A match that FAILS still returns a result: the user asked for a capability
+    and their tool is the answer, so a broken tool is reported rather than
+    silently falling through to downloading something else.
+
+    `prefer_over_mcp=False` skips this step entirely, which is the switch that
+    restores the order Addled had before CLI tools existed.
+    """
+    try:
+        from backend.config import config
+        if not config.get("cli_tools", "enabled", default=True):
+            return None
+        if not config.get("cli_tools", "prefer_over_mcp", default=True):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        from backend.cli_tools.registry import cli_tools
+
+        request = ""
+        try:
+            from backend.config import config as _cfg
+            request = str(_cfg.get("_forge", "request", default="") or "")
+        except Exception:  # noqa: BLE001
+            pass
+
+        tool = cli_tools.find_match(name, request)
+        if tool is None:
+            return None
+
+        log.info("CLI tool '%s' answers the call for '%s'", tool.slug, name)
+        try:
+            result = await skill_registry.execute(tool.name, params)
+        except Exception as e:  # noqa: BLE001
+            # The tool MATCHED, so it owns this call even when it breaks. It was
+            # the user's choice, and quietly running something downloaded
+            # instead would do the opposite of what they asked for — the whole
+            # point of preferring a tool they reviewed. The failure is reported.
+            log.warning("CLI tool '%s' failed: %s", tool.slug, e)
+            return {
+                "success": False,
+                "data": {},
+                "error": f"the tool '{tool.name}' failed: {e}",
+                "forged": False,
+                "cli_tool": tool.slug,
+            }
+        return {
+            "success": result.success,
+            "data": result.data,
+            "error": result.error,
+            "forged": False,
+            "cli_tool": tool.slug,
+        }
+    except Exception as e:  # noqa: BLE001
+        # The LOOKUP itself failed — the registry is unavailable, nothing was
+        # matched, no tool was chosen. Falling through is correct here: there is
+        # no user choice to honour, and the chain continues to the market.
+        log.debug("CLI tool lookup failed for '%s': %s", name, e)
+        return None
+
+
+def _buildable_capability(name: str, params: dict) -> str:
+    """A short phrase describing what is missing, for the Build question.
+
+    The user's own words when the turn published them, because "build me a tool
+    to fetch the prices off this page" is a usable brief and "fetch_prices" is
+    not. The call name is the fallback.
+    """
+    try:
+        from backend.config import config
+        request = str(config.get("_forge", "request", default="") or "").strip()
+    except Exception:  # noqa: BLE001
+        request = ""
+    if request:
+        return request[:300]
+    readable = str(name or "").replace("_", " ").strip()
+    return readable or "this capability"
+
+
+def _build_offer_enabled() -> bool:
+    """Whether the "shall I build one?" question is the active gate.
+
+    One function rather than a repeated config read, because two places have to
+    agree on it: `_offer_to_build` raises the question, and `_execute_skill_inner`
+    skips the forge's own consent prompt while it is on. If they disagreed, the
+    user would be asked twice or not at all.
+    """
+    try:
+        from backend.config import config
+        return (bool(config.get("cli_tools", "enabled", default=True))
+                and bool(config.get("cli_tools", "ask_before_build",
+                                    default=True)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+
+async def _offer_to_build(name: str, params: dict) -> dict | None:
+    """Ask whether to build a tool, before looking for one to download.
+
+    Returns None when the question should not be asked — the feature is off, no
+    provider could write the code, or the answer is already on record — so the
+    chain continues to the market.
+
+    Returns a result dict when the question was raised. That ENDS the turn the
+    same way the acquisition questions do: the answer arrives as the next
+    message, so waiting in-band would lose the race with the socket timeout.
+    """
+    if not _build_offer_enabled():
+        return None
+
+    # A question already answered this turn must not be asked again; without
+    # this the model loops, asking the same thing every round until the tool
+    # cap. `_consented` reads the answer for the acquisition questions and
+    # applies here for the same reason.
+    try:
+        if _consented(None):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        capability = _buildable_capability(name, params)
+        asked = await _ask_to_acquire(
+            "build a small tool for this",
+            capability,
+            "It would be written here, shown to you to review on the "
+            "Settings -> CLI Tools page, and used from chat, code and your "
+            "swarm agents. Nothing is downloaded, and nothing runs until "
+            "you approve it.",
+            ["Build it", "Search for a tool instead"])
+    except Exception as e:  # noqa: BLE001
+        log.debug("build offer failed: %s", e)
+        return None
+
+    if not asked or not asked.get("question_id"):
+        return None
+    return {
+        "success": False,
+        "data": {"requires_answer": True,
+                 "capability": capability,
+                 "suggested_slug": _slug_hint(name or capability),
+                 **{k: v for k, v in asked.items() if k == "question_id"}},
+        "error": asked.get("error") or
+                 ("I don't have a tool for this yet. I can build one — ask the "
+                  "user whether to build it or look for an existing tool, and "
+                  "wait for their answer. Do not install anything first."),
+        "forged": False,
+    }
+
+
+def _slug_hint(text: str) -> str:
+    """A filesystem-safe suggestion for the tool's name."""
+    slug = re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")
+    return slug[:40] or "new-tool"
+
+
+
 async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
     """
     Execute a skill by name. If not found, try the market first, then the forge.
@@ -189,6 +351,30 @@ async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
             "error": result.error,
             "forged": False,
         }
+
+    # Not a registered skill — but the user may have BUILT one for this, and a
+    # tool they wrote and reviewed beats anything fetched. Tried before the
+    # market and before the forge, which is the whole point of the feature:
+    # asking for a capability should reach the user's own tool first.
+    #
+    # `find_match` also sees the turn's own request text, because the call name
+    # is often generic while the request carries the intent.
+    cli_result = await _try_cli_tool(name, params)
+    if cli_result is not None:
+        return cli_result
+
+    # Nothing built for this. Before downloading anything, offer to build it —
+    # the user can only ask for a tool if they know the option exists, and a
+    # market install runs code fetched from the internet where a tool built here
+    # is code they will review on the Settings page first.
+    #
+    # Asked at most once per capability: the question is raised only while no
+    # consent is on record, and the answer arrives as the next turn. Declining
+    # skips straight to the market below, because a refusal must never leave the
+    # capability unmet.
+    offer = await _offer_to_build(name, params)
+    if offer is not None:
+        return offer
 
     # Skill not found — find a market match, ASK, and install only on a yes.
     log.info("Skill '%s' not found — looking for it in the market", name)
@@ -257,7 +443,16 @@ async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
     # Forging WRITES AND RUNS new code, so it asks first for the same reason the
     # market install does — arguably more, since the code did not exist anywhere
     # until this moment and nothing has reviewed it.
-    if not _consented(None):
+    #
+    # Skipped entirely while `ask_before_build` is on, because in that mode the
+    # user has ALREADY been asked — `_offer_to_build` above raises "build one, or
+    # search?" and ends the turn. Asking a second, differently-worded permission
+    # question about the same unmet capability is how a user learns to click
+    # through prompts, and it also made the `needs_tool` offer unreachable: the
+    # forge question always fired first, so the end of the chain was never
+    # reached and the Settings pointer was never shown.
+    ask_to_forge = not _build_offer_enabled()
+    if ask_to_forge and not _consented(None):
         asked = await _ask_to_acquire(
             "write and test a new skill",
             f"a tool called '{name}'",
@@ -296,17 +491,87 @@ async def _execute_skill_inner(name: str, params: dict, provider=None) -> dict:
                 "forge_detail": forge_result.detail,
             }
 
+        # Nothing was found and nothing could be written. This is not an error
+        # to narrate — it is the moment the user is told they can build one, and
+        # the offer has to be shaped like a question or the loop drops it into
+        # the generic failure path and the model reports a dead end.
+        return await _needs_tool(name, params,
+                                 f"the forge could not write it: "
+                                 f"{forge_result.detail}")
+    except Exception as e:  # noqa: BLE001
+        return await _needs_tool(name, params, f"nothing could be built: {e}")
+
+
+async def _needs_tool(name: str, params: dict, why: str = "") -> dict:
+    """The end of the chain: nothing exists, nothing could be acquired.
+
+    Not a dead end. Every earlier step is a way of FINDING a tool; this is the
+    one that says how to MAKE one, which is the whole premise of the feature —
+    the user can build a tool deliberately instead of waiting for the model to
+    forge one mid-turn.
+
+    It is raised as a QUESTION, through the same `pending.ask` the acquisition
+    prompts use, and that is not decoration. The loop stops a turn on
+    `requires_answer` and reports `question`/`options`/`question_id` at the TOP
+    LEVEL of the result; a result that only carried a `data.needs_tool` block
+    fell through to the generic failure branch instead, so the model was handed
+    "I have no tool for this" and narrated it as an error. The offer never
+    reached the user, which is exactly what this function exists to prevent.
+
+    `needs_tool` rides alongside the question fields, so the card and the deep
+    link into Settings have the capability and a suggested name to prefill.
+    """
+    capability = _buildable_capability(name, params)
+    detail = f" ({why})" if why else ""
+    asked = await _ask_to_acquire(
+        "build a small tool for this",
+        capability,
+        f"I have no tool for it and nothing suitable could be found{detail}. "
+        f"It would be written by the model, shown to you to review before "
+        f"anything is saved, and then used from chat, code and your swarm "
+        f"agents like any other skill.",
+        ["Build it", "Never mind"])
+    needs = {
+        "capability": capability,
+        "suggested_slug": _slug_hint(name or capability),
+        "called_name": name,
+    }
+    if not asked.get("success"):
+        # Unattended, or a question already open. Still an offer-shaped result,
+        # so the caller can tell the user where to build one even though no card
+        # was raised.
         return {
             "success": False,
-            "error": f"Unknown skill '{name}' and forge failed: {forge_result.detail}",
+            "data": {"requires_answer": True, "needs_tool": needs},
+            "error": (
+                f"I have no tool for this and nothing suitable could be "
+                f"found{detail}. One can be built: Settings -> CLI Tools, ask "
+                f"for \u201c{capability}\u201d. Tell the user that rather than "
+                f"guessing at the answer or inventing a tool call."
+            ),
             "forged": False,
         }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Unknown skill '{name}': {e}",
-            "forged": False,
-        }
+    return {
+        "success": False,
+        "data": {
+            "requires_answer": True,
+            "needs_tool": needs,
+            **{k: v for k, v in asked.items() if k == "question_id"},
+        },
+        # Top level, because that is where the loop looks for it.
+        "question": asked.get("question"),
+        "options": asked.get("options") or [],
+        "question_id": asked.get("question_id"),
+        "ttl": asked.get("ttl"),
+        "requires_answer": True,
+        "error": (
+            f"I have no tool for this and nothing suitable could be "
+            f"found{detail}. I can build one — Settings -> CLI Tools, ask for "
+            f"\u201c{capability}\u201d. Tell the user that rather than guessing "
+            f"at the answer or inventing a tool call."
+        ),
+        "forged": False,
+    }
 
 
 def _last_user_text(messages: list[dict]) -> str:
@@ -314,6 +579,136 @@ def _last_user_text(messages: list[dict]) -> str:
         if message.get("role") == "user" and isinstance(message.get("content"), str):
             return message["content"]
     return ""
+
+
+# How many times a turn may be told to show its work before it is allowed to
+# finish anyway.
+#
+# One, not three. The nudge is for the honest case - the model changed a file and
+# simply did not say what it checked - and a model that is going to verify does
+# it on the first ask. A second and third ask mostly produce a restatement of the
+# first, and each one costs a model call in a turn the user is waiting on.
+MAX_VERIFY_NUDGES = 1
+
+# Parameter names that mean "this call touched a file on disk".
+#
+# Keyed on the ARGUMENT rather than the tool name on purpose. A tool-name list
+# covers the built-ins and silently misses every skill the user installed or
+# forged - exactly the tools a particular person added to do their own work. A
+# `path` argument is what actually makes a call a write, whoever registered it.
+_WRITE_PATH_ARGS = ("path", "file", "filename", "filepath", "dest",
+                    "destination", "target")
+
+# Run-of-the-mill commands that are evidence of nothing. If the only thing the
+# turn ran was one of these, it has not checked its work.
+_NON_VERIFYING = (
+    "cat ", "type ", "echo ", "ls", "dir", "pwd", "cd ", "head ", "tail ",
+    "which ", "where ", "whoami", "date", "time",
+)
+
+
+def _params_touched_a_file(params) -> bool:
+    """Did this call name a file to write to?"""
+    if not isinstance(params, dict):
+        return False
+    for key in _WRITE_PATH_ARGS:
+        value = params.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _turn_changed_files(tool_results: list[dict]) -> bool:
+    """Whether the turn wrote to disk. Only these turns need verification."""
+    for tr in tool_results or []:
+        if not tr.get("success"):
+            continue
+        result = tr.get("result")
+        if isinstance(result, dict) and _params_touched_a_file(result):
+            return True
+    return False
+
+
+def _turn_verified(tool_results: list[dict]) -> bool:
+    """Whether the turn ran something that could show the change worked.
+
+    Deliberately generous. This decides whether to spend a model call asking for
+    proof, and a false "it already checked" only means one fewer nudge - while a
+    false "it did not check" nags a turn that had in fact run its tests. Where
+    the two errors differ, this errs toward silence.
+    """
+    for tr in tool_results or []:
+        if not tr.get("success"):
+            continue
+        name = str(tr.get("tool") or "").lower()
+        if any(k in name for k in ("run", "exec", "terminal", "shell", "test",
+                                   "check", "verify", "build", "compile",
+                                   "cli", "lint")):
+            return True
+        result = tr.get("result")
+        if isinstance(result, dict):
+            cmd = str(result.get("command") or result.get("cmd") or "")
+            low = cmd.strip().lower()
+            if low and not any(low.startswith(s) for s in _NON_VERIFYING):
+                # A real command was run, not just a listing.
+                if result.get("stdout") or result.get("stderr") or result.get("exit_code") is not None:
+                    return True
+    return False
+
+
+# What each tool is doing, said in the user's terms rather than the tool's.
+#
+# Derived from the name, deliberately: the tool catalogue is user-extensible
+# (market skills, forged skills, MCP servers all register names this file has
+# never seen), so a lookup table would be silently blank for exactly the tools a
+# particular user added. A verb is claimed only for the names whose verb is
+# unambiguous, and everything else falls back to the name itself - which is at
+# least true, and is what the user is already reading in the transcript.
+_ACTIVITY_VERBS = (
+    ("search", "Searching"), ("find", "Searching"),
+    ("read", "Reading"), ("open", "Opening"), ("list", "Listing"),
+    ("write", "Writing"), ("create", "Creating"), ("mkdir", "Creating"),
+    ("edit", "Editing"), ("replace", "Editing"), ("patch", "Editing"),
+    ("delete", "Deleting"), ("remove", "Removing"),
+    ("run", "Running"), ("exec", "Running"), ("terminal", "Running"),
+    ("shell", "Running"), ("cli", "Running"), ("git", "Running"),
+    ("fetch", "Fetching"), ("http", "Fetching"), ("download", "Downloading"),
+    ("web", "Looking that up"), ("browse", "Browsing"),
+    ("memory", "Checking memory"), ("recall", "Checking memory"),
+    ("wiki", "Checking the wiki"), ("journal", "Checking the journal"),
+    ("screenshot", "Taking a screenshot"), ("vision", "Looking at the image"),
+    ("transcribe", "Listening"), ("speak", "Speaking"),
+    ("swarm", "Delegating"), ("delegate", "Delegating"),
+    ("subagent", "Delegating"), ("spawn", "Delegating"),
+    ("image", "Making an image"), ("generate", "Generating"),
+    ("code", "Working on the code"), ("plan", "Planning"),
+    ("install", "Installing"), ("build", "Building"),
+)
+
+
+def _activity_for(tool_name: str) -> str:
+    """A short, true description of what a tool call is doing.
+
+    Returns something human - "Searching the web" - for the names whose verb is
+    clear, and the bare tool name otherwise. Never raises, and never empties:
+    the fallback is the name, because a blank status is worse than a raw one.
+    """
+    name = str(tool_name or "").strip()
+    if not name:
+        return "Working"
+    low = name.lower()
+    for needle, verb in _ACTIVITY_VERBS:
+        if needle in low:
+            # Keep the tail when it is short and readable, so "Searching the web"
+            # beats "Searching" for web_search, while a synthetic name does not
+            # produce "Searching x9_f_2".
+            words = [w for w in low.replace("_", " ").split()
+                     if w and not w.isdigit() and len(w) > 2]
+            rest = " ".join(w for w in words if w != needle)
+            if rest and len(rest) <= 24:
+                return f"{verb} {rest}"
+            return verb
+    return name.replace("_", " ").capitalize()
 
 
 def _learn_procedure(messages: list[dict], tool_results: list[dict],
@@ -343,6 +738,34 @@ def _learn_procedure(messages: list[dict], tool_results: list[dict],
     except Exception as e:
         log.debug("Procedure learning skipped: %s", e)
 
+def _queue_review(messages: list[dict], tool_results: list[dict],
+                  reply: str = "") -> None:
+    """Offer a finished turn to the post-turn review.
+
+    Separate from `_learn_procedure` on purpose, and called alongside it. That
+    one records the ROUTE mechanically and always will - it is cheap, it needs
+    no model, and a turn that used tools got somewhere worth remembering. This
+    one asks a model whether the turn taught something the route does not
+    capture: a pitfall, a command that had to be exact, a fact about the user.
+    The two answer different questions and neither replaces the other.
+
+    Queues and returns. The model call happens later, on the engine tick, when
+    the machine is quiet - never here, because "here" is the moment the next
+    prompt wants the same model.
+    """
+    try:
+        from backend.review import queue_review
+        names = [str(tr.get("tool") or "") for tr in (tool_results or [])]
+        errors = [str(tr.get("error") or "") for tr in (tool_results or [])
+                  if not tr.get("success")]
+        trace = "tools: " + (", ".join(names) or "(none)")
+        if errors:
+            trace += "\nfailures: " + "; ".join(e for e in errors if e)[:500]
+        queue_review(_last_user_text(messages), trace,
+                     message=_last_user_text(messages), outcome=reply)
+    except Exception as e:
+        log.debug("Review queueing skipped: %s", e)
+
 
 async def chat_with_tools(
     provider,
@@ -353,6 +776,8 @@ async def chat_with_tools(
     tools: list[str] | None = None,
     reply_directive: str = "",
     learn: bool = True,
+    on_delta=None,
+    on_activity=None,
 ) -> dict:
     """
     Run a chat completion with automatic tool execution.
@@ -377,6 +802,13 @@ async def chat_with_tools(
     same message and is thousands of tokens of English, which is enough to make
     a small model answer in English whatever the system prompt said. See
     backend/language.py.
+
+    ``on_delta``, when given, is called with each text chunk of the FINAL
+    round as it arrives from the provider, so a surface can draw the answer
+    while the model is still writing it. Only the final round streams: an
+    earlier round is narration the model often discards, and a tool round cannot
+    stream at all because a stream carries no tool calls. It is None by default,
+    and None means no streaming path is taken.
 
     ``learn=False`` stops this turn from being recorded as a procedure.
     A caller that runs the model for its OWN reasons must use it: the Code
@@ -404,8 +836,21 @@ async def chat_with_tools(
         full_messages.append({"role": "system", "content": system_prompt})
     full_messages.extend(messages)
 
+    # Some endpoints accept the `system` role and quietly discard it (9router
+    # does — see backend/providers/system_role.py). When this provider is
+    # KNOWN to drop it, the system text rides in the first user turn instead,
+    # because the alternative is every instruction and every memory block
+    # being silently lost. Providers that keep it are untouched.
+    from backend.providers import system_role
+    full_messages = system_role.prepare(provider, full_messages)
+
     async def _final_answer(tool_results):
-        """One more LLM call forced to plain text, using gathered results."""
+        """One more LLM call forced to plain text, using gathered results.
+
+        This is a KNOWN-final call - the prompt below forbids further tool use -
+        so it is the one place a tool-using turn can be streamed. Rounds from the
+        loop cannot be, since a stream carries no tool calls.
+        """
         full_messages.append({
             "role": "user",
             "content": ("Answer the user's question now, based on the "
@@ -415,10 +860,12 @@ async def chat_with_tools(
         try:
             if uses_native:
                 final = await _call_native_tools(provider, full_messages, model,
-                                                 only, reply_directive)
+                                                 only, reply_directive,
+                                                 on_delta=on_delta, final=True)
             else:
                 final = await _call_prompt_tools(provider, full_messages, model,
-                                                 only, reply_directive)
+                                                 only, reply_directive,
+                                                 on_delta=on_delta, final=True)
             final_text = (final.get("response") or "").strip()
             if final_text and not final.get("tool_calls"):
                 return {
@@ -432,6 +879,7 @@ async def chat_with_tools(
         return None
 
     rounds = 0
+    verify_nudges = 0
     # Every tool result from every round. The per-round list below is what the
     # failure and round-cap paths reason about; this accumulates so a normal
     # text reply still reports what was actually called.
@@ -439,12 +887,56 @@ async def chat_with_tools(
     while rounds < max_tool_rounds:
         rounds += 1
 
-        if uses_native:
+        # Try the round as a stream first, then decide.
+        #
+        # This is the case that actually matters and the one the first version
+        # missed: a plain answer with no tool call is the COMMONEST turn there
+        # is, and it never reached `_final_answer`, so it never streamed at all.
+        # Streaming only the forced plain-text round meant the feature worked for
+        # tool-using turns and did nothing for an ordinary question.
+        #
+        # It is safe because the stream is buffered, not shown as it arrives: on
+        # this path a round CAN carry a tool call (that is how prompt-tools
+        # providers work), so the text is held until it is known to contain no
+        # call. If it does, nothing is emitted, the round is re-run on the batch
+        # path, and the tool executes exactly as before. The re-run is the price
+        # of streaming this round; it only happens on rounds that call a tool.
+        if on_delta is not None:
+            streamed = await _stream_round(provider, full_messages, model, only,
+                                           reply_directive)
+            if streamed is not None:
+                result = streamed
+            else:
+                # A tool call, or the stream failed: take the normal path.
+                if uses_native:
+                    result = await _call_native_tools(
+                        provider, full_messages, model, only, reply_directive)
+                else:
+                    result = await _call_prompt_tools(
+                        provider, full_messages, model, only, reply_directive)
+        elif uses_native:
             result = await _call_native_tools(provider, full_messages, model,
                                               only, reply_directive)
         else:
             result = await _call_prompt_tools(provider, full_messages, model,
                                               only, reply_directive)
+
+        # The streamed round carried no tool call, so its text IS the answer.
+        # Emit it, now that it is known to be the answer, and finish.
+        if result.get("streamed"):
+            if on_delta is not None:
+                try:
+                    on_delta(result.get("response", ""))
+                except Exception:
+                    log.debug("stream listener failed", exc_info=True)
+            if learn:
+                _learn_procedure(messages, all_tool_results, system_prompt)
+            return {
+                "response": result.get("response", ""),
+                "tokens": result.get("tokens", 0),
+                "tool_rounds": rounds,
+                "tool_results": all_tool_results,
+            }
 
         # No tool call — normal text response, unless the reply was a tool call
         # the parser could not read. That must never be shown as an answer: the
@@ -478,9 +970,44 @@ async def chat_with_tools(
                     "tool_results": all_tool_results,
                     "unreadable": unreadable,
                 }
+            # Show your work before you claim it works.
+            #
+            # A turn that changed files and ran nothing is the turn that says "I
+            # fixed it" with no evidence, and the user finds out later. Ask for
+            # the evidence once, and only for a turn that actually wrote
+            # something: a conversational turn has nothing to verify, and
+            # nagging one would be the cost of this feature with none of the
+            # benefit. Bounded, so it cannot loop.
+            _results_so_far = (all_tool_results
+                               or result.get("tool_results", []))
+            if (verify_nudges < MAX_VERIFY_NUDGES
+                    and _turn_changed_files(_results_so_far)
+                    and not _turn_verified(_results_so_far)):
+                verify_nudges += 1
+                full_messages.append({
+                    "role": "assistant",
+                    "content": result.get("response", ""),
+                })
+                full_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You changed files in this turn but ran nothing that "
+                        "shows the change works. Tell the user what you changed "
+                        "and run something that demonstrates it - a test, the "
+                        "program, or the command that reads the result back. If "
+                        "nothing can be run, say plainly that it is unverified "
+                        "and why."),
+                })
+                log.info("Verification nudge: files changed, nothing ran")
+                continue
+
             if learn:
                 _learn_procedure(messages, all_tool_results
                                  or result.get("tool_results", []), system_prompt)
+                _queue_review(messages,
+                              all_tool_results
+                              or result.get("tool_results", []),
+                              result.get("response", ""))
             return {
                 "response": result.get("response", ""),
                 "tokens": result.get("tokens", 0),
@@ -493,6 +1020,19 @@ async def chat_with_tools(
         tool_results = []
         executed: list[tuple[dict, dict]] = []
         for tc in result["tool_calls"]:
+            # Say what is running, before it runs. A tool round is the long
+            # silence in a turn - a web search or a model load is seconds - and
+            # until now nothing was emitted during it at all, so the surface sat
+            # on a spinner with no idea whether Addled was working or stuck.
+            #
+            # This is the tool NAME the loop already has, not generated prose:
+            # no extra model call, and nothing that can be untrue. Best-effort,
+            # because a failed notice must never cost the turn it describes.
+            if on_activity is not None:
+                try:
+                    on_activity(_activity_for(tc["name"]))
+                except Exception:
+                    log.debug("activity notice failed", exc_info=True)
             exec_result = await execute_skill(
                 tc["name"], tc.get("params", {}), provider)
             log.info("Tool call: %s(%s) -> success=%s error=%s",
@@ -645,6 +1185,12 @@ async def chat_with_tools(
         if learn:
             _learn_procedure(messages, all_tool_results or tool_results,
                              system_prompt)
+            # The turn that ends here is the one worth reviewing: the model
+            # gathered results, then answered. A route was taken AND a reply was
+            # produced, which is exactly the pair the review needs to judge what
+            # was learned rather than merely what was done.
+            _queue_review(messages, all_tool_results or tool_results,
+                          final.get("response", ""))
         return final
 
     return {
@@ -676,13 +1222,136 @@ def _with_directive(messages: list[dict], directive: str) -> list[dict]:
     return out
 
 
+async def _streamed_answer(provider, messages: list[dict],
+                           model: str | None = None,
+                           max_tokens: int = 4096,
+                           on_delta=None) -> dict:
+    """Collect a streamed plain-text answer, emitting each chunk as it arrives.
+
+    Only ever used for a call that is KNOWN to be final — ``_final_answer``'s
+    forced plain-text round, or a round with no tools offered. It cannot be used
+    for a tool round, and that is a fact about the provider API rather than a
+    choice: ``Provider.chat_stream`` yields ``str`` only, so a streamed response
+    carries no ``tool_calls`` field at all (see ``deepseek_provider.chat_stream``,
+    which reads ``delta["content"]`` and nothing else). A round that might need
+    a tool therefore has to stay on the batch call, because a stream could never
+    tell us that a tool call was requested.
+
+    The deltas are the point, not the buffer: ``on_delta`` fires synchronously as
+    each chunk lands so the UI can draw text while the model is still writing.
+    The joined text is returned in the same ``{"response", "tokens"}`` shape the
+    batch path returns, so a caller cannot tell the two apart.
+
+    ``on_delta`` defaults to None and every caller is expected to leave it that
+    way unless a UI is attached — no callback, no queue, no event loop work, so
+    a headless run costs exactly what it cost before.
+    """
+    chunks: list[str] = []
+    try:
+        async for piece in provider.chat_stream(
+                messages, model=model, max_tokens=max_tokens, temperature=0.7):
+            if not piece:
+                continue
+            chunks.append(piece)
+            if on_delta is not None:
+                try:
+                    on_delta(piece)
+                except Exception:
+                    # A broken listener must not cost the user their answer.
+                    log.debug("stream listener failed", exc_info=True)
+    except Exception as e:
+        log.warning("Streamed answer failed: %s", e)
+        if not chunks:
+            return {"response": "", "tokens": 0, "stream_failed": True}
+
+    text = "".join(chunks)
+    # A stream that ends without a single chunk is a FAILURE, not an empty
+    # answer, and it has to be flagged as one.
+    #
+    # `chat_stream` on the OpenAI-compatible providers catches every exception
+    # and yields `""`, so a provider that times out or drops the connection
+    # looks identical here to one that answered with nothing. Returning a plain
+    # empty result let the caller treat it as a successful reply: the batch
+    # fallback below was skipped because no `stream_failed` key was set, and the
+    # user got a blank message with no error. Measured against a server that
+    # accepts the connection and never replies, the headless path reported
+    # `[Provider error: The model did not finish within 6s ...]` while the
+    # streamed path — the one the dashboard chat page uses — returned `''`.
+    #
+    # Flagging it means the caller retries on the batch path, which reports the
+    # real reason.
+    if not text:
+        return {"response": "", "tokens": 0, "stream_failed": True}
+    # Rough: providers report real counts only on the batch path, and a stream
+    # gives none. ~4 chars/token is the same estimate the compaction code uses.
+    return {"response": text, "tokens": len(text) // 4}
+
+
+async def _stream_round(provider, messages: list[dict], model, only,
+                        reply_directive: str):
+    """Run one loop round as a stream, returning it only if it is a plain answer.
+
+    Returns the round result with `streamed: True` when the round produced text
+    and no tool call - the case where streaming is correct and the text is the
+    answer. Returns None when the round looks like it wants a tool, or the
+    stream failed, so the caller falls back to the batch call.
+
+    The text is NOT emitted here. A stream on this path can carry a tool call
+    written as text (that is how a provider without native function calling
+    works), and printing that at the user and then erasing it is worse than not
+    streaming at all. So the decision comes first and the emission second - see
+    the `on_delta` call the caller makes once this returns.
+
+    Only text-only rounds are accepted. Anything else returns None, which costs
+    one batch call and preserves the previous behaviour exactly.
+    """
+    try:
+        streamed = await _streamed_answer(provider, messages, model,
+                                          on_delta=None)
+    except Exception as e:  # noqa: BLE001
+        log.debug("stream round failed, falling back: %s", e)
+        return None
+    if streamed.get("stream_failed"):
+        return None
+    text = streamed.get("response") or ""
+    if not text.strip():
+        return None
+    # Either call syntax means this round is a tool round, not an answer.
+    if _parse_tool_response(text)["calls"] or _extract_tool_calls(text):
+        return None
+    # A `native` provider would have put its call in `tool_calls`, which a
+    # stream cannot carry - so a round that needed one comes back here as prose
+    # and we cannot tell. That is why this is only used where the caller has
+    # already accepted the cost: the batch path re-runs and catches it.
+    return {"response": text, "tokens": streamed.get("tokens", 0),
+            "streamed": True}
+
+
 async def _call_native_tools(provider, messages: list[dict],
                              model: str | None = None,
                              only: set[str] | None = None,
-                             reply_directive: str = "") -> dict:
+                             reply_directive: str = "",
+                             on_delta=None,
+                             final: bool = False) -> dict:
     """Use native function-calling API (OpenAI/DeepSeek/Gemini)."""
+    from backend.providers import system_role
     tools = skill_registry.to_openai_tools(only)
     messages = _with_directive(messages, reply_directive)
+
+    # A final round is text by construction: _final_answer has already told the
+    # model to stop calling tools. Streaming it is safe, and it is the only round
+    # worth streaming - every earlier round is narration the model may discard.
+    # Tool rounds stay on the batch call; see _streamed_answer for why.
+    # `on_delta is not None` is part of the test, not a detail. Streaming is a
+    # UI affordance, and a caller with no callback (a bot, a check, the Code
+    # page's own planner) must keep the byte-for-byte batch path it had before:
+    # otherwise every headless caller silently changes its provider call, its
+    # token accounting and its error handling the moment this ships.
+    if final and on_delta is not None:
+        streamed = await _streamed_answer(provider, messages, model,
+                                          on_delta=on_delta)
+        if not streamed.get("stream_failed"):
+            return streamed
 
     try:
         try:
@@ -698,7 +1367,23 @@ async def _call_native_tools(provider, messages: list[dict],
             return await _call_prompt_tools(provider, messages, model, only,
                                             reply_directive)
 
-        if not result.ok:
+        # A round that FAILED but still parsed tool calls must not have them
+        # silently dropped. That ordering was load-bearing in a real outage:
+        # `openai_provider` tested `not content.strip()` before reading
+        # `tool_calls`, so it returned ok=False for a model that had sent a
+        # perfectly good call, and this branch then discarded whatever else
+        # the round carried. The provider is fixed (see check_tool_calls.py);
+        # this is the loop refusing to lose a call on the same shape, so a
+        # different provider cannot reintroduce it.
+        # A round that FAILED but still parsed tool calls must not have them
+        # silently dropped. That ordering was load-bearing in a real outage:
+        # `openai_provider` tested `not content.strip()` before reading
+        # `tool_calls`, so it returned ok=False for a model that had sent a
+        # perfectly good call, and this branch then discarded whatever else
+        # the round carried. The provider is fixed (see check_tool_calls.py);
+        # this is the loop refusing to lose a call on the same shape, so a
+        # different provider cannot reintroduce it.
+        if not result.ok and not getattr(result, "tool_calls", None):
             err_lower = (result.error or "").lower()
             if any(k in err_lower for k in ("tool", "function", "unrecognized field", "extra fields", "not supported")):
                 log.info("Native tools unsupported by provider '%s' (%s), falling back to prompt tools",
@@ -711,6 +1396,14 @@ async def _call_native_tools(provider, messages: list[dict],
 
         response_text = result.response or ""
         tokens = result.tokens_in + result.tokens_out
+
+        # Learn from the token count whether this endpoint actually sent the
+        # system prompt. Free — the usage is already in the response — and it
+        # decides whether the next turn needs the fold-in above.
+        try:
+            system_role.record(provider, result.tokens_in, messages)
+        except Exception as e:  # noqa: BLE001
+            log.debug("system-role detection failed: %s", e)
 
         # Parse native tool calls (OpenAI format)
         tool_calls = []
@@ -753,7 +1446,9 @@ async def _call_native_tools(provider, messages: list[dict],
 async def _call_prompt_tools(provider, messages: list[dict],
                              model: str | None = None,
                              only: set[str] | None = None,
-                             reply_directive: str = "") -> dict:
+                             reply_directive: str = "",
+                             on_delta=None,
+                             final: bool = False) -> dict:
     """For providers without native tool support: give it the catalogue first.
 
     The catalogue is its own message immediately before the user's, rather than
@@ -766,6 +1461,7 @@ async def _call_prompt_tools(provider, messages: list[dict],
     nothing. The question is also what the model reads last again, which is where
     a small model looks to find out what it was asked.
     """
+    from backend.providers import system_role
     if only is None:
         query = _last_user_text(messages)
         only = skill_registry.filter_for_query(query)
@@ -830,6 +1526,28 @@ async def _call_prompt_tools(provider, messages: list[dict],
                              % (provider_id or "the model", limit)),
                 "tokens": 0}
 
+    # The stream is buffered, never shown as it arrives, because unlike a native
+    # round this one CAN carry a tool call - the whole point of this path is that
+    # the model writes its call as text. Streaming a call to the screen would
+    # print JSON at the user and then erase it. So: collect the deltas, and only
+    # release them once the text is known to contain no call. `on_delta` is not
+    # wired until that decision, which is why the buffer is kept at all.
+    stream_text = ""
+    if final and on_delta is not None:
+        streamed = await _streamed_answer(provider, modified_messages, model,
+                                          max_tokens=max_tokens)
+        if not streamed.get("stream_failed"):
+            stream_text = streamed.get("response") or ""
+            if not _parse_tool_response(stream_text)["calls"] \
+                    and not _extract_tool_calls(stream_text):
+                try:
+                    on_delta(stream_text)
+                except Exception:
+                    log.debug("stream listener failed", exc_info=True)
+                return {"response": stream_text,
+                        "tokens": streamed.get("tokens", 0)}
+            stream_text = ""  # it was a tool call; fall through to the batch path
+
     try:
         result = await provider.chat(
             modified_messages,
@@ -842,6 +1560,16 @@ async def _call_prompt_tools(provider, messages: list[dict],
             log.warning("Provider '%s' failed (prompt tools): %s",
                         getattr(provider, "provider_id", "?"), result.error)
             return {"response": f"[Provider error: {result.error}]", "tokens": 0}
+
+        # Learn from the token count whether this endpoint actually sent the
+        # system prompt (see backend/providers/system_role.py). This path
+        # matters as much as the native one: a provider id outside
+        # NATIVE_TOOL_PROVIDERS — 9router, say — comes here for EVERY turn, so
+        # detecting only on the native path would never fire at all.
+        try:
+            system_role.record(provider, result.tokens_in, modified_messages)
+        except Exception as e:  # noqa: BLE001
+            log.debug("system-role detection failed: %s", e)
 
         response_text = result.response
         tokens = result.tokens_in + result.tokens_out
@@ -1076,6 +1804,150 @@ def _call_from_syntax(text: str) -> dict | None:
     return {"name": name, "params": params}
 
 
+# `<name><param>value</param></name>` — the XML-ish shape several models emit
+# regardless of what the catalogue asks for.
+#
+# 9router + Voxagent is one: told in plain terms to answer with a fenced
+# ```tool JSON block, it replied "I can't emit a call for a tool I don't have"
+# and wrote `<run_command><command>dir</command></run_command>` anyway. The
+# format it uses is its own habit, not a mistake to correct — and the old
+# parser returned nothing at all for it, not even `malformed`, so the call was
+# invisible and the turn became a plain answer. Meeting the model where it is
+# costs one regex; not doing so costs every tool call it ever attempts.
+_XML_CALL = re.compile(
+    r"<([A-Za-z_][A-Za-z0-9_.-]*)\s*>(.*?)</\1>", re.DOTALL)
+_XML_PARAM = re.compile(
+    r"<([A-Za-z_][A-Za-z0-9_.-]*)\s*>(.*?)</\1>", re.DOTALL)
+
+
+# DeepSeek's DSML markup, emitted as literal TEXT rather than through the API's
+# `tool_calls` field. Caught live: the model answered a question about a saved
+# meeting with
+#
+#     <｜｜DSML｜｜ calls>
+#     <｜｜DSML｜｜ invoke name="meeting_list">
+#     </｜｜DSML｜｜ invoke>
+#     </｜｜DSML｜｜ calls>
+#
+# and nothing else. The old parser returned `[]` for that AND did not mark it
+# malformed, so a real call was discarded in silence: no tool ran, and the user
+# was shown the raw markup as if it were prose.
+#
+# Both the fullwidth bars (U+FF5C, what was actually emitted) and the ASCII
+# pipes are accepted, because which one appears depends on the build and
+# guessing wrong costs the whole call. Sibling of `_call_from_xml` and here for
+# the same reason it gives: the format is the model's habit, not a mistake, and
+# meeting it costs one regex.
+_DSML_BARS = r"(?:\uff5c|\|)"
+_DSML_CALL = re.compile(
+    r"<" + _DSML_BARS + r"*DSML" + _DSML_BARS + r"*\s+invoke\s+name\s*=\s*"
+    r"[\"\']?([A-Za-z_][A-Za-z0-9_.-]*)[\"\']?\s*>(.*?)</"
+    + _DSML_BARS + r"*DSML" + _DSML_BARS + r"*\s+invoke\s*>",
+    re.DOTALL | re.IGNORECASE)
+_DSML_PARAM = re.compile(
+    r"<" + _DSML_BARS + r"*DSML" + _DSML_BARS + r"*\s+parameter\s+name\s*=\s*"
+    r"[\"\']?([A-Za-z_][A-Za-z0-9_.-]*)[\"\']?[^>]*>(.*?)</"
+    + _DSML_BARS + r"*DSML" + _DSML_BARS + r"*\s+parameter\s*>",
+    re.DOTALL | re.IGNORECASE)
+
+
+# `<tool_call>` wrappers, seen live as `<tool_call>meeting_list</tool_call>`.
+# The JSON form inside the tag already parsed (the fenced-json path finds the
+# object); the bare-name and attribute forms did NOT, and -- like DSML -- they
+# were not marked malformed either, so a real call vanished and the tag was
+# shown to the user as prose.
+_TOOLCALL_TAG = re.compile(
+    r"<tool_call\b[^>]*>(.*?)</tool_call\s*>", re.DOTALL | re.IGNORECASE)
+_TOOLCALL_SELF = re.compile(
+    r"<tool_call\b[^>]*\bname\s*=\s*[\"\']([A-Za-z_][A-Za-z0-9_.-]*)[\"\'][^>]*/?>",
+    re.IGNORECASE)
+
+
+def _call_from_toolcall_tag(text: str) -> dict | None:
+    """A call wrapped in `<tool_call>` tags, naming the tool bare.
+
+    Only a real skill name is accepted, the same rule `_call_from_xml` and
+    `_call_from_dsml` follow: an unmatched name starts the market-and-forge
+    path and writes a generated file under a name the model invented.
+    """
+    inner = str(text or "").strip()
+    if "tool_call" not in inner.lower():
+        return None
+    for match in _TOOLCALL_TAG.finditer(inner):
+        body = match.group(1).strip()
+        if not body:
+            continue
+        # `name(arg)` or a bare name. JSON inside the tag is handled earlier by
+        # the object path, so a body starting with '{' is not this parser's job.
+        candidate = body
+        if "(" in candidate:
+            candidate = candidate.split("(", 1)[0]
+        candidate = candidate.split()[0] if candidate.split() else ""
+        name = _normalise_tool_name(candidate)
+        if name and skill_registry.get(name):
+            return {"name": name, "params": {}}
+    for match in _TOOLCALL_SELF.finditer(inner):
+        name = _normalise_tool_name(match.group(1))
+        if name and skill_registry.get(name):
+            return {"name": name, "params": {}}
+    return None
+
+
+def _call_from_dsml(text: str) -> dict | None:
+    """The FIRST DSML call in `text`, or None.
+
+    Deliberately mirrors `_call_from_xml`: only a real skill name is accepted,
+    because an angle-bracket tag is a guess at what the model meant and a wrong
+    guess starts the market-and-forge path.
+    """
+    inner = str(text or "").strip()
+    if "DSML" not in inner:
+        return None
+    for match in _DSML_CALL.finditer(inner):
+        name = _normalise_tool_name(match.group(1))
+        if not name or not skill_registry.get(name):
+            continue
+        params: dict = {}
+        for pm in _DSML_PARAM.finditer(match.group(2)):
+            params[pm.group(1).strip()] = pm.group(2).strip()
+        return {"name": name, "params": params}
+    return None
+
+
+def _call_from_xml(text: str) -> dict | None:
+    """A call written as `<name><param>value</param></name>`.
+
+    Only a real skill name: an angle-bracket tag is a guess at what the model
+    meant, and guessing wrong starts the market-and-forge path, which writes a
+    generated skill file. The same rule `_call_from_syntax` follows.
+    """
+    inner = str(text or "").strip()
+    if not inner or "<" not in inner:
+        return None
+    for match in _XML_CALL.finditer(inner):
+        name = _normalise_tool_name(match.group(1))
+        if not name or not skill_registry.get(name):
+            continue
+        body = match.group(2)
+        params: dict = {}
+        for pm in _XML_PARAM.finditer(body):
+            key = pm.group(1).strip()
+            if key == match.group(1):
+                continue          # the outer tag, not a parameter
+            params[key] = pm.group(2).strip()
+        if not params:
+            # `<name>bare value</name>`: a single unnamed argument.
+            bare = body.strip()
+            if bare and "<" not in bare:
+                declared = _declared_params(name)
+                params[declared[0] if declared else "arg1"] = bare
+        if params:
+            return {"name": name, "params": params}
+        # A no-argument call: <session_list></session_list>
+        return {"name": name, "params": {}}
+    return None
+
+
 def _looks_like_call(text: str) -> bool:
     """Whether this is a tool call that could not be read.
 
@@ -1089,8 +1961,16 @@ def _looks_like_call(text: str) -> bool:
     if '"tool"' in inner or '"name"' in inner:
         return True
     match = _CALL_SYNTAX.match(inner)
-    return bool(match) and bool(
-        skill_registry.get(_normalise_tool_name(match.group(1))))
+    if bool(match) and bool(
+            skill_registry.get(_normalise_tool_name(match.group(1)))):
+        return True
+    # An angle-bracket tag naming a real skill, that the XML parser could not
+    # read. Reporting it as malformed is the point: the silent version of this
+    # is what let a tool call become a plain answer with no error anywhere.
+    for m in re.finditer(r"<([A-Za-z_][A-Za-z0-9_.-]*)[\s>]", inner):
+        if skill_registry.get(_normalise_tool_name(m.group(1))):
+            return True
+    return False
 
 
 def _parse_tool_response(text: str) -> dict:
@@ -1132,6 +2012,11 @@ def _parse_tool_response(text: str) -> dict:
             if call:
                 calls.append(call)
                 found = True
+        if not found and language in ("", "tool", "json", "xml"):
+            call = _call_from_xml(inner)
+            if call:
+                calls.append(call)
+                found = True
         if found:
             blocks.append(match.group(0))
         elif _looks_like_call(inner):
@@ -1152,6 +2037,32 @@ def _parse_tool_response(text: str) -> dict:
             bare = _call_from_syntax(text)
             if bare:
                 calls.append(bare)
+                blocks.append(text.strip())
+        if not calls:
+            # DSML before the generic XML form: a DSML reply also parses as
+            # nothing under `_call_from_xml` (its tags are `<|DSML| invoke>`,
+            # not `<name>`), so order does not change the result for DSML --
+            # but a DSML block that DID match the XML regex would otherwise be
+            # read as a tool called "DSML", which is not a skill.
+            dsml_call = _call_from_dsml(text)
+            if dsml_call:
+                calls.append(dsml_call)
+                blocks.append(text.strip())
+        if not calls:
+            # `<tool_call>meeting_list</tool_call>`. The JSON form inside this
+            # tag was already handled above; the bare-name form was not, and
+            # like DSML it was discarded silently rather than flagged.
+            tagged = _call_from_toolcall_tag(text)
+            if tagged:
+                calls.append(tagged)
+                blocks.append(text.strip())
+        if not calls:
+            xml_call = _call_from_xml(text)
+            if xml_call:
+                calls.append(xml_call)
+                # The whole reply is swallowed as a block: the model wrapped the
+                # call in its prose ("Let me do it."), and showing that plus the
+                # markup would leak the call to the user.
                 blocks.append(text.strip())
 
     return {"calls": calls, "blocks": blocks, "malformed": malformed}

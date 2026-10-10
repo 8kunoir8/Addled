@@ -133,6 +133,21 @@ CODE_DIRECTORIES = {
     "backend/memory",
 }
 
+# `app_paths` constants whose `DATA_DIR` root makes them a SIBLING of `backend/`
+# in the user's profile, not a child of the install. A path anchored on one of
+# these is not shipped and not shipped-over, so it needs no `.gitignore` rule to
+# protect it — but it still needs to be listed here, because the "everything the
+# app writes must be excluded" assertion below reads every discovered path and a
+# silent skip is how a real leak would hide.
+#
+# `PYLIBS_DIR` is the precedent: on-demand `pip` installs land there, and they
+# are deliberately unpinned (the folder is on the user's disk and git's own
+# ignore rules do not reach it).
+OUT_OF_TREE_ANCHORS = {
+    "PYLIBS_DIR": "on-demand pip installs, under the user's own data directory",
+    "CLI_TOOLS_DIR": "tools the user builds, under the user's own data directory",
+}
+
 # What a store's path looks like in this codebase. Every state module follows
 # one of these shapes, so matching them keeps the check honest as files are
 # added — the alternative is a hand-written list, which is the very thing that
@@ -146,10 +161,17 @@ CODE_DIRECTORIES = {
 # `Path(__file__).parent…` shapes stay in the pattern because nothing stops a new
 # module from being written that way, and a store this check cannot see is a
 # store that could ship.
+#
+# The `app_paths.<NAME>` anchor is deliberately NOT pinned to `MEMORY_DIR`.
+# `app_paths` grew a second writable root — `CLI_TOOLS_DIR`, alongside
+# `PYLIBS_DIR` — and a pattern naming one constant silently stops seeing
+# anything anchored on the other. That is the exact failure this suite exists to
+# catch, so the pattern covers every `app_paths.<CONST>` and the constants that
+# live OUTSIDE the packaged tree are named in `OUT_OF_TREE_ANCHORS` below.
 _STATE_EXPR = re.compile(
     r'^[A-Z_]+\s*=\s*'
     r'(?P<base>Path\(__file__\)(?:\.resolve\(\))?'
-    r'(?:\.parent)+|SETTINGS_PATH\.parent|app_paths\.MEMORY_DIR)'
+    r'(?:\.parent)+|SETTINGS_PATH\.parent|app_paths\.(?P<const>[A-Z_]+))'
     r'(?P<tail>(?:\s*/\s*"[^"]+")+)')
 
 def written_state_paths() -> set[str]:
@@ -163,6 +185,11 @@ def written_state_paths() -> set[str]:
     is the only way to resolve it. Guessing from the file's own directory put
     `memory/mood.json` under `backend/character/`, which is not where it is
     written and would have had the check guarding a path nothing uses.
+
+    Paths anchored on an `OUT_OF_TREE_ANCHORS` constant are omitted: they live
+    under the user's own data directory, so there is nothing to exclude from the
+    installer and no `.gitignore` rule that could protect them. Omitting them
+    here rather than in `main()` keeps every caller honest by construction.
     """
     backend = os.path.join(ROOT, "backend")
     found: set[str] = set()
@@ -184,6 +211,12 @@ def written_state_paths() -> set[str]:
                 if not m:
                     continue
                 base = m.group("base")
+                const = m.group("const")
+                # A constant declared out of the packaged tree contributes
+                # nothing to exclude, and naming it here means adding another
+                # one later cannot quietly widen what this check ignores.
+                if const and const in OUT_OF_TREE_ANCHORS:
+                    continue
                 # Every `__file__` here is backend/<pkg>/<mod>.py, so start at
                 # that file and walk up once per `.parent`.
                 if base.startswith("Path(__file__)"):
@@ -558,6 +591,21 @@ def main() -> int:
     state_paths = written_state_paths()
     check("state paths were found in the code", len(state_paths) >= 10,
           f"only found {len(state_paths)} — has the pattern changed?")
+
+    # Every declared out-of-tree anchor must still exist in `app_paths.py`. An
+    # entry here that names a constant which was renamed or removed is worse
+    # than a missing one: it silently widens the skip, so the next store
+    # anchored on the OLD name would never be checked.
+    try:
+        app_paths_src = read(os.path.join("backend", "app_paths.py"))
+    except OSError as exc:  # pragma: no cover - only if the file is missing
+        check("app_paths.py is readable", False, str(exc))
+        app_paths_src = ""
+    for const, why in sorted(OUT_OF_TREE_ANCHORS.items()):
+        check(f"app_paths declares {const}",
+              re.search(rf"^{const}\s*=", app_paths_src, re.M) is not None,
+              f"listed as out-of-tree ({why}) but no such constant exists — "
+              "either it was renamed or the entry is stale")
 
     for rel in sorted(state_paths):
         # Seed content deliberately bundled (voice models, default skins) is

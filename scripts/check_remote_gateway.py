@@ -337,6 +337,48 @@ async def main():
     auth.login_limiter.reset()
     shutil.rmtree(tmp, ignore_errors=True)
 
+    # -- the request-method shape ------------------------------------------
+    # `websockets.asyncio.server.Request` carries a `method` field in 17.0.1 but
+    # NOT in 15.0.1, which is the version this app pins (`google_genai` needs
+    # `<17`). The handler used to read `request.method` unconditionally, so on
+    # the shipped version every request raised AttributeError and was swallowed.
+    #
+    # Both shapes are simulated here, because the one that fails cannot be
+    # reached over this machine's own socket.
+    class _ReqNoMethod:
+        """15.0.1: path and headers only."""
+        def __init__(self, path="/"):
+            self.path, self.headers = path, {}
+
+    class _ReqWithMethod:
+        """17.0.1: also has `method`."""
+        def __init__(self, method, path="/"):
+            self.path, self.headers, self.method = path, {}, method
+
+    # An unknown method must NOT be reported as a method. `getattr(req,
+    # "method", "GET")` would fail this, which is why the code returns None.
+    check("an absent request method reads as unknown, not as GET",
+          gw.gateway._request_method(_ReqNoMethod()) is None,
+          f"got {gw.gateway._request_method(_ReqNoMethod())!r}")
+
+    check("a present request method is read and upper-cased",
+          gw.gateway._request_method(_ReqWithMethod("post")) == "POST",
+          f"got {gw.gateway._request_method(_ReqWithMethod('post'))!r}")
+
+    # With no method to read, the request is refused rather than assumed to be
+    # a read -- otherwise a write would pass straight through the 405 gates.
+    r = await gw.gateway._process_request(None, _ReqNoMethod("/dashboard"))
+    check("an unreadable method is refused, not treated as a read",
+          r is not None and r.status_code == 501,
+          f"status {getattr(r, 'status_code', None)}")
+
+    # And the gates that depend on the method still refuse writes when the
+    # method IS readable -- the regression `assuming GET` would have caused.
+    r = await gw.gateway._process_request(None, _ReqWithMethod("POST", "/login"))
+    check("a POST to the login page is still refused",
+          r is not None and r.status_code == 405,
+          f"status {getattr(r, 'status_code', None)}")
+
 
 try:
     asyncio.run(main())

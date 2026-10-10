@@ -52,6 +52,12 @@ _FACTS: list[tuple[str, str]] = [
     ("calendar_add",
      "Add calendar events (`calendar_add`), list them (`calendar_list`), delete "
      "one (`calendar_delete`)."),
+    ("meeting_save",
+     "Work with meeting recordings: save one (`meeting_save`), list them "
+     "(`meeting_list`), read one (`meeting_get`), summarise it into decisions "
+     "and action items (`meeting_summarise`), and turn the action items into "
+     "scheduled tasks (`meeting_actions`). You DO have these tools; never tell "
+     "the user you cannot access their meetings."),
     ("browser_navigate",
      "Use the built-in browser to open a page (`browser_navigate`), click "
      "(`browser_click`), type (`browser_type`) and extract content "
@@ -65,6 +71,22 @@ _FACTS: list[tuple[str, str]] = [
      "Inspect and drive the screen: read it (`screen_read`), click "
      "(`desktop_click`), type (`desktop_type`), scroll, manage windows, and set "
      "volume or brightness."),
+]
+
+# The user-facing name for each capability, for the closing sentence. Ordered
+# by how _FACTS is ordered so the sentence reads as an inventory. Every entry
+# here names a real skill, and `check_tool_brief.py` enforces it and that the
+# two tables cover the same tools -- a fact with no domain is a capability the
+# closing sentence silently drops, which is the bug this table fixes.
+_DOMAINS: list[tuple[str, str]] = [
+    ("run_command", "your PC"),
+    ("task_schedule", "scheduled tasks and reminders"),
+    ("calendar_add", "calendar"),
+    ("meeting_save", "meetings"),
+    ("browser_navigate", "browser"),
+    ("read_file", "files"),
+    ("memory_set", "memory"),
+    ("desktop_click", "desktop"),
 ]
 
 # Said once, not per tool. The permission rule is the one instruction that has
@@ -88,6 +110,46 @@ _PERMISSION = (
 def _offered(tools: list[str] | None) -> set[str] | None:
     """The tool set as a set, or None for "no filter" (every enabled skill)."""
     return set(tools) if tools is not None else None
+
+
+def _cli_tools_note(only: set[str] | None) -> str:
+    """Tell the model about the user's own tools, when it has any.
+
+    A separate paragraph rather than an entry in `_FACTS`, because that table is
+    keyed by skill NAME and CLI tool names are whatever the user chose. The
+    guidance is the same for all of them, so it is said once.
+
+    Two things have to be true for this to be worth saying, and each was a
+    failure without it:
+
+    - the model should reach for a tool the user built and reviewed before
+      searching for an MCP server to download, and
+    - when nothing fits, it should SAY SO and point at where to build one,
+      rather than silently installing something or claiming it cannot help.
+    """
+    try:
+        from backend.cli_tools.registry import cli_tools
+        tools = cli_tools.list_all()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not tools:
+        return ""
+
+    available = [t for t in tools
+                 if only is None or t.name in only]
+    if not available:
+        return ""
+
+    names = ", ".join(f"`{t.name}`" for t in available[:12])
+    more = f" (and {len(available) - 12} more)" if len(available) > 12 else ""
+    return (
+        f"The user has also built their own command-line tools, available here: "
+        f"{names}{more}. Prefer these over searching for an MCP server or "
+        "downloading anything - they were written and reviewed by the user and "
+        "run locally. If a task needs a capability none of your tools covers, "
+        "say so plainly and tell the user they can build one at Settings -> "
+        "CLI Tools: do not silently install something, and do not claim the "
+        "task is impossible.")
 
 
 def capabilities_block(tools: list[str] | None) -> str:
@@ -125,10 +187,32 @@ def capabilities_block(tools: list[str] | None) -> str:
     if only is None or only & _GATED:
         blocks.append(_PERMISSION)
 
-    blocks.append(
-        "When asked what you can do, or asked to check or manage the calendar, "
-        "schedule, tasks, reminders, desktop, files, browser or memory, "
-        "acknowledge these capabilities and call the appropriate tool.")
+    cli_note = _cli_tools_note(only)
+    if cli_note:
+        blocks.append(cli_note)
+
+    # The domains named here are derived from the facts actually offered, not
+    # written out. The previous hand-written version listed "calendar, schedule,
+    # tasks, reminders, desktop, files, browser or memory" and omitted meetings
+    # -- so a model holding five `meeting_*` schemas was told, in prose, an
+    # inventory of its abilities that did not include them, and answered "there
+    # is no list meetings function wired up". That is the same drift this table
+    # was introduced to stop, one level up.
+    domains = [noun for name, noun in _DOMAINS
+               if (only is None or name in only)]
+    if domains:
+        # Serial comma, and the Oxford "or": joining bare nouns with "or" reads
+        # as one phrase ("meetings or files"), so each entry is a short noun.
+        if len(domains) == 1:
+            listed = domains[0]
+        elif len(domains) == 2:
+            listed = f"{domains[0]} or {domains[1]}"
+        else:
+            listed = ", ".join(domains[:-1]) + f", or {domains[-1]}"
+        blocks.append(
+            "When asked what you can do, or asked to check or manage "
+            f"{listed}, acknowledge these capabilities and call the "
+            "appropriate tool.")
     return "\n\n".join(blocks)
 
 

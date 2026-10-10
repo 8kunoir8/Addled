@@ -137,13 +137,28 @@ async def run():
             res_e = await verify.run_verification(
                 empty_proj, command=det_e["command"])
             if res_e.get("ran") and not res_e.get("ok"):
-                check("a run that collects nothing is flagged",
-                      res_e.get("noTests") is True, str(res_e)[:300])
+                # A run that produced no counts is either "found no tests" or
+                # "the runner could not start" (a broken plugin raises at import
+                # time). Both are honest and neither blames the code, which is
+                # the property this check exists to protect -- so assert THAT,
+                # rather than one of the two environmental outcomes. A genuine
+                # environmental failure should not read as a bug in the code.
                 line = verify.verdict_line(res_e)
-                check("and the verdict says 'no tests', not 'failed'",
-                      "no tests" in line.lower(), line)
-                check("and it does not claim a test failure",
-                      "failed with exit code" not in line.lower(), line)
+                recognised = (res_e.get("noTests") is True
+                              or res_e.get("startFailed") is True)
+                check("a run that collects nothing is flagged",
+                      recognised,
+                      "neither noTests nor startFailed was set: "
+                      + str(res_e)[:300])
+                check("and the verdict names a real reason, not a failure",
+                      "failed with exit code" not in line.lower(),
+                      line)
+                if res_e.get("noTests"):
+                    check("a runner that ran says 'no tests'",
+                          "no tests" in line.lower(), line)
+                else:
+                    check("a runner that could not start says so",
+                          "could not start" in line.lower(), line)
             else:
                 print("  (empty project unexpectedly passed; nothing to assert)")
         else:
@@ -159,6 +174,41 @@ async def run():
         check("a passing run is never flagged as no-tests",
               verify._found_no_tests("3 passed in 0.2s", {"passed": 3}) is False,
               "a pass must be unreachable by the no-tests path")
+
+        # ---- a runner that CRASHED is not a test failure either -----------
+        #
+        # Seen on a real machine: a broken pytest plugin raises at import time,
+        # so pytest prints a traceback and exits 1 with no counts. The verdict
+        # used to say "failed with exit code 1", telling the user their change
+        # broke the tests when pytest never started. Three outcomes, not two.
+        crashed = (
+            "Traceback (most recent call last):\n"
+            '  File "<frozen runpy>", line 203, in _run_module_as_main\n'
+            "ModuleNotFoundError: No module named 'pytest_xprocess'\n"
+        )
+        check("a crashed runner is not called a test failure",
+              "failed with exit code" not in
+              verify.verdict_line({"ran": True, "ok": False, "command": "pytest",
+                                   "exit_code": 1, "summary": {},
+                                   "startFailed": True}).lower(),
+              verify.verdict_line({"ran": True, "ok": False, "command": "pytest",
+                                   "exit_code": 1, "summary": {},
+                                   "startFailed": True}))
+        check("a start-up crash is recognised from its traceback",
+              verify._found_start_failure(crashed, {}) is True,
+              "a runner that never started would be reported as a failure")
+        check("a genuine test failure is NOT called a start-up crash",
+              verify._found_start_failure(
+                  "Traceback (most recent call last):\n"
+                  "  File 't.py', line 1, in test_x\n"
+                  "assert 1 == 2\n"
+                  "1 failed in 0.1s\n",
+                  {"failed": 1}) is False,
+              "a real failure was mislabelled as the runner crashing")
+        check("a passing run is not a start-up crash",
+              verify._found_start_failure("3 passed in 0.2s", {"passed": 3})
+              is False,
+              "a pass must be unreachable by the crash path")
 
         # ---- explicit command overrides detection --------------------------
         res = await verify.run_verification(

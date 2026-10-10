@@ -22,6 +22,9 @@ Roles
 ``vision``     image/screenshot input
 ``long``       very large inputs (whole file / document / repo)
 ``utility``    small background extractions (facts, titles, summaries)
+``plan``       plan mode: a scoping pass before any code is written
+``judge``      a verdict on a short piece of text, where a string match
+               is not enough (see scripts/check_*.py)
 """
 
 from __future__ import annotations
@@ -33,7 +36,8 @@ from backend.config import config
 
 log = logging.getLogger("addled.providers.router")
 
-ROLES = ("chat", "reasoning", "vision", "long", "utility")
+ROLES = ("chat", "reasoning", "vision", "long", "utility", "plan",
+         "judge")
 DEFAULT_ROLE = "chat"
 
 # Shipped role defaults, used when the saved value for a role is empty.
@@ -45,9 +49,9 @@ DEFAULT_ROLE = "chat"
 # would silently never reach anyone who had already saved a setting.
 _BUILTIN_ROLES: dict[str, dict[str, str]] = {
     "deepseek": {
-        "chat": "deepseek-v4-flash",
+        "chat": "deepseek-v4.1-flash",
         "reasoning": "deepseek-v4-pro",
-        "utility": "deepseek-chat",
+        "utility": "deepseek-v4.1-flash",
     },
 }
 

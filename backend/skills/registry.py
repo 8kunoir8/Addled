@@ -75,6 +75,24 @@ class SkillDefinition:
     # that works, and the schema shown to the model is unchanged.
     aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
+    # The skill's own instructions, in prose, for a skill that is knowledge
+    # rather than code.
+    #
+    # Until now a skill could only teach something that fitted in `description`:
+    # one line, because that is all the prompt catalogue carries. A market skill
+    # that documented a five-step procedure had that procedure stored
+    # (`market.py` keeps the SKILL.md body) but reachable only by CALLING the
+    # skill - and the model decides to call it from the one-line description it
+    # already read. So the guidance was there and unusable, which is worse than
+    # absent, because it looks like it works.
+    #
+    # `body` is not put in the prompt. The catalogue stays one line per skill;
+    # the body is fetched on demand through `skill_view`, so a long procedure
+    # costs a round trip only when the model has decided it wants one. That is
+    # the same progressive disclosure the prompt catalogue has always used for
+    # the skills themselves.
+    body: str = ""
+
     def normalise(self, params: dict | None) -> dict:
         """Fill real parameter names from their aliases, and report problems.
 
@@ -181,7 +199,16 @@ class SkillDefinition:
         return f"{self.name}({args}) — {desc}"
 
 
+# How much of a skill body `skill_view` will return in one go.
+#
+# A body is prose a person wrote to instruct a model, so the useful ones are
+# short; a 200k-character SKILL.md is almost always a bundled reference document
+# that belongs in a file, not a tool result. The cap is a backstop against a
+# single call eating the whole window, not a target.
+_SKILL_BODY_CHARS = 24000
+
 @dataclass
+
 class SkillResult:
     success: bool
     skill_name: str
@@ -809,7 +836,20 @@ class SkillRegistry:
 
             if asks_for_tools and name in discovery_tools:
                 score += 6.0
-            if asks_for_tools and category in {"mcp", "market", "forged", "meta"}:
+            # `cli` and `forged` belong here for the same reason `mcp` does: a
+            # tool the user built is a capability that extends what Addled can
+            # do, so "what tools do you have?" should surface it. Leaving it out
+            # meant a built tool was callable but invisible to the very question
+            # that asks what is available.
+            #
+            # These are ALSO force-added below (see `must`). The score alone was
+            # not enough: once a skill pack lands, `market` holds many skills
+            # with the same score, and a single built tool loses the tiebreak to
+            # them. A capability the user built is not one interchangeable
+            # candidate among a pile of prose skills, so it is guaranteed a slot
+            # rather than left to outscore them.
+            if asks_for_tools and category in {"mcp", "market", "forged", "meta",
+                                               "cli"}:
                 score += 4.0
 
             # Knowledge/wiki intent: boost wiki tools and the memory category.
@@ -893,8 +933,15 @@ class SkillRegistry:
         # and the query STILL offered none of them. Keeping them out of the
         # scored pool and taking the budget from what is left is the only
         # arrangement where "always offered" survives contact with a full list.
+        # A capability this install has and another does not: the user's own
+        # built tools (cli/forged) and any connected MCP server. These are what
+        # a tool-discovery question is really asking about, and they are few, so
+        # reserving them costs a normal query nothing.
+        own_tools = {n for n, s in enabled.items()
+                     if s.category.lower() in {"cli", "forged", "mcp"}}
+
         must: list[str] = []
-        for name in list(discovery_tools) + list(core_tools):
+        for name in list(discovery_tools) + list(core_tools) + sorted(own_tools):
             if name in enabled and name not in must and name not in selected:
                 must.append(name)
         room = max(0, max_tools - len(must))
@@ -1819,7 +1866,22 @@ class SkillRegistry:
                          "description": "Seconds to wait for it to finish.",
                          "default": 30},
             }, "required": ["command"]},
-            session_send, "system",
+            # `requires_approval=True`, and it is the whole point of this
+            # skill's entry. It types a line into a live PowerShell - the same
+            # shell `run_command` runs - so leaving the flag at its default
+            # made the shell reachable through a door that never asked, one
+            # line away from a door that asked every time. Measured before
+            # this: `session_send` with `Remove-Item <path> -Force` deleted
+            # the file, returned success, and raised no prompt.
+            #
+            # It is also in `approvals.policy.CONTENT_CLASSIFIED`, which is the
+            # part that decides WHAT the dashboard may offer. Without that, the
+            # skills page draws its permanent "always allow" switch, and a
+            # permanent grant keyed on the name cannot tell a safe line from
+            # `Remove-Item -Recurse -Force` - so one click would disarm the
+            # shell for every command typed into it afterwards. Session-only is
+            # the answer that matches the risk, exactly as for `run_command`.
+            session_send, "system", True,
         ))
 
         async def session_read(params: dict) -> dict:
@@ -3375,6 +3437,357 @@ class SkillRegistry:
             transcribe_audio, "integrations",
         ))
 
+        # ---- meetings ------------------------------------------------------
+        #
+        # A meeting is a transcript plus what came out of it. The read-only
+        # ones are ungated on purpose: listing and reading meetings is exactly
+        # like reading the journal, and gating a lookup teaches the user to
+        # approve without reading. Nothing here reaches a third party, so none
+        # of it belongs in CONTENT_CLASSIFIED.
+
+        async def meeting_save(params: dict) -> dict:
+            """Save a transcript as a meeting, transcribing a file if given."""
+            from backend.meetings import store
+
+            title = str(params.get("title") or "").strip()
+            transcript = str(params.get("transcript") or "")
+            segments = params.get("segments") or None
+            language = ""
+            path = str(params.get("path") or "").strip()
+
+            # Pointing at a file transcribes it first, which is the flow the
+            # plan calls the safe complete path: one call, no capture risk.
+            if path and not transcript:
+                from backend.voice.stt import transcribe_file
+                result = await asyncio.to_thread(transcribe_file, path)
+                if not result.get("success"):
+                    return result
+                transcript = result.get("text") or ""
+                segments = result.get("segments") or None
+                language = result.get("language") or ""
+                if not title:
+                    from pathlib import Path
+                    title = Path(path).stem.replace("_", " ").replace("-", " ").strip()
+
+            if not transcript.strip():
+                return {"success": False,
+                        "error": ("Nothing to save — pass a 'transcript', or a "
+                                  "'path' to a recording to transcribe.")}
+
+            meeting = store.create(title or "Meeting",
+                                   source="file" if path else "manual")
+            meeting = store.set_transcript(meeting["id"], transcript,
+                                           segments=segments, language=language)
+            return {
+                "success": True,
+                "id": meeting["id"],
+                "title": meeting["title"],
+                "segments": len(meeting.get("segments") or []),
+                "chars": len(meeting.get("transcript") or ""),
+                "message": (f"Saved as '{meeting['title']}'. Summarise it with "
+                            "meeting_summarise."),
+            }
+        self.register(SkillDefinition(
+            "meeting_save",
+            "Save a meeting: either a transcript you already have, or the path "
+            "to a recording to transcribe first. Use this when the user points "
+            "you at a meeting recording or hands you a transcript to keep. "
+            "Returns the meeting id, which the other meeting tools take. After "
+            "saving, offer to summarise it.",
+            {"type": "object", "properties": {
+                "title": {"type": "string", "description": "What the meeting is called."},
+                "transcript": {"type": "string",
+                               "description": "The transcript text, if you have it."},
+                "path": {"type": "string",
+                         "description": "Recording to transcribe, if you do not."},
+                "segments": {"type": "array",
+                             "description": "Timestamped segments, if you have them."},
+            }},
+            meeting_save, "integrations",
+        ))
+
+        async def meeting_list(params: dict) -> dict:
+            """List saved meetings, newest first."""
+            from backend.meetings import store
+            limit = int(params.get("limit") or 20)
+            meetings = store.list_meetings(limit=limit)
+            if not meetings:
+                return {"success": True, "meetings": [], "count": 0,
+                        "message": "No meetings saved yet."}
+            return {
+                "success": True,
+                "count": len(meetings),
+                "meetings": [{
+                    "id": m["id"],
+                    "title": m.get("title", ""),
+                    "started_at": m.get("started_at"),
+                    "minutes": round(((m.get("ended_at") or 0)
+                                      - (m.get("started_at") or 0)) / 60, 1)
+                    if m.get("ended_at") else None,
+                    "segment_count": m.get("segment_count", 0),
+                    "summarised": bool(m.get("summary")),
+                    "summary": (m.get("summary") or "")[:200],
+                    "actions": len(m.get("actions") or []),
+                } for m in meetings],
+            }
+        self.register(SkillDefinition(
+            "meeting_list",
+            "List saved meetings, newest first, with whether each has been "
+            "summarised. Use this when the user asks about their meetings or "
+            "wants to find one by name.",
+            {"type": "object", "properties": {
+                "limit": {"type": "integer", "description": "How many to list (default 20)."},
+            }},
+            meeting_list, "integrations",
+        ))
+
+        async def meeting_get(params: dict) -> dict:
+            """Read one meeting: its transcript, summary, actions and decisions."""
+            from backend.meetings import store
+            meeting_id = str(params.get("id") or "").strip()
+            if not meeting_id:
+                return {"success": False, "error": "Which meeting? Pass its 'id'."}
+            meeting = store.get(meeting_id)
+            if meeting is None:
+                return {"success": False,
+                        "error": f"No meeting with id '{meeting_id}'."}
+            # The full transcript is large. A caller asking for the reading
+            # wants the summary; the transcript is there when asked for.
+            full = bool(params.get("include_transcript"))
+            out = {
+                "success": True,
+                "id": meeting["id"],
+                "title": meeting.get("title", ""),
+                "summary": meeting.get("summary", ""),
+                "decisions": meeting.get("decisions") or [],
+                "actions": meeting.get("actions") or [],
+                "open_questions": meeting.get("open_questions") or [],
+                "segments": meeting.get("segments") or [],
+                "chars": len(meeting.get("transcript") or ""),
+                "summarised": bool(meeting.get("summary")),
+            }
+            if full:
+                out["transcript"] = meeting.get("transcript", "")
+            else:
+                out["note"] = ("Transcript omitted to keep this small — ask "
+                               "again with include_transcript true to read it.")
+            return out
+        self.register(SkillDefinition(
+            "meeting_get",
+            "Read a saved meeting: its summary, decisions, action items and "
+            "open questions, plus the timestamps. The transcript is left out "
+            "unless include_transcript is true, because it is long. Pass "
+            "include_transcript when the user asks what was actually said.",
+            {"type": "object", "properties": {
+                "id": {"type": "string", "description": "The meeting id."},
+                "include_transcript": {"type": "boolean",
+                                       "description": "Include the full transcript (default false)."},
+            }, "required": ["id"]},
+            meeting_get, "integrations",
+        ))
+
+        async def meeting_summarise(params: dict) -> dict:
+            """Summarise a saved meeting into decisions, actions and questions."""
+            from backend.meetings import store
+            from backend.meetings import summarise as summariser
+            meeting_id = str(params.get("id") or "").strip()
+            if not meeting_id:
+                return {"success": False, "error": "Which meeting? Pass its 'id'."}
+            meeting = store.get(meeting_id)
+            if meeting is None:
+                return {"success": False,
+                        "error": f"No meeting with id '{meeting_id}'."}
+            transcript = meeting.get("transcript") or ""
+            if not transcript.strip():
+                return {"success": False,
+                        "error": "That meeting has no transcript to summarise."}
+
+            result = await summariser.summarise(
+                transcript, segments=meeting.get("segments") or None)
+            if not result.get("success"):
+                return {"success": False, "error": result.get("error"),
+                        "hint": ("The meeting is saved and unchanged — "
+                                 "summarising can be retried.")}
+
+            stored = store.set_summary(
+                meeting_id, result["summary"],
+                decisions=result["decisions"],
+                actions=result["actions"],
+                open_questions=result["open_questions"])
+            # Make it answerable later: the summary goes into semantic recall
+            # so a future "what did we decide about X?" reaches it. Failing
+            # to index must not fail the summary the user waited for.
+            try:
+                store.index(meeting_id)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not index meeting %s: %s", meeting_id, e)
+            out = {
+                "success": True,
+                "id": meeting_id,
+                "title": stored.get("title", ""),
+                "summary": result["summary"],
+                "decisions": result["decisions"],
+                "actions": result["actions"],
+                "open_questions": result["open_questions"],
+                "minutes": round(((stored.get("ended_at") or 0)
+                                  - (stored.get("started_at") or 0)) / 60, 1)
+                if stored.get("ended_at") else None,
+            }
+            # Partial is surfaced, never smoothed over: a summary of 3 of 8
+            # parts must not read as the whole meeting.
+            if result.get("partial"):
+                out["partial"] = True
+                out["warning"] = (
+                    f"Only {result['parts_ok']} of {result['blocks']} parts of "
+                    "the transcript could be summarised, so the summary is "
+                    "incomplete. Say so when you present it.")
+            return out
+        self.register(SkillDefinition(
+            "meeting_summarise",
+            "Summarise a saved meeting into a short summary, the decisions "
+            "made, the action items (with owners where the transcript names "
+            "them) and anything left open. Long meetings are summarised in "
+            "parts and combined. Use this after meeting_save, or when the user "
+            "asks what came out of a meeting. If it reports 'partial', tell the "
+            "user the summary is incomplete rather than presenting it as whole.",
+            {"type": "object", "properties": {
+                "id": {"type": "string", "description": "The meeting id."},
+            }, "required": ["id"]},
+            meeting_summarise, "integrations",
+        ))
+
+        async def meeting_actions(params: dict) -> dict:
+            """Propose a meeting's action items as tasks, or create chosen ones.
+
+            Two modes, and the split is the whole point. Called without
+            `accept`, it PROPOSES: it lists the action items and writes nothing.
+            Only a second call that names the ones the user agreed to creates
+            tasks. `who` is frequently a third party ("Tom to send the migration
+            plan"), and silently filing that on the user's own list is putting
+            someone else's job in their scheduler.
+            """
+            from backend.meetings import store
+            from backend.tasks.recurrence import next_run
+            from backend.tasks.store import ScheduledTask, task_store
+
+            meeting_id = str(params.get("id") or "").strip()
+            if not meeting_id:
+                return {"success": False, "error": "Which meeting? Pass its 'id'."}
+            meeting = store.get(meeting_id)
+            if meeting is None:
+                return {"success": False,
+                        "error": f"No meeting with id '{meeting_id}'."}
+            actions = [a for a in (meeting.get("actions") or []) if a]
+            if not actions:
+                return {"success": False,
+                        "error": ("That meeting has no action items recorded. "
+                                  "Summarise it first with meeting_summarise."),
+                        "hint": "meeting_summarise extracts the action items."}
+
+            accept = params.get("accept")
+
+            # ---- propose (default) ------------------------------------------
+            if not accept:
+                return {
+                    "success": True,
+                    "mode": "proposal",
+                    "id": meeting_id,
+                    "title": meeting.get("title", ""),
+                    "actions": [
+                        {"index": i,
+                         "what": str(a.get("what") or a.get("action") or
+                                     a.get("task") or "").strip(),
+                         "who": str(a.get("who") or "").strip()}
+                        for i, a in enumerate(actions)],
+                    "note": ("These are proposals, nothing was scheduled. Ask "
+                             "the user which to add, then call meeting_actions "
+                             "again with accept=[the indexes]. Items owned by "
+                             "someone other than the user should be left to "
+                             "them rather than added to the user's list."),
+                }
+
+            # ---- confirm: create only what was named -------------------------
+            if isinstance(accept, bool):
+                # accept=true is ambiguous about WHICH items; refusing is
+                # better than guessing and creating all of them.
+                return {"success": False,
+                        "error": ("Pass accept as the list of indexes to add, "
+                                  "e.g. accept=[0, 2]. A bare true is ambiguous "
+                                  "and nothing was scheduled.")}
+            if not isinstance(accept, list):
+                return {"success": False,
+                        "error": "accept must be a list of action indexes."}
+            wanted: list[int] = []
+            for v in accept:
+                try:
+                    wanted.append(int(v))
+                except (TypeError, ValueError):
+                    return {"success": False,
+                            "error": f"accept contains a non-number: {v!r}"}
+
+            from datetime import datetime, timedelta
+            title = meeting.get("title") or "meeting"
+            created, failed, skipped = [], [], []
+            for idx in wanted:
+                if idx < 0 or idx >= len(actions):
+                    skipped.append({"index": idx,
+                                    "reason": "no such action item"})
+                    continue
+                item = actions[idx]
+                what = str(item.get("what") or item.get("action") or
+                           item.get("task") or "").strip()
+                if not what:
+                    skipped.append({"index": idx, "reason": "empty action text"})
+                    continue
+                who = str(item.get("who") or "").strip()
+                # The owner is kept in the title, not silently dropped: a task
+                # reading "send the migration plan" is a different thing from
+                # "Tom: send the migration plan".
+                task_title = f"{who}: {what}" if who else what
+                now = datetime.now()
+                task = ScheduledTask(
+                    id="", title=task_title, kind="task", action="notify",
+                    payload=task_title,
+                    time="09:00",
+                    date=now.strftime("%Y-%m-%d"),
+                    recurrence={"type": "none", "weekdays": []},
+                    source="llm",
+                )
+                if task.time <= now.strftime("%H:%M"):
+                    task.date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+                task.next_run = next_run(task)
+                added, err = task_store.add(task)
+                if added is None:
+                    failed.append({"index": idx, "what": what, "error": err})
+                else:
+                    created.append({"index": idx, "task_id": added.id,
+                                    "title": added.title, "who": who})
+            return {
+                "success": bool(created),
+                "mode": "created",
+                "id": meeting_id,
+                "created": created,
+                "failed": failed,
+                "skipped": skipped,
+                "count": len(created),
+                "note": ("Each created task is a 09:00 reminder for the day "
+                         "after it was added — the meeting gave no date, so "
+                         "the user should set a real one if they need it."),
+            }
+        self.register(SkillDefinition(
+            "meeting_actions",
+            "A meeting's action items as tasks. Omit accept to PROPOSE only "
+            "(schedules nothing); never create without the user's say-so.",
+            {"type": "object", "properties": {
+                "id": {"type": "string", "description": "The meeting id."},
+                "accept": {
+                    "type": "array", "items": {"type": "integer"},
+                    "description": ("Indexes of the proposed action items to "
+                                    "create as tasks. Omit to get proposals.")},
+            }, "required": ["id"]},
+            meeting_actions, "integrations",
+        ))
+
         # ---- messaging a person through a bot bridge -----------------------
         #
         # Gated, and deliberately. Every other bot action replies to someone who
@@ -3756,6 +4169,118 @@ class SkillRegistry:
             "List all skills that have been dynamically learned/forged",
             {"type": "object", "properties": {}},
             list_forged, "meta",
+        ))
+
+        # ---------------------------------------------------------- skill_view
+        async def skill_view(params: dict) -> dict:
+            """Read a skill's own instructions.
+
+            The catalogue the model reads carries one line per skill, which is
+            the right size for DECIDING whether a skill is relevant and far too
+            small to tell it HOW to use one. A market skill documenting a
+            five-step procedure had its procedure stored and unreachable: the
+            only way to see it was to call the skill, which you do not do until
+            you already know you want it.
+
+            So the body is fetched on demand, by name - the same progressive
+            disclosure the catalogue has always used for the skills themselves.
+            """
+            name = str(params.get("name") or params.get("skill") or "").strip()
+            if not name:
+                return {"success": False, "error": "No skill name given"}
+            skill = skill_registry.get(name)
+            if skill is None:
+                # Never a dead end: the closest names are what the model needs
+                # to correct itself, and it is already reading the catalogue.
+                # Matched in BOTH directions - the wanted name inside a known
+                # one, and a known one inside the wanted name. One direction
+                # only catches a shortened name ("probe" for "probe_skill") and
+                # misses the commoner slip, a name with a word appended
+                # ("probe_skill_bodies_nope" for "probe_skill_bodies"), because
+                # then the known name is the shorter string.
+                low = name.lower()
+                pool = [s.name for s in skill_registry.enabled_list_all()]
+                near = [n for n in pool if low in n.lower()][:8]
+                if not near:
+                    near = [n for n in pool if n.lower() in low][:8]
+                if not near:
+                    # Last resort: share a word, so a miss in the middle of a
+                    # name still lands on something useful.
+                    words = set(low.replace("-", "_").split("_")) - {""}
+                    near = [n for n in pool
+                            if words & set(n.lower().replace("-", "_").split("_"))
+                            ][:8]
+                return {"success": False,
+                        "error": f"No skill named {name!r}",
+                        "close_matches": near}
+            body = (getattr(skill, "body", "") or "").strip()
+            if not body:
+                # Say so plainly. An empty answer reads as "this skill has no
+                # instructions", which is true; inventing a summary would not be.
+                return {"success": True, "name": skill.name,
+                        "description": skill.description,
+                        "body": "",
+                        "note": ("This skill has no written instructions. Its "
+                                 "one-line description is all there is; call "
+                                 "it if it looks relevant.")}
+            return {"success": True, "name": skill.name,
+                    "description": skill.description, "body": body,
+                    "truncated": len(body) > _SKILL_BODY_CHARS,
+                    }
+
+        self.register(SkillDefinition(
+            "skill_view",
+            "Read a skill's full instructions before using it. The tool list "
+            "shows one line per skill; this returns what that skill actually "
+            "says to do. Use it when a skill's description sounds relevant but "
+            "you need to know the steps, the order, or the caveats.",
+            {"type": "object", "properties": {
+                "name": {"type": "string",
+                         "description": "The skill name, exactly as listed"}},
+             "required": ["name"]},
+            skill_view, "meta",
+        ))
+
+        # -------------------------------------------------------- skill_search
+        async def skill_search(params: dict) -> dict:
+            """Find skills by what they do, when the name is not known.
+
+            The catalogue is already in the prompt, so this earns its place only
+            for the case the catalogue cannot serve: a task described in the
+            user's words, where the right skill exists but under a name the
+            model would not have guessed. Returns descriptions, not bodies -
+            this is a finder, and `skill_view` is the reader.
+            """
+            query = str(params.get("query") or params.get("q") or "").strip()
+            if not query:
+                return {"success": False, "error": "No search query given"}
+            words = [w for w in query.lower().replace("_", " ").split()
+                     if len(w) > 2]
+            hits = []
+            for skill in skill_registry.enabled_list_all():
+                hay = f"{skill.name} {skill.description}".lower()
+                score = sum(1 for w in words if w in hay)
+                if score:
+                    hits.append((score, skill))
+            hits.sort(key=lambda pair: (-pair[0], pair[1].name))
+            return {"success": True, "query": query,
+                    "count": len(hits),
+                    "skills": [{"name": s.name, "description": s.description,
+                                "category": s.category,
+                                "has_instructions": bool(
+                                    getattr(s, "body", ""))}
+                               for _, s in hits[:12]]}
+
+        self.register(SkillDefinition(
+            "skill_search",
+            "Search the available skills by what they do, when you are unsure "
+            "of a skill's name. Returns matching names and one-line "
+            "descriptions; use skill_view to read one in full.",
+            {"type": "object", "properties": {
+                "query": {"type": "string",
+                          "description": "What you want to do, in plain words"}},
+             "required": ["query"]},
+            skill_search, "meta",
         ))
 
         async def find_mcp_server(params: dict) -> dict:

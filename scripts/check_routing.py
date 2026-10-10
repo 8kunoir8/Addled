@@ -21,9 +21,9 @@ fails = []
 # the test fails if one is changed by accident. Precedence at resolution time is
 # explicit config -> these -> the provider's default_model.
 SHIPPED = {
-    "deepseek": {"chat": "deepseek-v4-flash",
+    "deepseek": {"chat": "deepseek-v4.1-flash",
                  "reasoning": "deepseek-v4-pro",
-                 "utility": "deepseek-chat"},
+                 "utility": "deepseek-v4.1-flash"},
 }
 
 
@@ -100,7 +100,7 @@ for pid, pcfg in builtin.items():
 
 # The seeded DeepSeek map is the documented default.
 check("deepseek chat", router.resolve_model("deepseek", "chat"),
-      "deepseek-v4-flash")
+      "deepseek-v4.1-flash")
 check("deepseek reasoning", router.resolve_model("deepseek", "reasoning"),
       "deepseek-v4-pro")
 check("deepseek vision keeps local model",
@@ -113,23 +113,35 @@ check("local GGUF", config.get("local_llm", "model_file"), "Qwen3-8B-Q4_K_M.gguf
 check("local download size", config.get("local_llm", "size_mb"), 5030)
 
 # ---- 3. stale-override validation -------------------------------------------
-router._catalog_models = lambda pid: ["deepseek-v4-pro", "deepseek-chat"]
-check("bogus override downgrades",
-      router.resolve_model("deepseek", "chat"), "deepseek-v4-pro")
+# The provider's real catalogue, as the fixture stands in for it. It lists the
+# chat id the router actually resolves to; the stale override below names one
+# it does NOT list, which is what makes the downgrade observable.
+router._catalog_models = lambda pid: ["deepseek-v4.1-flash", "deepseek-v4-pro"]
+_saved_roles_for_override = dict(
+    config._data["providers"]["builtin"]["deepseek"]["roles"])
+config._data["providers"]["builtin"]["deepseek"]["roles"]["chat"] = "deepseek-v4-flash"
+try:
+    check("bogus override downgrades",
+          router.resolve_model("deepseek", "chat"), "deepseek-v4.1-flash")
+finally:
+    # Replace the whole dict: a copy was taken above, so this restores the
+    # original rather than re-applying the value we injected.
+    config._data["providers"]["builtin"]["deepseek"]["roles"] = dict(
+        _saved_roles_for_override)
 router._catalog_models = lambda pid: []
 check("empty catalog keeps override",
-      router.resolve_model("deepseek", "chat"), "deepseek-v4-flash")
+      router.resolve_model("deepseek", "chat"), "deepseek-v4.1-flash")
 router._catalog_models = saved_catalog
 
 # ---- 4. shapes ---------------------------------------------------------------
 check("describe shape", sorted(router.describe("deepseek").keys()),
       ["auto_route", "default_model", "provider", "roles", "route_validate"])
 check("deepseek utility default", router.utility_model("deepseek"),
-      "deepseek-chat")
+      "deepseek-v4.1-flash")
 check("a provider with no utility model returns None",
       router.utility_model("openai"), None)
 check("for_provider resolves the utility role",
-      router.for_provider(_Stub("deepseek"), "utility"), "deepseek-chat")
+      router.for_provider(_Stub("deepseek"), "utility"), "deepseek-v4.1-flash")
 check("for_provider resolves the reasoning role",
       router.for_provider(_Stub("deepseek"), "reasoning"), "deepseek-v4-pro")
 check("for_provider tolerates a provider with no id",
@@ -145,9 +157,9 @@ config._data["providers"]["builtin"]["deepseek"]["roles"] = {
     "chat": "", "reasoning": "", "vision": "", "utility": ""}
 try:
     check("empty saved role falls back to the shipped default (chat)",
-          router.resolve_model("deepseek", "chat"), "deepseek-v4-flash")
+          router.resolve_model("deepseek", "chat"), "deepseek-v4.1-flash")
     check("empty saved role falls back to the shipped default (utility)",
-          router.utility_model("deepseek"), "deepseek-chat")
+          router.utility_model("deepseek"), "deepseek-v4.1-flash")
     # A provider with no shipped roles is untouched by that fallback.
     check("no shipped role leaves the provider default alone",
           router.utility_model("openai"), None)
@@ -158,7 +170,7 @@ finally:
 
 # A stale utility model degrades to the provider default instead of failing
 # every background job.
-router._catalog_models = lambda pid: ["deepseek-v4-pro", "deepseek-chat"]
+router._catalog_models = lambda pid: ["deepseek-v4.1-flash", "deepseek-v4-pro"]
 config._data["providers"]["builtin"]["deepseek"]["roles"]["utility"] = "gone"
 try:
     check("a stale utility model degrades to the provider default",

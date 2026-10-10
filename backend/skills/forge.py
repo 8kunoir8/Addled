@@ -330,14 +330,26 @@ class SkillForge:
 
     # ── Discovery ────────────────────────────────────────────────────────
 
-    async def discover(self, task_description: str, provider=None) -> dict:
+    async def discover(self, task_description: str, provider=None,
+                       web: bool = True) -> dict:
         """
         Search for a solution to a task the agent can't handle.
         Returns: {package, install_cmd, approach, confidence}
+
+        `web=False` skips the browser research step and asks the model
+        directly. The CLI tool builder passes it because that step OPENS A
+        VISIBLE BROWSER WINDOW — the user clicked "Write the tool" and got
+        Chromium over their screen with no explanation. A CLI tool is also
+        usually standard library only, so the search mostly cost a window and
+        added a wrong answer: it is what suggested `collections` as a pip
+        package. The forge's own `forge()` keeps the default, where searching
+        for a real third-party library is the point.
         """
         # Try web search first
         search_error = ""
         try:
+            if not web:
+                raise RuntimeError("web research skipped (web=False)")
             from backend.browser.browser_engine import browser
             import urllib.parse
             query = f"python library {task_description} pip install"

@@ -85,7 +85,7 @@ DEFAULT_SETTINGS: dict = {
         "autostart": False,
     },
     "character": {
-        "shape": "triangle",
+        "shape": "blob",
         "color": "#3380FF",
         "glow": "soft-halo",
         "glow_intensity": 0.6,
@@ -117,21 +117,25 @@ DEFAULT_SETTINGS: dict = {
                 "name": "DeepSeek",
                 "base_url": "https://api.deepseek.com",
                 "api_key": "",
-                "default_model": "deepseek-flash",
+                "default_model": "deepseek-v4.1-flash",
                 # Cheap/fast model for ordinary conversation, the stronger model
                 # for analysis. Empty values fall back to "default_model".
-                # `deepseek-v4-flash` and `deepseek-chat` still answer, but the
-                # API resolves both to `deepseek-flash`, so the canonical id is
-                # used here and the aliases are not offered.
+                #
+                # These ids were once "deepseek-flash" here while
+                # `router._BUILTIN_ROLES` said "deepseek-v4-flash" and the
+                # routing checks asserted "deepseek-chat" -- three different
+                # answers for one provider, none verifiable without an API key.
+                # Now one id, and `router._BUILTIN_ROLES` restates these
+                # exactly, which is what its own comment already claimed.
                 "roles": {
-                    "chat": "deepseek-flash",
+                    "chat": "deepseek-v4.1-flash",
                     "reasoning": "deepseek-v4-pro",
                     "vision": "",
                     # Non-thinking model: these jobs cap output at 200-400 tokens
                     # and a reasoning model wastes part of that budget thinking.
-                    "utility": "deepseek-flash",
+                    "utility": "deepseek-v4.1-flash",
                 },
-                "models": ["deepseek-flash", "deepseek-v4-pro"],
+                "models": ["deepseek-v4.1-flash", "deepseek-v4-pro"],
                 "vision": True,
                 "vision_mode": "local",
                 "vision_model": "microsoft/Florence-2-base",
@@ -398,6 +402,24 @@ DEFAULT_SETTINGS: dict = {
         "market_sim_threshold": 0.45,
         "allow_script_skills": False,
     },
+    # CLI tools the user builds for themselves. A tool is a standalone program
+    # plus a manifest (see backend/cli_tools/), and it is preferred over an MCP
+    # server when both could answer a call: the user wrote it, reviewed it and
+    # it runs locally, where a downloaded server is none of those things.
+    "cli_tools": {
+        "enabled": True,
+        # How close a match has to be before a tool answers a call it was not
+        # named for. Matches `market_sim_threshold` in spirit — the two are
+        # consulted in sequence for the same question.
+        "match_threshold": 0.5,
+        # The priority switch. False restores the pre-1.0.37 order, where the
+        # market and MCP were tried before anything the user built.
+        "prefer_over_mcp": True,
+        "timeout_s": 60,
+        # Ask "shall I build one?" before searching the market for a capability
+        # that looks buildable. Off means the old silent-search behaviour.
+        "ask_before_build": True,
+    },
     # External rulesets Addled can follow (ponytail, Karpathy). Fetched from
     # upstream, cached under backend/memory/guidelines/, refreshed weekly.
     # "scope" is the default: "code" injects only for code-related requests.
@@ -475,6 +497,23 @@ DEFAULT_SETTINGS: dict = {
         "max_files": 500,
         "inject_into_chat": True,
     },
+    # What the screen observer is allowed to put in the prompt.
+    #
+    # The observer screenshots the desktop, has a vision model describe it,
+    # and until now that description went into EVERY turn's prompt regardless
+    # of what was asked. Anything on screen — a password manager, a private
+    # message, a medical result — became context for an unrelated request.
+    #
+    # `screen_in_chat` decides when it may be sent:
+    #   "on_request" — only when the user asks about the screen (the default:
+    #                  the description is the answer to that question, and
+    #                  otherwise it is a leak with no purpose)
+    #   "always"     — every turn, the previous behaviour
+    #   "never"      — the observer may watch, but nothing about it is sent
+    "observer": {
+        "screen_in_chat": "on_request",
+    },
+
     # The folder Addled works in. File tools are confined to it (plus
     # extra_dirs, when safety.file_access_mode is "custom"), relative paths
     # resolve against it, and the Code page and project indexer default to it.
@@ -487,6 +526,13 @@ DEFAULT_SETTINGS: dict = {
     # cosine and a word-overlap share are different units — a matching task
     # scores about 0.45 by embedding and 0.42 by words, an unrelated one 0.20,
     # and one from the wrong category 0.28.
+    # The post-turn review. Off by default, unlike almost everything else
+    # here: it spends model calls and writes to the skill store on its own
+    # initiative, and the first thing a user should be able to do about a
+    # feature like that is decline it. See backend/review.py.
+    "review": {
+        "enabled": False,
+    },
     "sop": {
         "enabled": True,
         "learn": True,

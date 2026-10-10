@@ -216,6 +216,14 @@ def main():
     except Exception:
         pass
 
+    # Mood name → character expression, alongside the tint above. The mood
+    # engine's names ("happy", "grumpy", "thoughtful", ...) are all real
+    # emotions in the emotion layer, so this needs no translation table.
+    try:
+        engine.sig_emotion.connect(char_widget.set_emotion)
+    except Exception:
+        pass
+
     # Mirror every engine state change to dashboard clients
     def _broadcast_agent_state(state: str):
         try:
@@ -282,6 +290,29 @@ def main():
                  "on" if gateway.enabled() else "off")
     except Exception as e:
         log.warning("Remote access manager unavailable: %s", e)
+
+
+    # ---- CLI tools the user builds -------------------------------------------
+    #
+    # Loaded BEFORE the MCP manager, and not by accident: a user-built tool is
+    # preferred over an MCP one when both could answer a call (see
+    # `skills/tool_loop._execute_skill_inner`), and a tool that failed to load
+    # must be visible in the log before the MCP servers start adding their own
+    # tools to the same registry.
+    #
+    # Synchronous on purpose. It reads a handful of small JSON manifests; there
+    # is no network and nothing to await, and a tool that exists but is not yet
+    # registered would be invisible to the first chat turn after startup.
+    try:
+        from backend.cli_tools.registry import cli_tools
+        count = cli_tools.load()
+        if count:
+            log.info("CLI tools ready (%d)", count)
+    except Exception as e:  # noqa: BLE001
+        # Never fatal. A broken tool directory must not stop Addled booting —
+        # `load()` already skips individual bad tools, and this is the last
+        # guard for anything it could not anticipate.
+        log.warning("CLI tools unavailable: %s", e)
 
     # ---- MCP servers (third-party tool servers) ------------------------------
     try:

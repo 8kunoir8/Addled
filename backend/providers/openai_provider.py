@@ -99,6 +99,7 @@ def _parse_sse_as_completion(text: str, model: str) -> dict:
     }
 
 
+
 class OpenAIProvider(BaseProvider):
     provider_name = "OpenAI"
     supports_vision = True
@@ -187,6 +188,46 @@ class OpenAIProvider(BaseProvider):
                 reasoning = (message.get("reasoning_content")
                              or message.get("reasoning") or "")
                 finish = choice.get("finish_reason") or ""
+                # A tool call with no prose is a COMPLETE answer, not an
+                # empty one. `content` is nullable in the OpenAI schema and a
+                # model that has nothing to say before acting sends
+                # `content: null` with `finish_reason: "tool_calls"`. Measured
+                # on the live gateway (deepseek-v4.1-flash via 9router):
+                #
+                #     RAW: finish='tool_calls' content=None tools=2
+                #
+                # The check below used to run before this one, so it discarded
+                # those tool calls and reported "The model returned an empty
+                # response. Check that the model is loaded" -- blaming the
+                # model for a parser that had thrown its answer away. That is
+                # the intermittent failure that killed 2 of 8 live runs at
+                # round 2, after the model had already called meeting_list.
+                # A tool call with no prose is a COMPLETE answer, not an
+                # empty one. `content` is nullable in the OpenAI schema and a
+                # model that has nothing to say before acting sends
+                # `content: null` with `finish_reason: "tool_calls"`. Measured
+                # on the live gateway (deepseek-v4.1-flash via 9router):
+                #
+                #     RAW: finish='tool_calls' content=None tools=2
+                #
+                # The check below used to run before this one, so it discarded
+                # those tool calls and reported "The model returned an empty
+                # response. Check that the model is loaded" -- blaming the
+                # model for a parser that had thrown its answer away. That is
+                # the intermittent failure that killed 2 of 8 live runs at
+                # round 2, after the model had already called meeting_list.
+                if not content.strip() and (message.get("tool_calls") or []):
+                    return ProviderResult(
+                        ok=True,
+                        response=content or "",
+                        model=data.get("model", model),
+                        tokens_in=data.get("usage", {}).get("prompt_tokens", 0),
+                        tokens_out=data.get("usage", {}).get("completion_tokens", 0),
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                        tool_calls=message.get("tool_calls") or None,
+                        reasoning_content=reasoning,
+                    )
+
                 if not content.strip():
                     # An empty reply is a FAILURE, not an empty success, and the
                     # reasoning is NOT substituted for the answer.

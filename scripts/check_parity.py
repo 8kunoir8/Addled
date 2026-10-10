@@ -22,6 +22,7 @@ import asyncio
 import inspect
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -232,6 +233,76 @@ async def run():
         first = (live_result.get("tool_results") or [{}])[0]
         check(f"the real skill '{live}' runs through the loop",
               first.get("success") is True, str(first)[:300])
+
+    # ---- 2b. a CLI tool the user built is a first-class skill -------------
+    # The feature's whole premise is that the four surfaces treat a built tool
+    # exactly like a registered one. Same assertions as above, applied to a tool
+    # registered through the CLI tool layer rather than written by hand — if it
+    # ever stopped routing through the shared registry, this is where it shows.
+    cli_temp = Path(tempfile.mkdtemp(prefix="addled-parity-cli-"))
+    original_tools_dir = None
+    try:
+        import backend.cli_tools.registry as cli_registry_mod
+        from backend.cli_tools.registry import cli_tools
+
+        original_tools_dir = cli_registry_mod.CliToolRegistry.tools_dir
+        cli_registry_mod.CliToolRegistry.tools_dir = lambda self: cli_temp
+        tool_dir = cli_temp / "parity-tool"
+        tool_dir.mkdir(parents=True, exist_ok=True)
+        (tool_dir / "tool.py").write_text(
+            "import argparse, json\n"
+            "p = argparse.ArgumentParser()\n"
+            'p.add_argument("--json", action="store_true")\n'
+            "p.parse_args()\n"
+            'print(json.dumps({"success": True, "data": {"ok": True}}))\n',
+            encoding="utf-8")
+        (tool_dir / "tool.json").write_text(json.dumps({
+            "slug": "parity-tool", "name": "parity_probe",
+            "description": "A tool registered for the parity check",
+            "keywords": ["parity"], "entry": ["python", "tool.py"],
+            "params": {"type": "object",
+                       "properties": {"json": {"type": "boolean"}},
+                       "required": []},
+            "argv_template": ["--json"], "category": "cli",
+        }), encoding="utf-8")
+        cli_tools.load()
+
+        check("a built CLI tool registers as an ordinary skill",
+              skill_registry.get("parity_probe") is not None)
+        cli_openai = skill_registry.to_openai_tools({"parity_probe"})
+        cli_names = [t.get("function", {}).get("name") for t in cli_openai]
+        check("it appears in the OpenAI catalogue like any skill",
+              cli_names == ["parity_probe"], cli_names)
+        check("it appears in the prompt catalogue too",
+              "parity_probe(" in skill_registry.to_prompt_tools({"parity_probe"}))
+        check("a tool-discovery question surfaces it",
+              "parity_probe" in skill_registry.filter_for_query(
+                  "what tools do you have?"))
+
+        # A parameter is supplied because the registry refuses a call with no
+        # arguments at all — that guard is about the model producing nothing,
+        # not about this tool, and an empty call would test the guard instead.
+        cli_provider = FakeProvider(
+            [tool_block("parity_probe", {"json": True}), "Done."],
+            provider_id="mock")
+        cli_result = await tool_loop.chat_with_tools(
+            provider=cli_provider, messages=[{"role": "user", "content": "go"}])
+        cli_first = (cli_result.get("tool_results") or [{}])[0]
+        check("a built tool runs through the same chat loop",
+              cli_first.get("success") is True, str(cli_first)[:300])
+        check("and its output reaches the provider",
+              "ok" in json.dumps(cli_provider.payloads[-1]),
+              str(cli_provider.payloads[-1])[:300])
+    finally:
+        if original_tools_dir is not None:
+            cli_registry_mod.CliToolRegistry.tools_dir = original_tools_dir
+        try:
+            from backend.cli_tools.registry import cli_tools as _ct
+            _ct.remove("parity-tool")
+        except Exception:  # noqa: BLE001
+            pass
+        shutil.rmtree(cli_temp, ignore_errors=True)
+
 
     # ---- 3. chat's defaults are unchanged --------------------------------
     signature = inspect.signature(ws_server.run_chat_pipeline)

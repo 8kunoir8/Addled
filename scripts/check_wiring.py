@@ -150,7 +150,7 @@ def contract():
     from backend.providers import router
 
     check("deepseek utility resolves to a cheap non-thinking model",
-          router.utility_model("deepseek") == "deepseek-chat",
+          router.utility_model("deepseek") == "deepseek-v4.1-flash",
           str(router.utility_model("deepseek")))
     check("a provider without a utility role is untouched",
           router.utility_model("openai") is None,
@@ -162,9 +162,9 @@ def contract():
     check("clearing the utility role restores the shipped default",
           _with_role("utility", "",
                      lambda: router.utility_model("deepseek"))
-          == "deepseek-chat")
+          == "deepseek-v4.1-flash")
     check("for_provider agrees with utility_model",
-          router.for_provider(_Stub(), "utility") == "deepseek-chat",
+          router.for_provider(_Stub(), "utility") == "deepseek-v4.1-flash",
           str(router.for_provider(_Stub(), "utility")))
     check("auto_route off disables the utility role too",
           _with_top("auto_route", False,

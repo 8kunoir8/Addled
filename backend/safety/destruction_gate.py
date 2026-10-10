@@ -18,6 +18,15 @@ DESTRUCTIVE_ACTIONS = {
     # gate's own answer agree with the card, so a grant works and the dashboard
     # is told the truth about what can ask.
     "move_file", "copy_file",
+    # Types a line into a live shell, so it is the third door into the same
+    # PowerShell `run_command` opens. Named here for the reason the two above
+    # are: the `requires_approval` flag on the skill raises the card, and this
+    # is what makes the GATE agree. Without it the two paths disagreed -
+    # `registry.execute` (a chat turn) asked, while `executor.execute` (the
+    # `action.execute` socket, which is what the dashboard and a bot use) ran
+    # the command and deleted the file. Found by testing the installed app
+    # after the skill flag alone had passed every in-process check.
+    "session_send",
 }
 
 # Compound commands whose danger is in the whole name rather than in a single
@@ -114,6 +123,56 @@ def is_compound_dangerous(cmd: str) -> bool:
     return False
 
 
+# PowerShell's own destructive verbs. The prefix table in `terminal.py` is
+# written the way cmd.exe spells things (`del`, `rd /s`, `rm -rf`), and Addled
+# does not run cmd.exe - it runs `powershell.exe -Command`. So the table was
+# matching a language the shell never speaks: `del` was gated, and the
+# `Remove-Item` the model is far more likely to write was not.
+#
+# Matched as a verb at a word boundary, so `Remove-Computer` is caught while
+# `Remove-ItemNotes` and a file called `remove-notes.md` are not.
+_POWERSHELL_DANGEROUS_VERBS = (
+    "remove-item", "remove-itemproperty", "clear-content", "clear-item",
+    "remove-localuser", "remove-localgroupmember", "remove-partition",
+    "set-executionpolicy", "set-mppreference", "stop-service",
+    "disable-computerrestore", "initialize-disk", "new-localuser",
+    "set-localuser", "add-computer", "clear-recyclebin", "stop-process",
+    "remove-computer", "uninstall-", "remove-windowsfeature",
+)
+
+# Ways of hiding a command from a prefix test. Each one ends in another command,
+# so if what follows is dangerous the whole line is. Nothing here is a command
+# itself - these are the wrappers that made a destructive line look innocuous.
+_INDIRECTION = ("iex ", "invoke-expression", "& ", "cmd /c", "cmd.exe /c",
+                "powershell -command", "powershell.exe -command",
+                "start-process", "call ")
+
+
+def _is_destructive_powershell(cmd: str) -> bool:
+    """Does this PowerShell line delete, disable or reconfigure something?
+
+    A word list is a weak instrument and this one does not pretend otherwise:
+    it catches the verbs that matter and the common ways of hiding them, and
+    `requires_approval` defaults to False the moment a command matches nothing.
+    That default is why the name check above it must be decisive.
+    """
+    c = str(cmd or "").strip().lower()
+    if not c:
+        return False
+    for verb in _POWERSHELL_DANGEROUS_VERBS:
+        idx = c.find(verb)
+        if idx == -1:
+            continue
+        # Only at the start or after something that cannot continue a word, so
+        # `remove-notes.md` is a filename and `Remove-Item` is not.
+        if idx == 0 or c[idx - 1] in WORD_BOUNDARY or c[idx - 1] == ";":
+            return True
+    # A wrapper around a dangerous command is a dangerous command.
+    if any(w in c for w in _INDIRECTION):
+        return True
+    return False
+
+
 class DestructionGate:
     """Classifies actions as safe or destructive."""
 
@@ -123,23 +182,40 @@ class DestructionGate:
         return "safe"
 
     def requires_approval(self, action_type: str, params: dict) -> bool:
-        if action_type == "delete_file":
-            return True
-        if action_type == "run_command":
+        # A name in DESTRUCTIVE_ACTIONS is destructive by NAME, and that answer
+        # must not be reachable-around. It used to be for `run_command`: the
+        # content branch below returned early, so `run_command`'s own membership
+        # was never consulted and a command the content list did not happen to
+        # name - `Remove-Item ... -Recurse -Force` - came back as not
+        # destructive. The chat path still asked, because the SKILL carries
+        # `requires_approval`; `executor.execute`, which is what the dashboard
+        # and a bot reach over `action.execute`, ran it. Measured on the
+        # installed app: the file was deleted, with no prompt.
+        #
+        # So the name check comes FIRST and is decisive. Content can only ever
+        # ADD to it (a shell command is dangerous in ways a name list cannot
+        # know), never take away.
+        if action_type in DESTRUCTIVE_ACTIONS:
+            if action_type != "run_command":
+                return True
+            # `run_command` still honours a remembered session grant for a SAFE
+            # command, or `dir` would prompt every single time and train the
+            # user to approve without reading. So its content is consulted - but
+            # only to decide whether to ask, never to decide it is safe to skip
+            # the name check above.
             cmd = params.get("command", "").lower().strip()
-            # Named compounds first: they are dangerous as a whole name and the
-            # prefix rule below cannot see them without gating harmless names
-            # that share a stem.
+            if not cmd:
+                return False  # nothing to run
             if is_compound_dangerous(cmd):
                 return True
-            # Import the canonical dangerous-command set from terminal.py
-            # so there is exactly one list to keep in sync.  Previously
-            # this hardcoded 6 patterns while terminal.py had 18+; any
-            # of the gap commands (diskpart, cipher, reg delete, net user,
-            # takeown, icacls, logoff, erase, rd, …) slipped past the
-            # gate, then terminal.py caught them with NO approval_id,
-            # making them un-approvable: the dashboard could never allow
-            # them because the executor never queued them.
+            # The canonical dangerous-command set from terminal.py, so there is
+            # exactly one list to keep in sync. `Remove-Item` and the other
+            # PowerShell spellings are matched here rather than in the prefix
+            # table, because this is the shell Addled actually runs.
             from backend.actions.terminal import DANGEROUS_COMMANDS
-            return any(matches_dangerous(cmd, c) for c in DANGEROUS_COMMANDS)
-        return action_type in DESTRUCTIVE_ACTIONS
+            if any(matches_dangerous(cmd, c) for c in DANGEROUS_COMMANDS):
+                return True
+            return _is_destructive_powershell(cmd)
+        if action_type == "delete_file":
+            return True
+        return False

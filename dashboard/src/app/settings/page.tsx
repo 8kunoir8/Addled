@@ -6,6 +6,7 @@ import { useWS } from '@/lib/useWS';
 import { APP_VERSION } from '@/lib/guide-content';
 import type { HfStatus } from '@/lib/ws-types';
 import GuideSection from './guide-section';
+import CliToolsSection from './cli-tools-section';
 
 type SettingsData = Record<string, any>;
 
@@ -13,6 +14,7 @@ const SECTION_ICONS: Record<string, string> = {
   providers: '🔌', character: '🎭', voice: '🎤', safety: '🛡️',
   notifications: '🔔', memory: '🧠', tools: '🔧', integrations: '🔗', appearance: '🎨',  observation: '👁', browser: '🌐', desktop: '🖱', about: 'ℹ️', guidelines: '📐',
   mcp: '🧰', wiki: '📖', workspace: '📁', remote: '📡', guide: '📘',
+  'cli-tools': '⌨️',
 };
 
 export default function SettingsPage() {
@@ -59,7 +61,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const sections = ['guide','providers','character','voice','workspace','safety','remote','notifications','observation','memory','wiki','tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
+  const sections = ['guide','providers','character','voice','workspace','safety','remote','notifications','observation','memory','wiki','tools','cli-tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
 
   if (!settings) return (
     <div className="flex items-center justify-center h-full text-[#8b949e]">
@@ -83,6 +85,7 @@ export default function SettingsPage() {
         {activeSection==='providers'&&<ProvidersSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='character'&&<CharacterSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='character'&&<SkinsSection send={send} connected={wsState==='connected'}/>}
+        {activeSection==='character'&&<EmotionSection send={send} connected={wsState==='connected'}/>}
         {activeSection==='voice'&&<VoiceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='workspace'&&<WorkspaceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='safety'&&<SafetySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
@@ -92,6 +95,7 @@ export default function SettingsPage() {
         {activeSection==='memory'&&<MemorySection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='wiki'&&<WikiSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='tools'&&<ToolsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
+        {activeSection==='cli-tools'&&<CliToolsSection send={send} connected={wsState==='connected'}/>}
         {activeSection==='guidelines'&&<GuidelinesSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='mcp'&&<McpSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='browser'&&<BrowserSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
@@ -1266,6 +1270,104 @@ function CharacterSection({ settings, update, saving, status }: any) {
     <SettingRow label="Size" description={`${c.size||64}px`}><input type="range" min={32} max={128} value={c.size||64} onChange={e=>update('character','size',parseInt(e.target.value))} className="w-32"/></SettingRow>
     <SettingRow label="Speed"><select value={c.movement_speed||'medium'} onChange={e=>update('character','movement_speed',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="slow">Slow</option><option value="medium">Medium</option><option value="fast">Fast</option></select></SettingRow>
     <SettingRow label="Start with Windows" description="Launches Addled when you sign in"><input type="checkbox" checked={!!settings?.system?.autostart} onChange={e=>update('system','autostart',e.target.checked)} className="w-4 h-4"/></SettingRow>
+  </div>;
+}
+
+
+// --- Emotions -----------------------------------------------------------------
+
+// The emotions the backend can draw. Fetched from `character.emotions` rather
+// than hardcoded, so the list cannot drift away from what the character can
+// actually do — a button that no longer resolves would silently do nothing.
+type MoodStatus = { name?: string } | null;
+
+function EmotionSection({ send, connected }: { send: (m: string, p?: Record<string, unknown>) => Promise<Record<string, unknown>>; connected: boolean }) {
+  const [emotions, setEmotions] = useState<string[]>([]);
+  const [active, setActive] = useState<string>('neutral');
+  const [busy, setBusy] = useState<string>('');
+  const [msg, setMsg] = useState<string>('');
+
+  useEffect(() => {
+    if (!connected) return;
+    (async () => {
+      try {
+        const r = await send('character.emotions', {});
+        setEmotions((r?.emotions as string[]) || []);
+      } catch { /* backend offline */ }
+    })();
+  }, [send, connected]);
+
+  const apply = async (name: string) => {
+    if (!connected) { setMsg('Not connected to the backend'); return; }
+    setBusy(name); setMsg('');
+    try {
+      const r = await send('character.setEmotion', { emotion: name });
+      // The backend reports what it ACTUALLY applied, which is how a typo or an
+      // unknown name is distinguishable from a successful change.
+      const applied = (r?.emotion as string) || name;
+      if (applied !== name) setMsg(`"${name}" is not an emotion; showing ${applied}`);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Could not reach the character');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // The app's own mood, which drives the same expressions on its own. Shown
+  // here so it is obvious that the manual control and the automatic one are the
+  // same system rather than two competing ones.
+  const [mood, setMood] = useState<MoodStatus>(null);
+  useEffect(() => {
+    if (!connected) return;
+    const t = setInterval(async () => {
+      try {
+        const r = await send('mood.status', {});
+        setMood((r?.mood as MoodStatus) || null);
+      } catch { /* backend offline */ }
+    }, 4000);
+    return () => clearInterval(t);
+  }, [send, connected]);
+
+  return <div>
+    <p className="text-xs text-[#8b949e] mb-3">
+      How the character feels, which is separate from what it is doing.
+      An emotion changes the eyes; the app's state still drives the body,
+      so the two combine rather than replace each other.
+    </p>
+
+    <SettingRow label="Expression"
+                description={connected
+                  ? 'Pick one to hold it on the character'
+                  : 'Connect to the backend to change this'}>
+      <button onClick={() => apply('neutral')}
+              disabled={!connected}
+              className={`px-3 py-1.5 rounded text-xs border transition-colors disabled:opacity-40 ${active === 'neutral' ? 'bg-[#1f6feb] border-[#1f6feb] text-white' : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed]'}`}>
+        Neutral (rest)
+      </button>
+    </SettingRow>
+
+    <div className="py-3 border-b border-[#21262d]">
+      <label className="text-sm font-medium text-[#e8eaed]">Moods</label>
+      <p className="text-xs text-[#8b949e] mt-0.5 mb-2">
+        The ten from Web-Eye-Animation. These hold until you change them.
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {emotions.length === 0 && <span className="text-xs text-[#8b949e]">Loading…</span>}
+        {emotions.map(name => (
+          <button key={name} onClick={() => apply(name)} disabled={!connected || busy === name}
+                  className={`px-2.5 py-1 rounded text-xs border transition-colors disabled:opacity-40 ${active === name ? 'bg-[#1f6feb] border-[#1f6feb] text-white' : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#8b949e]'}`}>
+            {busy === name ? '…' : name}
+          </button>
+        ))}
+      </div>
+    </div>
+
+    {mood && <SettingRow label="App mood"
+                         description="Set automatically from what happens; decays over hours">
+      <span className="text-sm text-[#e8eaed]">{mood.name}</span>
+    </SettingRow>}
+
+    {msg && <p className="text-xs text-[#e8a33d] mt-2">{msg}</p>}
   </div>;
 }
 

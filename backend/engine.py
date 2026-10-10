@@ -36,6 +36,10 @@ class Engine(QObject):
     sig_error = pyqtSignal(str)
     sig_insight = pyqtSignal(str)  # proactive insight text → floating bubble
     sig_mood = pyqtSignal(float, float)  # (warmth, brightness) → animator tint
+    # The mood name, which `sig_mood` above does not carry — that one sends the
+    # visual tint only. The emotion layer needs the NAME, so it gets its own
+    # signal rather than changing the signature of the existing one.
+    sig_emotion = pyqtSignal(str)  # "happy", "grumpy", "thoughtful", ...
 
     _GREETINGS = [
         "Welcome back!",
@@ -68,6 +72,7 @@ class Engine(QObject):
         self._last_insight_text = ""  # dedup: don't repeat the same insight
         self._last_insight_time = 0.0
         self._last_maintenance = 0.0  # last memory-maintenance dispatch
+        self._last_review = 0.0      # last post-turn review dispatch
         self._last_sched = 0.0        # last scheduler poll
         self._chat_busy = False  # a chat is in flight — don't force 'idle'
         self._voice_busy = False  # TTS is speaking — don't force 'idle'
@@ -363,6 +368,24 @@ class Engine(QObject):
             except Exception as e:
                 log.debug("maintenance dispatch failed: %s", e)
 
+        # 5b. Post-turn review. Runs only from here, never inline on the turn:
+        #     the review needs the same model the next prompt is about to use,
+        #     and Addled's local provider serves one generation at a time, so an
+        #     inline review would be cancelled and both the cost and the
+        #     learning lost. One review per tick, and only while the presence
+        #     guard says the user is not mid-task.
+        try:
+            _present = True
+            if self._presence_guard:
+                _blocked, _ = self._presence_guard.check()
+                _present = not _blocked
+            if _present and time.time() - self._last_review >= 30.0:
+                self._last_review = time.time()
+                from backend.review import run_due_reviews
+                asyncio.ensure_future(run_due_reviews(max_reviews=1))
+        except Exception as e:
+            log.debug("review dispatch failed: %s", e)
+
         # 6. Scheduler — user tasks, calendar reminders, housekeeping
         try:
             poll_s = config.get("scheduling", "poll_s", default=5) or 5
@@ -383,6 +406,14 @@ class Engine(QObject):
                 warmth, brightness = mood_engine.visuals()
                 try:
                     self.sig_mood.emit(warmth, brightness)
+                except Exception:
+                    pass
+                # The mood NAME also drives the character's expression, not
+                # just its tint. The mood engine already computes this name and
+                # already rate-limits it to actual changes, so the emotion rides
+                # along here rather than growing a second polling path.
+                try:
+                    self.sig_emotion.emit(name)
                 except Exception:
                     pass
                 try:
@@ -411,6 +442,24 @@ class Engine(QObject):
             return
         self._last_insight_text = text
         self._last_insight_time = now
+        # Noticing something is itself an expression. The third way an emotion
+        # is triggered, alongside a chat turn and the user clicking the
+        # character: the assistant looks up from what it is doing, so the face
+        # should show that rather than sitting neutral while it speaks.
+        #
+        # Derived from the DECISION, which is already the observer's own
+        # judgement of what it found. This is deliberately not a second
+        # classifier over the insight text — the observer has just decided what
+        # this is, and guessing again from the words would only disagree with it.
+        try:
+            observed = {
+                "offer_action": "curiosity",
+                "suggest": "curiosity",
+                "nudge": "concern",
+            }.get(str(getattr(obs, "decision", "") or ""), "thoughtful")
+            self.sig_emotion.emit(observed)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not set the observation emotion: %s", e)
         try:
             from backend.ws_server import get_server
             get_server().broadcast_nowait("observer.insight", {
@@ -502,3 +551,20 @@ class Engine(QObject):
         else:
             self._set_state(EngineState.RUNNING)
             self.sig_agent_state.emit("idle")
+
+    def set_emotion(self, name: str) -> str:
+        """Set the character's expression, bypassing the mood engine.
+
+        The mood engine is the normal source of emotions, but it only moves on
+        real events and starts neutral, which makes the feature impossible to
+        exercise deliberately. This sets an expression directly and returns the
+        name that actually took effect, so a caller can tell "joy" from a typo
+        that quietly fell back to neutral.
+        """
+        from backend.character.emotions import resolve_emotion
+        resolved = resolve_emotion(name)
+        try:
+            self.sig_emotion.emit(resolved.name)
+        except Exception as e:  # noqa: BLE001
+            log.debug("emotion emit failed: %s", e)
+        return resolved.name

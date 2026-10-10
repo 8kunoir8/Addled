@@ -119,7 +119,15 @@ def save_session_summary(summary: str) -> None:
     except Exception as e:
         log.debug("summary auto-link failed: %s", e)
     try:
-        from backend.memory.recall import embed_text
+        # `backend.memory.embedding`, not `backend.memory.recall`: recall.py's
+        # `embed_text` is the LEGACY HASH embedder. Writing hash vectors here
+        # while recall searches with MiniLM produced rows that are 384-dim and
+        # therefore accepted, but whose cosine against a MiniLM query is
+        # meaningless -- `reembed.py` describes this exact failure ("cosine
+        # similarity between vectors from two different models is meaningless,
+        # so a half-migrated store returns confident nonsense rather than an
+        # error"). Session summaries were never semantically searchable.
+        from backend.memory.embedding import embed_text
         from backend.memory.vector_store import vector_store
         # Keep the vector row's id on the entry, so deleting the summary can
         # remove exactly that row. `delete_category` was used before, which

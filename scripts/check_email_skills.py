@@ -130,10 +130,17 @@ check("the general desk can reach email",
 check("the general desk can transcribe a recording",
       "transcribe_audio" in DEFAULT_TYPES["general"]["skills"],
       "an unrouted recording could not be transcribed")
-check("the writer desk has the document comms skills",
-      {"doc-coauthoring", "internal-comms"} <= set(
-          DEFAULT_TYPES["writer"]["skills"]),
-      "the writer cannot do internal communications")
+# The writer must be able to PRODUCE a document and DELIVER it. The old
+# assertion named `doc-coauthoring` and `internal-comms`, neither of which
+# exists anywhere -- so it required two dead names in the roster to pass, and
+# the roster obliged. Tested here against skills that are real.
+_writer = set(DEFAULT_TYPES["writer"]["skills"])
+check("the writer desk can produce a document",
+      "word_create" in _writer,
+      "the writer has no way to produce a document")
+check("the writer desk can deliver what it writes",
+      bool({"email_send", "send_message"} & _writer),
+      "the writer cannot send what it produces")
 
 if fails:
     print("FAILURES:")

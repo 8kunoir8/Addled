@@ -309,6 +309,11 @@ class SkillMarket:
             handler=handler,
             category="market",
             requires_approval=requires_approval,
+            # The SKILL.md body, now reachable without calling the skill. The
+            # handler still returns it (unchanged, so nothing that relied on
+            # that breaks), but `skill_view` can read it directly - which is the
+            # only way the model can be guided BY a skill it has not yet chosen.
+            body=meta.get("instructions", "") or "",
         )
         skill_registry.register(skill)
         self._skills[name] = meta

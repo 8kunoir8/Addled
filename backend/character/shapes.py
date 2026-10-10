@@ -42,6 +42,51 @@ def draw_circle(painter: QPainter, size: float, color: QColor):
                         int(size - 2 * margin), int(size - 2 * margin))
 
 
+def draw_blob(painter: QPainter, size: float, color: QColor):
+    """A soft round blob — the circle's friendlier cousin.
+
+    Built as a superellipse (|x/a|^n + |y/b|^n = 1) rather than a plain
+    ellipse, with the exponent controlling how boxy the silhouette is. An
+    ellipse is exactly n = 2; the blob uses a little over 2, which keeps it
+    round but gives it shoulders and a base instead of looking like a
+    geometric primitive.
+
+    A superellipse is used here rather than hand-placed Bézier control
+    points because it cannot go wrong in the way those did: an earlier version
+    placed the curve's extremes on the corners, which flattened the sides into
+    a rectangle with rounded ends. The closed form has no such failure mode,
+    and the exponent is a single number to reason about.
+    """
+    cx, cy = size / 2, size / 2
+    # Slightly wider than tall: a circle reads as rigid, this reads as settled.
+    rx = size * 0.44
+    ry = size * 0.44 * 0.94
+    # The shape exponent. 2.0 is an exact ellipse; higher is more rectangular.
+    # 2.2 sits just past circular — enough to give it shoulders and a base
+    # rather than reading as a disc, while keeping the sides from flattening
+    # into a rounded rectangle. Measured at 64px it also holds its full width
+    # for fewer rows than 2.35 does, so it stays visibly round.
+    n = 2.2
+    # Enough points that the curve is smooth at the largest size the character
+    # supports, with no visible faceting.
+    steps = 96
+
+    path = QPainterPath()
+    for i in range(steps + 1):
+        t = 2.0 * math.pi * i / steps
+        ct, st = math.cos(t), math.sin(t)
+        # The superellipse parametrisation. Guard against a zero base: at the
+        # exact axes, cos or sin is 0 and 0 ** (2/n) is a legitimate 0.
+        x = cx + rx * math.copysign(abs(ct) ** (2.0 / n), ct)
+        y = cy + ry * math.copysign(abs(st) ** (2.0 / n), st)
+        if i == 0:
+            path.moveTo(x, y)
+        else:
+            path.lineTo(x, y)
+    path.closeSubpath()
+    painter.fillPath(path, color)
+
+
 def draw_diamond(painter: QPainter, size: float, color: QColor):
     cx, cy = size / 2, size / 2
     r = size * 0.42
@@ -105,6 +150,9 @@ SHAPE_REGISTRY: dict[str, Callable] = {
     "hexagon": draw_hexagon,
     "star": draw_star,
     "square": draw_square,
+    "blob": draw_blob,
 }
 
-DEFAULT_SHAPE = "triangle"
+# The blob is the default: a round character reads as a creature, where a
+# triangle reads as a logo. The other shapes remain available by name.
+DEFAULT_SHAPE = "blob"

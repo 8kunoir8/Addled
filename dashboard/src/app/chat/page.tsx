@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import Link from 'next/link';
 import { useWS } from '@/lib/useWS';
 import { getChatMessages, setChatMessages, subscribeChatMessages } from '@/lib/chatStore';
 import {
@@ -43,9 +44,14 @@ const GREETING: Message = {
 };
 
 // Fill an in-flight "thinking" placeholder with the reply (or append if none).
+//
+// Matched on `streaming` alone, NOT `streaming && !content`. A streamed turn
+// has already put text in this bubble by the time the reply lands, so requiring
+// it to be empty would miss the placeholder and append the answer a second time
+// as a new bubble - the exact duplicate this function exists to prevent.
 function fillReply(messages: Message[], reply: string): Message[] {
   const idx = messages.findIndex(
-    (m) => m.role === 'assistant' && m.streaming && !m.content
+    (m) => m.role === 'assistant' && m.streaming
   );
   if (idx >= 0) {
     return messages.map((m, i) =>
@@ -269,6 +275,31 @@ export default function ChatPage() {
     if (params?.what) setActivity(String(params.what));
   }), [onNotification]);
 
+  // Draw the answer while it is still being written.
+  //
+  // Only the final round of a turn emits these, and `chat.send`'s own reply
+  // still arrives afterwards and replaces whatever this drew (see `fillReply`).
+  // That ordering is what makes the deltas safe to treat as a hint: if one is
+  // lost or the socket drops mid-answer, the finished reply still lands and the
+  // message is correct. So there is no reconciliation here, deliberately.
+  //
+  // Appended only while the bubble is still the empty streaming placeholder.
+  // Once real content is there the reply has landed, and appending after that
+  // would duplicate the answer - the one failure this must not have.
+  useEffect(() => onNotification('chat.delta', (params: any) => {
+    const piece = params?.delta;
+    if (typeof piece !== 'string' || !piece) return;
+    setMessages(prev => {
+      const idx = prev.findIndex(
+        (m) => m.role === 'assistant' && m.streaming
+      );
+      if (idx < 0) return prev;
+      return prev.map((m, i) =>
+        i === idx ? { ...m, content: m.content + piece } : m
+      );
+    });
+  }), [onNotification]);
+
   useEffect(() => subscribeQuestions(setQuestions), []);
   useEffect(() => subscribeQuestionErrors(setQuestionErrors), []);
 
@@ -439,6 +470,10 @@ export default function ChatPage() {
         : text;
       const result = await send('chat.send', {
         message: ask, attachments: sentAtts, source: 'dashboard',
+        // Ask the backend to stream the final round. Without it the turn is
+        // byte-for-byte what it was before, which is what every other caller
+        // (bots, voice, the Code page's planner) still gets.
+        stream: true,
       });
       applyReply(result?.response || 'No response');
     } catch (err: any) {
@@ -491,6 +526,24 @@ export default function ChatPage() {
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+        {/* An empty conversation is the one moment the user is deciding what
+            Addled can do at all, so it is where the CLI Tools page is worth
+            naming. It is advertised nowhere else, and a capability the agent
+            lacks is otherwise something they only discover by asking and being
+            told no. */}
+        {messages.length === 0 && approvals.length === 0
+          && questionsFor('dashboard').length === 0 && (
+          <div className="text-center text-sm text-[#8b949e] pt-10">
+            <p>Ask anything, or give Addled a task.</p>
+            <p className="mt-3">
+              Need a capability it does not have?{" "}
+              <Link href="/settings?section=cli-tools" className="text-[#58a6ff] hover:underline">
+                Build a tool for it
+              </Link>{" "}
+              — you review the code before it is saved.
+            </p>
+          </div>
+        )}
         {messages.map((msg, i) => (
           <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div className={`max-w-[75%] rounded-2xl px-4 py-3 text-sm ${

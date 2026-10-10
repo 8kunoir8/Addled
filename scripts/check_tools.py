@@ -43,18 +43,62 @@ def run_catalogue_tests():
     config._ensure_loaded()
     registry = SkillRegistry()
     skills = registry.enabled_list_all()
-    block = registry.to_prompt_tools()
 
     limit = budget.context_limit("local")
     room = limit - budget.MIN_REPLY_TOKENS
-    tokens = budget.estimate_tokens(block)
 
-    print(f"   tool block: {len(block):,} chars, ~{tokens:,} tokens "
-          f"(measured 4,683 before this change, against {room:,} available)")
-    check("the catalogue fits the local model's context",
-          tokens < room, f"~{tokens} tokens vs {room} available")
+    # What the app ACTUALLY sends. The unfiltered catalogue is never sent: the
+    # only runtime caller is `tool_loop._call_prompt_tools`, which always goes
+    # through `filter_for_query` first (`only = filter_for_query(query)` at
+    # tool_loop.py:1451). Measuring `to_prompt_tools()` with no argument — as
+    # this check used to — measured a string nothing renders, so it priced the
+    # whole skill list against a budget intended for one turn's shortlist.
+    #
+    # That is not merely academic: adding a single skill to a 120-skill
+    # catalogue moved the unfiltered figure past 60% and failed here, while the
+    # real path stayed under 10%. A guard that fails on work the app does not
+    # do, and passes on work it does, is worse than no guard.
+    queries = [
+        "what did we decide in the meeting?",
+        "turn the meeting action items into tasks",
+        "list the files in this directory",
+        "remind me to call Tom at 3pm",
+        "halo, apa kabar?",
+        "",
+    ]
+    worst = 0
+    worst_q = ""
+    worst_n = 0
+    for query in queries:
+        only = registry.filter_for_query(query)
+        block = registry.to_prompt_tools(only)
+        tokens = budget.estimate_tokens(block)
+        if tokens > worst:
+            worst, worst_q, worst_n = tokens, query, len(only)
+    print(f"   worst gated catalogue: ~{worst:,} tokens over {worst_n} tools "
+          f"for {worst_q!r:.40s} (against {room:,} available)")
+
+    check("the catalogue sent for a turn fits the local model's context",
+          worst < room, f"~{worst} tokens vs {room} available")
     check("it leaves room for the conversation",
-          tokens < room * 0.6, f"uses {tokens / room:.0%} of the window")
+          worst < room * 0.6, f"uses {worst / room:.0%} of the window")
+
+    # The ceiling still has to hold for the skill count it was written for, so
+    # the unfiltered figure is reported and bounded — generously, because it is
+    # a diagnostic and gating is what keeps turns small. It fails only at a size
+    # that means the gate itself has stopped working.
+    full = registry.to_prompt_tools()
+    full_tokens = budget.estimate_tokens(full)
+    print(f"   full catalogue (diagnostic): ~{full_tokens:,} tokens, "
+          f"{full_tokens / room:.0%} of the window")
+    check("gating is actually narrowing the catalogue",
+          worst < full_tokens, "the gate returned the whole catalogue")
+    check("the full catalogue has not grown absurdly",
+          full_tokens < room * 2.0,
+          f"~{full_tokens} tokens is over twice the window — the gate cannot "
+          f"be saving anything")
+
+    block = full
 
     # One line per tool, and every tool still listed.
     lines = [ln for ln in block.splitlines() if " — " in ln]

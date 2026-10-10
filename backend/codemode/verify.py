@@ -90,14 +90,21 @@ def detect_command(root: str | Path) -> dict:
             log.debug("could not read Makefile: %s", e)
 
     # 4. Language-native runners, only when the files they need are present.
+    #
+    # Quote the interpreter when its path has a space: this command is run
+    # through `powershell -Command` on Windows, which splits unquoted paths at
+    # the space -- so `C:\Program Files\...\python.exe -m pytest` ran as the
+    # command `C:\Program`, collected nothing, and surfaced as "failed with
+    # exit code 1 (no counts parsed)" rather than as the quoting bug it was.
+    _py = f'"{sys.executable}"' if " " in str(sys.executable) else str(sys.executable)
     if (root / "pyproject.toml").is_file() or (root / "pytest.ini").is_file() \
             or (root / "tox.ini").is_file() or (root / "tests").is_dir() \
             or any(root.glob("test_*.py")):
         if _python_has_pytest():
-            return {"command": f"{sys.executable} -m pytest -q", "kind": "pytest",
+            return {"command": f"{_py} -m pytest -q", "kind": "pytest",
                     "reason": "A Python project with pytest available."}
         if (root / "tests").is_dir() or any(root.glob("test_*.py")):
-            return {"command": f"{sys.executable} -m unittest discover -q",
+            return {"command": f"{_py} -m unittest discover -q",
                     "kind": "unittest",
                     "reason": "A Python project with a tests/ layout."}
 
@@ -197,9 +204,18 @@ async def run_verification(root: str | Path, command: str = "",
     log.info("Verifying with: %s (in %s)", command, root)
     try:
         if sys.platform == "win32":
+            # PowerShell parses a leading quoted string as a LITERAL, not a
+            # command, so `"C:\Program Files\...\python.exe" -m pytest` is a
+            # syntax error at the quote. The call operator `&` makes it a
+            # command. Applied here, not at the templates, because the command
+            # can also arrive from config or auto-detection and every path
+            # reaches Windows through this one spawn.
+            ps_command = command
+            if ps_command[:1] == '"':
+                ps_command = "& " + ps_command
             proc = await asyncio.create_subprocess_exec(
                 "powershell.exe", "-NoLogo", "-NoProfile",
-                "-ExecutionPolicy", "Bypass", "-Command", command,
+                "-ExecutionPolicy", "Bypass", "-Command", ps_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(root))
@@ -244,6 +260,10 @@ async def run_verification(root: str | Path, command: str = "",
         # is broken, which is the worst possible confusion for a check whose
         # whole job is telling those apart.
         "noTests": (not ok) and _found_no_tests(output, summary),
+        # A third case, distinct from both: the runner died before it could
+        # collect anything. A user whose pytest has a broken plugin should not
+        # be told their code failed the tests.
+        "startFailed": (not ok) and _found_start_failure(output, summary),
     }
 
 def _found_no_tests(output: str, summary: dict) -> bool:
@@ -269,6 +289,31 @@ def _found_no_tests(output: str, summary: dict) -> bool:
     )
     return any(m in text for m in markers)
 
+def _found_start_failure(output: str, summary: dict) -> bool:
+    """Whether the runner crashed before running any test.
+
+    A traceback with no counts and no test-failure markers is a start-up crash
+    (a missing plugin, an import error) -- not a verdict on the code under
+    test. Requires an explicit traceback so a runner whose output this parser
+    simply does not understand is not mislabelled as broken.
+    """
+    if any(summary.get(k) for k in ("passed", "failed", "errors", "total")):
+        return False
+    text = output or ""
+    if "Traceback (most recent call last)" not in text:
+        return False
+    lower = text.lower()
+    # If it collected anything at all, a crash during the run is a real result.
+    if any(m in lower for m in ("collected ", "passed", "failed", "error")):
+        # `error` alone is too loose -- pytest prints "errors" in results. Only
+        # treat it as a result when it appears with a number.
+        import re as _re
+        if _re.search(r"\b\d+ (passed|failed|error|failed,)", lower):
+            return False
+    return ("modulenotfounderror" in lower or "importerror" in lower
+            or "attributeerror" in lower or "cannot import" in lower)
+
+
 def verdict_line(result: dict) -> str:
     """One line a user or a model can read at a glance."""
     if not result.get("ran"):
@@ -286,5 +331,9 @@ def verdict_line(result: dict) -> str:
         return (f"Not verified — `{result['command']}` ran but found no tests. "
                 f"It exits non-zero when it collects nothing, so this is not a "
                 f"test failure.")
+    if result.get("startFailed"):
+        return (f"Not verified — `{result['command']}` could not start, so it "
+                f"ran no tests. The runner itself failed to load; this is not a "
+                f"result about the code.")
     return (f"Not verified — `{result['command']}` failed with exit code "
             f"{result.get('exit_code')} ({counts}).")

@@ -18,6 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
     "verify_python.py",
     "check_tools.py",
+    "check_tool_calls.py",
     "check_voice.py",
     "check_links.py",
     "check_wiki.py",
@@ -28,6 +29,11 @@ SUITES = [
     "check_sop_wiring.py",
     "check_sop_live_defects.py",
     "check_reachability.py",
+    "check_meetings.py",
+    "check_meeting_summarise.py",
+    "check_meeting_recall.py",
+    "check_system_role.py",
+    "check_meeting_actions.py",
     "check_remote.py",
     "check_remote_gateway.py",
     "check_remote_policy.py",
@@ -99,6 +105,25 @@ SUITES = [
     "check_bot_qr.py",
     "check_bot_messaging.py",
     "check_office.py",
+    "check_cli_tools.py",
+    "check_cli_priority.py",
+    "check_cli_needs_tool.py",
+    "check_cli_build.py",
+    "check_cli_page.py",
+    "check_cli_consumers.py",
+    "check_emotions.py",
+    "check_trigger.py",
+    "check_motion.py",
+    "check_shapes.py",
+    "check_hands.py",
+    "check_streaming.py",
+    "check_wait_notice.py",
+    "check_skill_bodies.py",
+    "check_review.py",
+    "check_verify_gate.py",
+    "check_plan_mode.py",
+    "check_gate_hygiene.py",
+    "check_screen_privacy.py",
 ]
 
 
@@ -117,16 +142,39 @@ def _safe(text: str) -> str:
         return text.encode("ascii", errors="replace").decode("ascii")
 
 
+def _needs_real_env(path: str) -> bool:
+    """Whether this suite declares that it needs the app's real environment.
+
+    Read from the file rather than a list here, so a suite that changes what it
+    measures carries its own requirement instead of depending on someone
+    remembering to update the runner.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(4000)
+    except OSError:
+        return False
+    return "NEEDS_REAL_ENV = True" in head
+
+
 def main() -> int:
     python = sys.executable
     failed = []
+    skipped = []
     for name in SUITES:
         path = os.path.join(ROOT, "scripts", name)
         if not os.path.exists(path):
             print(f"missing  {name}")
             failed.append(name)
             continue
-        proc = subprocess.run([python, "-s", path], cwd=ROOT,
+        # A suite that loads an optional dependency must run with the same
+        # environment the app uses. `-s` suppresses site-packages, so such a
+        # check silently measures a Python that cannot import the dependency --
+        # this is how an embedder check once reported a hash fallback as the
+        # shipped model. Suites opt out with `NEEDS_REAL_ENV = True`; the rest
+        # stay hermetic under `-s`.
+        flags = [] if _needs_real_env(path) else ["-s"]
+        proc = subprocess.run([python, *flags, path], cwd=ROOT,
                               capture_output=True, text=True,
                               encoding="utf-8", errors="replace")
         verdict = ""
@@ -136,13 +184,23 @@ def main() -> int:
         if not verdict:
             verdict = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:] or [""]
             verdict = verdict[0] if isinstance(verdict, list) else verdict
-        status = "ok  " if proc.returncode == 0 else "FAIL"
+        # Exit 2 is a suite's deliberate "cannot run here", not a failure.
+        # See check_office (no workspace chosen) and check_code_editor (will not
+        # run unless it can avoid writing the live settings file).
+        if proc.returncode == 0:
+            status = "ok  "
+        elif proc.returncode == 2:
+            status = "skip"
+        else:
+            status = "FAIL"
         # A suite's verdict is its own sentence and may contain a character the
         # console's code page cannot encode (an em-dash, a check mark). Printing
         # it raw crashed the whole runner on cp1252, which read as "the suite
         # failed" when it had passed. Down-convert, never raise.
         print(f"{status}  {name:<22} {_safe(verdict)}")
-        if proc.returncode != 0:
+        if proc.returncode == 2:
+            skipped.append(name)
+        elif proc.returncode != 0:
             failed.append(name)
             tail = (proc.stdout or "") + (proc.stderr or "")
             for line in tail.splitlines()[-8:]:
@@ -153,9 +211,19 @@ def main() -> int:
                 print(f"        {_safe(line)}")
 
     print()
+    if skipped:
+        # Named, never hidden: a suite that declined to run is not a pass, and
+        # it is not a failure either. Saying nothing would make "could not run"
+        # look like "ran clean".
+        print(f"{len(skipped)} suite(s) skipped (cannot run here): "
+              f"{', '.join(skipped)}")
     if failed:
         print(f"{len(failed)} suite(s) failed: {', '.join(failed)}")
         return 1
+    if skipped:
+        print(f"All {len(SUITES) - len(skipped)} runnable suite(s) passed; "
+              f"{len(skipped)} skipped.")
+        return 0
     print(f"All {len(SUITES)} suites passed.")
     return 0
 

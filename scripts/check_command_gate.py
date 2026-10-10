@@ -64,7 +64,12 @@ for cmd in [
     "tasklist",
     "echo deleting nothing",
     "git status",
-    "Remove-Item .\\tmp.txt -WhatIf",  # PowerShell spelling, not on the list
+    # `Remove-Item` USED to sit here, marked safe with the note "PowerShell
+    # spelling, not on the list". That was the bug, written down as the
+    # expected answer: it is the shell Addled runs, and it deletes files. It is
+    # now asserted as destructive further down, with the rest of the PowerShell
+    # verbs, and the fact a passing test enshrined the hole is the reason that
+    # block exists.
     "restart-computer-notes.txt",     # a filename, not a reboot
     "restart.json",
     "format-report-2026.md",
@@ -143,6 +148,171 @@ check("execute() has no allow_dangerous",
       "allow_dangerous" not in sig.parameters, str(sig))
 check("execute() still takes command/cwd/timeout",
       {"command", "cwd", "timeout"} <= set(sig.parameters), str(sig))
+
+# -- every route into a shell is gated ---------------------------------------
+#
+# `session_send` types a line into a live PowerShell - the same shell
+# `run_command` runs - and it was registered with `requires_approval` left
+# False. So a command was reachable through a door that never asked, while the
+# door beside it asked every time. Measured before the fix: sending
+# `Remove-Item <path> -Force` into a session deleted the file, with
+# `requires_approval` False and no prompt.
+#
+# Asserted as a property over every skill rather than as a name check, because
+# the failure is "a skill that runs a command is not gated", and naming the two
+# that do it today would not catch the third written tomorrow.
+#
+# `session_open` is deliberately NOT gated: it starts a shell and runs nothing,
+# and its description says so. Asking twice to do one thing is how a prompt
+# teaches a user to click through it - the cost this whole gate exists to avoid.
+print("\nEvery route that runs a command is gated")
+
+from backend.skills.registry import skill_registry as _reg  # noqa: E402
+
+# A skill executes a command if it drives a session, calls the terminal
+# executor, or exports the terminal action. Read from the source because that
+# is what the handler closes over - a declared flag can be absent while the
+# code still runs.
+#
+# `sessions.open` is not a marker: opening a shell runs nothing, and gating it
+# would put a prompt in front of a no-op.
+_SHELL_MARKERS = ("TerminalExecutor", "sessions.send", "session_send",
+                  "run_command")
+
+
+def _runs_a_command(name: str) -> bool:
+    """Does this skill's handler run a command in a shell?
+
+    Read from the source, because the declared flag is exactly what was
+    missing: the handler can reach a shell while `requires_approval` sits at
+    its default of False, which is the bug this exists to catch.
+    """
+    import inspect
+    skill = _reg.get(name)
+    if skill is None:
+        return False
+    try:
+        src = inspect.getsource(skill.handler)
+    except Exception:  # noqa: BLE001
+        return False
+    return any(m in src for m in _SHELL_MARKERS)
+
+
+_runner_skills = [s.name for s in _reg.list_all() if _runs_a_command(s.name)]
+check("the command-running skills were found at all",
+      {"run_command", "session_send"} <= set(_runner_skills),
+      f"found {sorted(_runner_skills)}")
+check("a skill that only opens a shell is not treated as a runner",
+      "session_open" not in _runner_skills,
+      "opening a shell runs nothing; gating it is a prompt for a no-op")
+
+_ungated = [n for n in _runner_skills
+            if not getattr(_reg.get(n), "requires_approval", False)]
+check("no skill that can run a command is left ungated",
+      not _ungated,
+      f"these run a command without asking: {sorted(_ungated)}")
+
+# Its danger is the command it carries, not its name, so a permanent grant
+# cannot tell a safe line from `Remove-Item -Recurse -Force`. It must be
+# session-only, exactly as `run_command` is - otherwise the dashboard offers an
+# "always allow" switch that un-gates the shell for the rest of time.
+from backend.approvals import policy as _policy  # noqa: E402
+
+check("session_send is classified by its command, not its name",
+      "session_send" in _policy.CONTENT_CLASSIFIED,
+      "a permanent grant would disarm the shell for every future command")
+check("session_send cannot be permanently granted",
+      not _policy.is_permanently_grantable("session_send"),
+      "the dashboard would offer a permanent switch")
+check("run_command is still content-classified",
+      "run_command" in _policy.CONTENT_CLASSIFIED,
+      "the existing entry must not have been replaced")
+
+# The dashboard reads these two fields to decide which control to draw. If the
+# flag is set but the policy is not, the card shows an "always allow" switch
+# that the backend will refuse - a control that only fails.
+_live = _reg.get("session_send")
+check("the dashboard will draw a session switch, not a permanent one",
+      bool(getattr(_live, "requires_approval", False))
+      and not _policy.is_permanently_grantable("session_send"),
+      "requires_approval drives the badge; is_permanently_grantable picks the control")
+
+# Both routes into a skill must give the same answer.
+#
+# This is the check that was missing, and its absence is why the first fix
+# looked complete and was not. A skill is reached two ways:
+#
+#   chat turn        -> registry.execute     -> the skill's `requires_approval`
+#   action.execute   -> executor.execute     -> DestructionGate.DESTRUCTIVE_ACTIONS
+#
+# The skill flag and the gate's set are separate lists, and setting only the
+# flag made the chat path ask while the socket path - the one the dashboard and
+# a bot use - ran the command anyway. In-process tests passed; the installed app
+# still deleted the file. Asserting the two agree is what closes it.
+from backend.safety.destruction_gate import DestructionGate  # noqa: E402
+
+# `run_command` is content-classified: an empty command is harmless, so the gate
+# answers False for bare params and True once the command would do damage. The
+# assertion must hand it something destructive, or it tests the wrong question
+# and reports a false failure. `session_send` is gated on the NAME, so bare
+# params are enough for it - and both are covered, because a door that asks only
+# for some shapes of command is the bug, not the fix.
+_PROBE_PARAMS = {
+    "run_command": {"command": "Remove-Item C:\\somewhere -Recurse -Force"},
+    "session_send": {},
+}
+_gate = DestructionGate()
+for _name in sorted(_runner_skills):
+    check(f"the gate also treats '{_name}' as destructive",
+          _gate.requires_approval(_name, _PROBE_PARAMS.get(_name, {})),
+          f"registry asks but executor.execute would run '{_name}' unattended")
+
+# The shell Addled actually runs. The prefix table is written the way cmd.exe
+# spells things, so `del` was gated and the `Remove-Item` a model is far more
+# likely to write was not - on the socket path, where `run_command`'s own
+# DESTRUCTIVE_ACTIONS membership was skipped by an early return.
+print("\nPowerShell's own destructive verbs are classified")
+
+_PS_DANGEROUS = [
+    "Remove-Item C:\\x -Force",
+    "Remove-Item C:\\x -Recurse -Force",
+    "Clear-Content C:\\x",
+    "Set-ExecutionPolicy Bypass",
+    "Stop-Service -Name WinDefend",
+    "Set-MpPreference -DisableRealtimeMonitoring $true",
+    "New-LocalUser -Name a -NoPassword",
+    "Remove-LocalGroupMember -Group Administrators -Member a",
+    "iex 'Remove-Item C:\\x'",
+    "Invoke-Expression \"Remove-Item C:\\x\"",
+    "& 'Remove-Item' C:\\x",
+    "cmd /c del C:\\x",
+]
+_PS_SAFE = [
+    "Write-Output hello",
+    "Get-Location",
+    "dir C:\\",
+    "git status",
+    "Test-Path C:\\x",
+    "Remove-NotesFromFile x",   # a name that merely starts with a verb
+    "Get-ItemProperty HKLM:\\x",
+]
+for _c in _PS_DANGEROUS:
+    check(f"asks: {_c!r}", _gate.requires_approval("run_command", {"command": _c}),
+          "was NOT gated but must ask")
+for _c in _PS_SAFE:
+    check(f"safe: {_c!r}", not _gate.requires_approval("run_command", {"command": _c}),
+          "was gated but should not ask")
+
+# And the two lists must not drift: everything the gate calls destructive that
+# is also a skill has to carry the flag.
+from backend.safety.destruction_gate import DESTRUCTIVE_ACTIONS  # noqa: E402
+
+_flagless = [n for n in sorted(DESTRUCTIVE_ACTIONS)
+             if _reg.get(n) is not None
+             and not getattr(_reg.get(n), "requires_approval", False)]
+check("no skill in the gate's destructive set lacks the skill flag",
+      not _flagless,
+      f"the gate waits but the card says nothing for: {_flagless}")
 
 # The registry handler is how a chat turn reaches the terminal. If it still
 # passed the removed kwarg this raises TypeError at call time, not import time.

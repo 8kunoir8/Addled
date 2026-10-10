@@ -57,7 +57,14 @@ _MAX_NAMES = 500
 # Actions whose danger comes from what they are handed, not from what they are.
 # A permanent grant cannot express "these commands but not those", so these are
 # session-only. See rule 2 in the module docstring.
-CONTENT_CLASSIFIED = {"run_command"}
+#
+# `session_send` is here for the same reason as `run_command`: it types a line
+# into a live shell, so its danger is the line, and the skill name says nothing
+# about it. Membership is not decoration - `is_permanently_grantable` reads this
+# set, and the skills page uses that answer to choose between a permanent
+# "always allow" switch and a session one. Leaving it out would have offered a
+# switch that un-gates every future command typed into the session.
+CONTENT_CLASSIFIED = {"run_command", "session_send"}
 
 # Session grants, held for the life of the process and never written anywhere.
 # Keyed by kind so a skill and a tool can share a name without sharing a grant.

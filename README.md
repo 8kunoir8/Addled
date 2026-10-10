@@ -182,6 +182,13 @@ as ordinary skills.
 Missing something? Ask. Addled searches for a skill, installs it, or **forges one**
 — generating, testing and registering it on the spot.
 
+**Build your own tools.** Settings → CLI Tools writes a real command-line
+program for a capability Addled does not have. You read the code before it is
+saved, edit it if you want, and test it with one button — then it is a skill
+like any other, callable from chat, the Code page and your swarm agents. Tools
+you build are preferred over anything downloaded, and they live in
+`%LOCALAPPDATA%\Addled\cli_tools\` so they survive upgrades.
+
 ### 🤖 Bots
 Telegram, WhatsApp and Discord — all two-way. Send text, photos or voice notes and
 the reply comes back in the same chat. The agent can also reach *out*:

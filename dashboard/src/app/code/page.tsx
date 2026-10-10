@@ -18,6 +18,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { useWS } from '@/lib/useWS';
 import type {
@@ -1635,6 +1636,21 @@ export default function CodePage() {
     : <span className="text-[#484f58]">Mod+S saves · Mod+F finds inside the file</span>;
 
   /**
+   * The standing hint, including where to build a tool the agent lacks.
+   *
+   * Kept beside `status` rather than inside it: the status line is transient —
+   * it shows an error, a busy state or a recent notice — and a pointer that
+   * vanished whenever a file was saved would be useless. The `status` fallback
+   * already exists for exactly this "nothing to report" case, so the pointer
+   * rides with it.
+   */
+  const toolPointer = (
+    <Link href="/settings?section=cli-tools" className="text-[#58a6ff] hover:underline">
+      Build a tool
+    </Link>
+  );
+
+  /**
    * What the project's own check said about the last change.
    *
    * The distinction this exists to make is "written" versus "verified", which is
@@ -2840,6 +2856,7 @@ export default function CodePage() {
 
         <div className="flex items-center gap-4 px-3 py-1.5 border-t border-[#30363d] text-[11px] shrink-0">
           <span className="min-w-0 truncate">{status}</span>
+          <span className="shrink-0 text-[#484f58]">Need a capability it lacks? {toolPointer}</span>
           {applied && <span className="text-[#3fb950] ml-auto shrink-0">{applied}</span>}
           {activeTab && <span className="text-[#8b949e] ml-auto shrink-0">{cursor}</span>}
         </div>

@@ -271,3 +271,100 @@ export interface CodeApplyResult {
   verify?: CodeVerifyResult;
 }
 
+
+// ---- CLI Tools (Settings → CLI Tools) -----------------------------------
+
+/** What `cliTools.list` reports per tool. */
+export interface CliToolSummary {
+  slug: string;
+  name: string;
+  description: string;
+  keywords?: string[];
+  category?: string;
+  requires_approval?: boolean;
+  /** Run counters, so the page can tell a used tool from an unused one. */
+  stats?: {
+    runs?: number;
+    lastRun?: string;
+    lastError?: string;
+  };
+}
+
+/** `cliTools.list` */
+export interface CliToolListResult {
+  tools: CliToolSummary[];
+  count: number;
+  directory: string;
+}
+
+/** `cliTools.get` — the summary plus the program source for review. */
+export interface CliToolDetailResult {
+  success: boolean;
+  tool?: CliToolSummary & {
+    source?: string;
+    source_error?: string;
+  };
+  error?: string;
+}
+
+/**
+ * `cliTools.draft` — a written tool that has NOT been saved.
+ *
+ * `source` and `spec` are the two things `cliTools.apply` needs, and nothing
+ * touches disk until it is called.
+ */
+export interface CliToolDraftResult {
+  success: boolean;
+  slug?: string;
+  source?: string;
+  detail?: string;
+  /** Non-empty when discovery found a dependency the tool needs. */
+  package?: string;
+  warnings?: string[];
+  /**
+   * What happened when the draft was actually RUN, before it was shown.
+   * `null` when the draft never got that far. A reviewer reading `success:
+   * true` without this is reading a claim; with it, a demonstration.
+   */
+  test_result?: {
+    success: boolean;
+    error?: string;
+    stdout?: string;
+    stderr?: string;
+    /**
+     * Non-empty when the failure is about the SAMPLE rather than the program:
+     * the tool was handed a path it could not use. A retry cannot fix that, and
+     * blaming the code would send the user looking in the wrong place.
+     */
+    fixture?: boolean;
+  } | null;
+  spec?: Record<string, unknown>;
+  error?: string;
+}
+
+/** `cliTools.apply` */
+export interface CliToolApplyResult {
+  success: boolean;
+  slug?: string;
+  name?: string;
+  directory?: string;
+  error?: string;
+}
+
+/** `cliTools.test` — a real run of the saved program. */
+export interface CliToolTestResult {
+  success: boolean;
+  stdout?: string;
+  stderr?: string;
+  parsed?: boolean;
+  exit_code?: number | null;
+  error?: string;
+}
+
+/** `cliTools.suggest` — a slug and keywords derived from a description. */
+export interface CliToolSuggestResult {
+  success: boolean;
+  slug: string;
+  keywords: string[];
+  error?: string;
+}

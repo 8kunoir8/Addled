@@ -19,10 +19,19 @@ Three defects motivated this suite, all of them silent.
    the conversation alone.
 
 Run from the project root:
-    .\\python-bundle\\python.exe -s .\\scripts\\check_memory_rag.py
+    .\\python-bundle\\python.exe .\\scripts\\check_memory_rag.py
+
+NOTE the missing `-s`. This suite measures the SHIPPED embedder, and `-s`
+suppresses site-packages, so under `-s` `transformers` cannot be imported and
+the store falls back to the hash embedder -- the check then reports a hash
+fallback as if it were the real model. That mistake was made once and written
+into three docs. `NEEDS_REAL_ENV` tells the runner not to pass `-s`; the policy
+is per-suite because the gateway suite needs `-s` for the opposite reason.
 """
 
 from __future__ import annotations
+
+NEEDS_REAL_ENV = True
 
 import asyncio
 import os

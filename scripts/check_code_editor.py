@@ -536,8 +536,12 @@ async def run():
           "tools=[]" in src,
           "the JSON call must not also see the tool catalogue; an empty list "
           "is 'no tools' while None would mean every enabled skill")
+    # The base list is what matters: the search step must offer the read-only
+    # tools, not the whole catalogue. It now goes through the CLI-tools
+    # resolver, which appends the user's own tools to that base without
+    # replacing it — so assert the base is still exactly `_PLAN_TOOLS`.
     check("the search step does offer the read-only tools",
-          "tools=list(_PLAN_TOOLS)" in src,
+          "tools=_code_page_tools(_PLAN_TOOLS)" in src,
           "the first call is the one that must be able to search")
     # The JSON keys are parsed and rendered by the page, so they must stay
     # English even when the request is not. The pipeline pins the reply

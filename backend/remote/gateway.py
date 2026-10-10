@@ -277,14 +277,48 @@ class RemoteGateway:
 
     # -- request routing ------------------------------------------------------
 
+    @staticmethod
+    def _request_method(request) -> str | None:
+        """The HTTP method, or None when the server does not expose one.
+
+        `websockets.asyncio.server.Request` only gained a `method` field in 17
+        (15.0.1 -- the version this app pins, via `google_genai`) carries `path`
+        and `headers` alone. Returning None rather than a default is the whole
+        point: an unknown method must not be treated as GET, because this file
+        uses the method to refuse writes.
+        """
+        method = getattr(request, "method", None)
+        if isinstance(method, str) and method:
+            return method.upper()
+        # Older websockets keeps the request line on the protocol; it is not on
+        # `Request`, so there is nothing else to read. Prefer an explicit
+        # attribute if a future version exposes one under a different name.
+        for attr in ("request_line", "requestline"):
+            line = getattr(request, attr, None)
+            if isinstance(line, str) and " " in line:
+                return line.split(" ", 1)[0].upper()
+        return None
+
     async def _process_request(self, conn, request) -> Response | None:
         """Answer HTTP, or return None to let a WebSocket upgrade proceed."""
         try:
             path = unquote((request.path or "/").split("?")[0])
-            method = (request.method or "GET").upper()
+            method = self._request_method(request)
 
             if path == WS_PATH:
                 return self._authorize_socket(conn, request)
+
+            if method is None:
+                # The server did not tell us the verb, so we cannot tell a read
+                # from a write. Refusing is the only safe answer: guessing GET
+                # would let a POST through the 405 gates below.
+                log.warning(
+                    "Gateway: the websockets server exposed no request method "
+                    "(path=%s); refusing rather than assuming GET", path)
+                return _json_response(501, {
+                    "error": "This server build does not report the request "
+                             "method, so the request cannot be routed safely.",
+                })
 
             if path == LOGIN_PATH:
                 if method not in ("GET", "HEAD"):

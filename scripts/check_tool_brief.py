@@ -55,6 +55,92 @@ def main() -> int:
     check("every fact names its own tool", not unnamed,
           f"describes but does not name: {unnamed}")
 
+    # ---- RULE 1b: every CAPABILITY the app has is described ----------------
+    # The direction the original check missed. It proved nothing was named that
+    # does not exist, but nothing proved that what exists is named -- so five
+    # `meeting_*` skills shipped, the prose never mentioned meetings, and the
+    # model holding them answered "there is no list meetings function wired
+    # up". A capability that reaches the schema but not the prose is a
+    # capability the model will deny having.
+    #
+    # These are the families the block is expected to account for. A new family
+    # added to the registry without a fact here is the bug this catches.
+    expected_families = {
+        "meeting": "meeting_save",
+        "calendar": "calendar_add",
+        "browser": "browser_navigate",
+        "memory": "memory_set",
+        "desktop": "desktop_click",
+        "schedule": "task_schedule",
+        "files": "read_file",
+        "shell": "run_command",
+    }
+    facts = {name for name, _ in tool_brief._FACTS}
+    undescribed = {
+        family: member for family, member in expected_families.items()
+        if member not in facts
+    }
+    check("every capability family has a fact in the table", not undescribed,
+          f"registered but never described to the model: {undescribed}")
+
+    # An unfiltered block must actually SAY it can do these things. Naming the
+    # tool is not enough on its own: check_tool_brief's own bug was a block
+    # that listed `run_command` while reading as though the model had no shell.
+    everything0 = tool_brief.capabilities_block(None)
+    for family, word in [("meetings", "meeting"), ("calendar", "calendar"),
+                         ("browser", "browser"), ("files", "file"),
+                         ("memory", "memory")]:
+        check(f"an unfiltered block mentions {family}",
+              word in everything0.lower(),
+              f"the word '{word}' never appears")
+
+    # The CLOSING SENTENCE specifically, not the block as a whole. Asserting
+    # "the block mentions meetings" is too weak: the fact prose says
+    # "meeting_save" too, so a hand-written sentence that omitted meetings
+    # still passed. That was found by revert-verifying this very check -- the
+    # restored old sentence slipped through. The sentence is derived from
+    # _DOMAINS, so it must name every domain for the tools on offer.
+    def closing_sentence(block: str) -> str:
+        for line in block.splitlines():
+            if line.startswith("When asked"):
+                return line
+        return ""
+
+    sentence = closing_sentence(everything0)
+    check("the block has a closing capability sentence", bool(sentence),
+          "no 'When asked…' line at all")
+    for name, noun in tool_brief._DOMAINS:
+        check(f"the closing sentence names '{noun}' ({name})",
+              noun in sentence,
+              f"derived from _DOMAINS but missing: {sentence[:200]}")
+    check("the closing sentence mentions meetings",
+          "meeting" in sentence.lower(),
+          "meetings missing from the sentence: " + sentence[:200])
+    check("the closing sentence mentions the PC",
+          "pc" in sentence.lower(),
+          "the shell capability is missing: " + sentence[:200])
+
+    # The closing sentence is derived from _DOMAINS, so the two tables have to
+    # agree: a fact with no domain is a capability the sentence silently drops,
+    # which is exactly how meetings went missing from both.
+    domains = {name for name, _ in tool_brief._DOMAINS}
+    no_domain = sorted(facts - domains)
+    check("every fact has a domain entry for the closing sentence",
+          not no_domain, f"facts with no domain: {no_domain}")
+    orphan_domain = sorted(domains - facts)
+    check("every domain entry describes a fact that exists",
+          not orphan_domain, f"domains with no fact: {orphan_domain}")
+
+    # A meeting turn must be told about meetings, in prose, not merely handed
+    # the schema.
+    meeting_turn = tool_brief.capabilities_block(["meeting_list"])
+    check("a meeting-only turn is told it can list meetings",
+          "meeting" in meeting_turn.lower(),
+          meeting_turn[:220])
+    check("and is told the tool exists rather than left to guess",
+          "meeting_list" in meeting_turn or "meeting" in meeting_turn.lower(),
+          meeting_turn[:220])
+
     # ---- RULE 2: the block is generated from what was offered --------------
     everything = tool_brief.capabilities_block(None)
     check("an unfiltered block lists the shell capability",

@@ -1,3 +1,87 @@
+# Addled 1.0.37
+
+**Build your own tools.** Settings → CLI Tools lets you ask Addled to write a
+command-line tool for a capability it does not have — you read the code before
+it is saved, and from then on it is a skill like any other.
+
+## What you can do now
+
+> Open Settings → CLI Tools, type *"turn a folder of phone photos into resized
+> PNGs"*, and press **Write the tool**.
+
+Addled writes a real program — `tool.py` with an `argparse` front end and a JSON
+contract — and shows it to you. Read it, edit it, then press **Save**. It is
+registered immediately and callable from chat, the Code page and your swarm
+agents. **Test** runs it once so "it works" is something you saw rather than
+something you were told.
+
+The draft is **run before you see it**, so the review screen tells you what
+happened rather than what should happen — *"Ran it: the test invocation
+succeeded"*, or the exact error with the tool still yours to fix and save by
+hand. If it fails, Addled asks the model once more with that error in hand,
+because a failure from code that actually ran is worth more than a guess about
+what might. Nothing is written to disk by any of this.
+
+## You review it first
+
+The tool is *drafted* and *saved* in two separate steps. Nothing reaches the
+disk until you approve it, and if you edit the code, **your** version is what is
+saved and what runs. This is the whole reason it is built here rather than
+downloaded: the code that executes on your machine is code you have read.
+
+A tool written this way is also a normal program. You can run the same thing
+yourself:
+
+```
+python "C:\Users\<you>\AppData\Local\Addled\cli_tools\<slug>\tool.py" --help
+```
+
+## Tools you build win
+
+When Addled needs a capability it does not have, it now looks for **your own
+tools first** — before searching the MCP market, before forging new code, before
+downloading anything. A tool you wrote and reviewed outranks a package fetched
+from the internet.
+
+If nothing exists and nothing can be built, Addled says so plainly and points at
+Settings → CLI Tools, rather than guessing or claiming the task is impossible.
+
+The preference is a setting (`cli_tools.prefer_over_mcp`); turning it off
+restores the previous order exactly.
+
+## Every surface, including the Code page
+
+A built tool is reachable from chat, the character, voice, your bots and swarm
+agents, because they all read the same tool catalogue.
+
+The Code page is the exception worth naming: its planner and editor run with a
+**restricted** list — they may read your project, not change it — so a tool did
+not reach them automatically. They now include your built tools as well. That is
+a deliberate widening of what those lists allow, because a tool you wrote and
+reviewed is one you chose to have available; the read-only tools they exist for
+are still there.
+
+## Where it lives
+
+Tools are kept in `%LOCALAPPDATA%\Addled\cli_tools\`, **not** in the install
+directory — so they survive upgrades, and reinstalling Addled does not lose work
+you asked it to do.
+
+## Verified
+
+- `check_cli_tools.py` — the manifest, the runner, matching and registration.
+- `check_cli_priority.py` — a built tool answers *before* the market is
+  consulted, and the switch restores the old order.
+- `check_cli_build.py` — a draft writes nothing, bad code is refused, and an
+  edit is what lands on disk.
+- `check_cli_needs_tool.py` — a missing capability ends in an offer, not an
+  error.
+- `check_cli_page.py` and `check_cli_consumers.py` — the page is wired to the
+  handlers, and a built tool reaches all four surfaces.
+- `scripts/check_all.py` runs **107 suites**, all green (one skipped where a workspace is not configured).
+
+---
+
 # Addled 1.0.34
 
 **Chat and Code can hand work to a swarm agent.** Ask for the Reviewer to check

@@ -81,7 +81,10 @@ DEFAULT_TYPES: dict[str, dict] = {
         "skills": ["code_read", "search_in_files", "verify_code", "run_command",
                    "guidelines:karpathy", "guidelines:ponytail",
                    "test-driven-development", "systematic-debugging",
-                   "executing-plans", "domain-modeling", "docx", "pdf"],
+                   "executing-plans", "word_create", "pdf_read"],
+        # `domain-modeling` was named here but no skill of that name ships and
+        # no installer carries one, so it was dropped rather than pointed at
+        # something that only looks similar.
     },
     "reviewer": {
         "role": "Code Reviewer",
@@ -102,10 +105,11 @@ DEFAULT_TYPES: dict[str, dict] = {
         "prompt": ("You are a data analyst. Break complex material into the "
                    "findings that matter, show the reasoning that got you "
                    "there, and say what is uncertain. Never invent a number."),
-        # xlsx for real spreadsheets and pdf for source documents, plus the
+        # Spreadsheets and PDFs are read through the skills that exist:
+        # excel_read for sheets, pdf_read for source documents -- plus the
         # evidence habit: state nothing as settled without checking it.
-        "skills": ["read_file", "search_in_files", "xlsx", "pdf", "query",
-                   "read-file", "systematic-debugging",
+        "skills": ["read_file", "search_in_files", "excel_read", "pdf_read",
+                   "systematic-debugging",
                    "verification-before-completion"],
     },
     "researcher": {
@@ -116,7 +120,7 @@ DEFAULT_TYPES: dict[str, dict] = {
                    "came from. Say plainly when something could not be "
                    "confirmed."),
         "skills": ["web_search", "read_file", "wiki_search", "wiki_read",
-                   "research", "brainstorming", "pdf", "query"],
+                   "brainstorming", "pdf_read", "web_fetch"],
     },
     "writer": {
         "role": "Writer",
@@ -124,11 +128,14 @@ DEFAULT_TYPES: dict[str, dict] = {
         "prompt": ("You are a writer. Match the register the audience expects, "
                    "lead with the point, and cut anything that does not carry "
                    "weight. Prefer concrete over abstract."),
-        # writing-guidelines is the craft; docx/pptx/pdf are the delivery
-        # formats a writer is actually asked to produce.
+        # The delivery formats a writer is actually asked to produce, named as
+        # the skills that exist: word_create for documents, pptx_create for
+        # decks, pdf_create for print. `writing-guidelines`, `doc-coauthoring`
+        # and `internal-comms` were named here but ship nowhere and no
+        # installer carries them; dropped rather than faked.
         "skills": ["read_file", "wiki_search", "sop_lookup",
-                   "writing-guidelines", "docx", "pptx", "pdf",
-                   "doc-coauthoring", "internal-comms", "email_send"],
+                   "word_create", "pptx_create", "pdf_create",
+                   "email_send"],
     },
     "planner": {
         "role": "Planner",
@@ -159,8 +166,10 @@ DEFAULT_TYPES: dict[str, dict] = {
                    "approve something you could not test."),
         "skills": ["verify_code", "read_file", "search_in_files",
                    "verification-before-completion",
-                   "test-driven-development", "webapp-testing",
-                   "diagnosing-bugs"],
+                   "test-driven-development", "diagnosing-superpowers"],
+        # `webapp-testing` was named here but no skill of that name exists and
+        # no installer carries one. Dropped; `verify_code` is what actually
+        # exercises a web app in this install.
     },
 }
 

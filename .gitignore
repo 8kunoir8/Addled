@@ -41,3 +41,13 @@ backend/voice/models/
 
 
 .agent-reasoning-mcp
+
+# ── CLI tools the user builds ────────────────────────────────────────────────
+# Not under `backend/` at all: `app_paths.CLI_TOOLS_DIR` resolves to
+# `<data dir>/cli_tools`, which on a normal install is
+# `%LOCALAPPDATA%\Addled\cli_tools` — a sibling of the install, so nothing in
+# this repository can contain one. The pattern is here because a developer whose
+# install directory IS writable (a source checkout) gets them under
+# `backend/memory`, which is already covered above, and because a tool copied to
+# the repository root for testing must not be committable.
+/cli_tools/

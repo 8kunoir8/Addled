@@ -37,9 +37,16 @@ def transcribe_file(path: str) -> dict:
     stream and a wake word, and has no way to take a file off disk. This
     loads the same model once and reuses it.
 
-    Returns ``{"success", "text", "language"}``, or an ``error`` explaining
-    what to install when the model is missing — a stack trace here would just
-    read as "transcription is broken".
+    Returns ``{"success", "text", "language", "segments"}``, or an ``error``
+    explaining what to install when the model is missing — a stack trace here
+    would just read as "transcription is broken".
+
+    ``segments`` is a list of ``{"start", "end", "text", "at"}`` in the order
+    spoken, with the times in seconds and ``at`` as MM:SS. ``text`` is
+    unchanged — the same joined string every existing caller already reads — so
+    this is purely additive. The timestamps are what makes a transcript usable
+    as meeting notes: without them there is no way to say when something was
+    said. Whisper produces them for free and the join was discarding them.
     """
     global _FILE_MODEL
     from pathlib import Path
@@ -97,12 +104,58 @@ def transcribe_file(path: str) -> dict:
             model = _FILE_MODEL
         segments, info = model.transcribe(
             str(target), beam_size=1, vad_filter=True)
-        text = " ".join(s.text for s in segments).strip()
-        return {"success": True, "text": text,
-                "language": getattr(info, "language", "") or ""}
+        return _collect_segments(segments, info)
     except Exception as e:  # noqa: BLE001
         log.warning("file transcription failed for %s: %s", target, e)
         return {"success": False, "error": f"could not transcribe: {e}"}
+
+
+def _collect_segments(segments, info=None) -> dict:
+    """Turn whisper's segment iterator into the result dict.
+
+    Split out so the shape is produced in one place and the timestamps can be
+    tested without loading a model.
+
+    The join is the same one that was inline here before — `" ".join(s.text)` —
+    because the joined string is a contract several callers depend on. What is
+    new is that the segments are kept as well rather than dropped.
+    """
+    parts: list[str] = []
+    out: list[dict] = []
+    for s in segments or []:
+        piece = (getattr(s, "text", "") or "").strip()
+        if not piece:
+            continue
+        parts.append(piece)
+        try:
+            start = float(getattr(s, "start", 0.0) or 0.0)
+            end = float(getattr(s, "end", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            start = end = 0.0
+        out.append({"start": round(start, 2), "end": round(end, 2),
+                    "text": piece, "at": _clock(start)})
+    return {
+        "success": True,
+        "text": " ".join(parts).strip(),
+        "segments": out,
+        "language": (getattr(info, "language", "") or "") if info else "",
+    }
+
+
+def _clock(seconds: float) -> str:
+    """Seconds as MM:SS, or H:MM:SS past an hour.
+
+    A meeting is long enough that "3600" means nothing to a reader while
+    "1:00:00" does. The transcript is meant to be scanned, so the readable form
+    is stored rather than recomputed in each consumer.
+    """
+    try:
+        total = max(0, int(float(seconds or 0)))
+    except (TypeError, ValueError):
+        total = 0
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 # Real media containers start with one of these. ffmpeg sniffs the same way;

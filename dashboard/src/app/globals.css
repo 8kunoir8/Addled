@@ -194,6 +194,19 @@ pre {
   color: var(--accent);
 }
 
+/* Indeterminate progress: the bar slides from off the left edge to off the
+ * right, so it reads as motion in one direction rather than a block that
+ * pulses in place. Used while the model writes a CLI tool, which takes tens of
+ * seconds and reports no progress of its own. */
+@keyframes cli-progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.cli-progress-bar {
+  animation: cli-progress-slide 1.2s ease-in-out infinite;
+}
+
 .character-pulse {
   animation: pulse-glow 2s ease-in-out infinite;
 }

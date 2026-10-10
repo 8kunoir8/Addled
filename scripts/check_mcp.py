@@ -18,7 +18,10 @@ from backend.mcp_client import approval
 from backend.mcp_client.manager import mcp_manager
 
 fails = []
-PY = os.path.join(ROOT, "python-bundle", "python.exe")
+# The interpreter that runs THIS check, not a bundled path. The bundle exists
+# only in a packaged install; hardcoding it made the MCP server unspawnable in
+# a checkout, so nothing registered and the failures read as broken code.
+PY = sys.executable
 SERVER = os.path.join(ROOT, "scripts", "mcp_test_server.py")
 SID = "addled_test_fixture"
 
@@ -152,9 +155,17 @@ async def main():
         check("prompt payload includes them",
               all(n in skill_registry.to_prompt_tools() for n in names))
         echo_skill = skill_registry.get(f"mcp__{SID}__echo")
-        check("schema advertises confirm for an untrusted server",
-              "confirm" in (echo_skill.parameters.get("properties") or {}),
-              str(echo_skill.parameters)[:200])
+        if echo_skill is None:
+            # The server did not start, so there is no schema to inspect. Say
+            # that plainly: a traceback here reads as a defect in the code
+            # under test when the real problem is the fixture.
+            check("the test server started and registered mcp__*__echo", False,
+                  f"no skill registered -- the MCP server never connected "
+                  f"(interpreter {PY})")
+        else:
+            check("schema advertises confirm for an untrusted server",
+                  "confirm" in (echo_skill.parameters.get("properties") or {}),
+                  str(echo_skill.parameters)[:200])
 
         # ---- 3. approval gate -------------------------------------------
         first = await skill_registry.execute(f"mcp__{SID}__echo",
