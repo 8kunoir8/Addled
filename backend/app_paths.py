@@ -47,6 +47,7 @@ downgrade still finds it. Nothing is deleted.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -220,6 +221,164 @@ PYLIBS_DIR = DATA_DIR / "pylibs"
 # distinction visible in the path.
 CLI_TOOLS_DIR = DATA_DIR / "cli_tools"
 
+# Where the Playwright Chromium build is kept.
+#
+# Playwright's default cache is a SINGLE machine-wide directory shared by every
+# Playwright on the machine — `%LOCALAPPDATA%\ms-playwright` on Windows. That is
+# wrong for this app in two ways, both seen in a real bug report:
+#
+#   * An `npx playwright install` (or a Docker image, or another project) fetches
+#     its own revision into the same folder. Playwright resolves a browser by
+#     REVISION, so a build downloaded by a different release is not the one this
+#     package wants — every launch then fails with "Executable doesn't exist at
+#     ...chromium-1234/...", while the cache looks full of browsers.
+#   * The app cannot control what else writes there, so a working install breaks
+#     with no change to the app at all.
+#
+# Pointing this package at its own directory makes the app's browser its own
+# business: nothing outside Addled can overwrite the revision it uses.
+BROWSERS_DIR = DATA_DIR / "ms-playwright"
+PLAYWRIGHT_BROWSERS_ENV = "PLAYWRIGHT_BROWSERS_PATH"
+
+# The browser's own profile: cookies, local storage, the site data that makes a
+# second visit look like a returning visitor rather than a fresh automation
+# client. Under the data dir, beside the browsers - same reasoning: it is this
+# install's state and nothing outside Addled should touch it.
+#
+# It is NOT in the repository, so `git` never sees it; `.gitignore` covers the
+# data dir wholesale on a normal install anyway.
+BROWSER_PROFILE_DIR = DATA_DIR / "browser_profile"
+
+def _default_profile_dir() -> Path:
+    """Where the profile goes when `BROWSER_PROFILE_DIR` cannot be used.
+
+    A profile is bound to one Chromium process at a time (Chromium takes a lock
+    file inside it). If a previous browser is still shutting down, or the user
+    has two chats browsing at once, the directory is busy. Falling back to a
+    throwaway temp profile keeps browsing working in that case instead of
+    failing the navigation - the cost is only that this session starts fresh.
+    """
+    import tempfile
+    return Path(tempfile.gettempdir()) / "addled_browser_profile"
+
+def profile_is_locked(path: Path) -> bool:
+    """Whether another Chromium already holds this profile.
+
+    Chromium writes a `SingletonLock` (POSIX) or `lockfile` (Windows) beside the
+    profile. Presence is the signal Playwright itself surfaces as "Process
+    singleton lock", so checking for it lets us fall back deliberately instead
+    of catching a launch error after the fact.
+    """
+    for name in ("SingletonLock", "SingletonCookie", "lockfile"):
+        if (path / name).exists():
+            return True
+    return False
+
+
+def _default_browsers_dir() -> Path:
+    """Playwright's own default cache, the one every other tool shares."""
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return Path(base) / "ms-playwright"
+    return Path(os.path.expanduser("~")) / ".cache" / "ms-playwright"
+
+
+def _seed_browsers(needed_revisions: set[str]) -> int:
+    """Adopt matching browser builds from the shared cache into ours. Once.
+
+    An existing user already has a Chromium on disk; asking them to download
+    ~150 MB again to move it twelve characters along the path would be silly.
+    Only the revisions the app's Playwright actually wants are taken, and only
+    when our own copy is missing, so this can never overwrite a working build.
+
+    A directory symlink is used when it can be — no copy, no extra disk — and a
+    plain copy when it cannot, which is the normal case for a non-elevated
+    Windows user without Developer Mode. Returns how many builds were adopted.
+    """
+    source = _default_browsers_dir()
+    if not source.is_dir() or source.resolve() == BROWSERS_DIR.resolve():
+        return 0
+    adopted = 0
+    for rev in needed_revisions:
+        for leaf in (f"chromium-{rev}", f"chromium_headless_shell-{rev}"):
+            src = source / leaf
+            dst = BROWSERS_DIR / leaf
+            if not src.is_dir() or dst.exists():
+                continue
+            try:
+                os.symlink(src, dst, target_is_directory=True)
+                adopted += 1
+                continue
+            except OSError:
+                pass
+            try:
+                shutil.copytree(src, dst)
+                adopted += 1
+            except (OSError, shutil.Error) as e:  # noqa: BLE001
+                # A failed adoption is not an error the user needs: the Install
+                # button downloads it properly. Drop the half-made copy so the
+                # next attempt does not see a broken directory and skip.
+                log.debug("could not adopt %s: %s", leaf, e)
+                if dst.exists():
+                    shutil.rmtree(dst, ignore_errors=True)
+    return adopted
+
+
+def _playwright_needed_revisions() -> set[str]:
+    """The Chromium revisions the installed Playwright resolves by.
+
+    Read from the package's own `browsers.json` — the same file Playwright
+    reads — so the answer cannot drift from the version in use. Empty when
+    Playwright is not installed, which makes seeding a no-op.
+    """
+    try:
+        import playwright
+    except Exception:  # noqa: BLE001 - not installed is not an error here
+        return set()
+    path = Path(playwright.__file__).parent / "driver" / "package" / "browsers.json"
+    try:
+        browsers = json.loads(path.read_text(encoding="utf-8")).get("browsers", [])
+    except (OSError, ValueError):
+        return set()
+    return {str(b.get("revision")) for b in browsers
+            if b.get("name") in ("chromium", "chromium-headless-shell")
+            and b.get("revision")}
+
+
+def configure_browsers_path() -> bool:
+    """Point Playwright at Addled's own browser cache. Idempotent.
+
+    Sets the environment variable rather than passing a path around, because
+    that is the only knob Playwright honours — it is read by the package, and
+    inherited by the `playwright install` subprocess this app spawns. Must run
+    before Playwright is imported or any browser is launched.
+
+    On the first call it also adopts any matching build from the shared
+    machine-wide cache, so an existing install is not made to re-download a
+    browser it already has. See `_seed_browsers`.
+
+    Foreign values are respected: the override is a deliberate operator choice,
+    and a caller who set the variable means it. Only the default is replaced.
+    Returns True when the variable is now set for this process.
+    """
+    if os.environ.get(PLAYWRIGHT_BROWSERS_ENV):
+        return True
+    try:
+        BROWSERS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # A read-only or missing data dir is not fatal: Playwright falls back to
+        # its default cache, which is worse but still works.
+        return False
+    try:
+        adopted = _seed_browsers(_playwright_needed_revisions())
+        if adopted:
+            log.info("browser cache: adopted %d build(s) from %s",
+                     adopted, _default_browsers_dir())
+    except Exception as e:  # noqa: BLE001 - never block startup on seeding
+        log.debug("browser cache seeding skipped: %s", e)
+    os.environ[PLAYWRIGHT_BROWSERS_ENV] = str(BROWSERS_DIR)
+    return True
+
 
 def _dist_info_names(directory: Path) -> set[str]:
     """Package names with a `*.dist-info` in `directory`, normalised.
@@ -238,8 +397,36 @@ def _dist_info_names(directory: Path) -> set[str]:
         pass
     return out
 
+def _user_site_dirs() -> list[Path]:
+    """The user-site directories this interpreter would actually search.
+
+    Found via `site.getusersitepackages()` rather than guessed, so a
+    non-default `PYTHONUSERBASE` is honoured. Returns [] on an interpreter
+    started with `-s` or `PYTHONNOUSERSITE`, where the directory is not on
+    sys.path and so cannot shadow anything.
+    """
+    import site as _site
+    try:
+        if not _site.ENABLE_USER_SITE:
+            return []
+        found = _site.getusersitepackages()
+    except Exception:  # noqa: BLE001 - a missing user-site is not fatal
+        return []
+    if not found:
+        return []
+    names = [found] if isinstance(found, str) else list(found)
+    return [Path(p) for p in names if p]
+
+
+def _user_site_names() -> set[str]:
+    """Package names installed into the user-site."""
+    out: set[str] = set()
+    for directory in _user_site_dirs():
+        out |= _dist_info_names(directory)
+    return out
+
 def _duplicated_in_pylibs() -> set[str]:
-    """Packages present in BOTH `pylibs` and the bundled site-packages.
+    """Packages present in BOTH `pylibs` and another site dir that shadows it.
 
     These are the ones where precedence matters, and `pylibs` must win.
 
@@ -277,23 +464,36 @@ def _duplicated_in_pylibs() -> set[str]:
     answer when the shipped snapshot is the stale side of the pair.
     """
     bundled = _dist_info_names(Path(sys.prefix) / "Lib" / "site-packages")
-    return _dist_info_names(PYLIBS_DIR) & bundled
+    # The user-site counts too. The app's interpreter is NOT started with `-s`,
+    # so Python's normal machinery puts `%APPDATA%\Python\PythonXY\
+    # site-packages` on sys.path — and it sits AHEAD of everything this app
+    # controls. A package a user once installed there (a plain
+    # `pip install --user playwright`, say) therefore shadows the copy the
+    # Install button writes into `pylibs`, and the button looks like it does
+    # nothing. Treating it as a duplicate moves `pylibs` ahead of it.
+    return (_dist_info_names(PYLIBS_DIR)
+            & (bundled | _user_site_names()))
 
 def add_pylibs_to_path() -> bool:
     """Put `PYLIBS_DIR` on `sys.path` so an install there can be imported.
 
-    Needed because the app runs its interpreter with ``-s``, which excludes user
-    site-packages; the only directories it searches are inside the install, and
-    under a per-machine install none of those can be written to. A directory pip
-    can write into is therefore only half the fix — it must also be somewhere
-    the interpreter looks.
+    Needed because the only directories the interpreter searches are inside the
+    install, and under a per-machine install none of those can be written to. A
+    directory pip can write into is therefore only half the fix — it must also
+    be somewhere the interpreter looks.
 
     Normally APPENDED, so a package shipped with the app keeps winning over an
-    optional one fetched later. The exception is a name that exists in both
-    directories: there the `pylibs` copy must come first, or the bundled copy
-    shadow it. See `_duplicated_in_pylibs`. Only when such a name exists is
-    `PYLIBS_DIR` inserted ahead of the bundled site-packages — a fresh install
-    with nothing installed yet is left exactly as it was.
+    optional one fetched later. The exception is a name that exists in more than
+    one place: there the `pylibs` copy must come first, or the other copy
+    shadows it. See `_duplicated_in_pylibs`. Only when such a name exists is
+    `PYLIBS_DIR` inserted ahead of the first site-packages directory — a fresh
+    install with nothing installed yet is left exactly as it was.
+
+    That "more than one place" now includes the user-site, not just the bundled
+    site-packages. The app's interpreter is not started with `-s`, so a package
+    a user installed with `pip install --user` sits on sys.path ahead of
+    everything the app controls, and the Install button's work into `pylibs` is
+    invisible until `pylibs` is moved in front of it.
 
     Idempotent. Returns True when the directory is on the path.
     """
@@ -306,13 +506,14 @@ def add_pylibs_to_path() -> bool:
     entry = str(PYLIBS_DIR)
     duplicated = _duplicated_in_pylibs()
     if duplicated:
-        # A name in both places: the pylibs copy has to be found first. This
-        # cannot be done per package — putting `pylibs/pkg/` on sys.path makes
-        # Python look for `pkg` INSIDE it, which is a ModuleNotFoundError — so
-        # the directory itself moves ahead of the bundled site-packages.
+        # A name in more than one place: the pylibs copy has to be found first.
+        # This cannot be done per package — putting `pylibs/pkg/` on sys.path
+        # makes Python look for `pkg` INSIDE it, which is a ModuleNotFoundError
+        # — so the directory itself moves ahead of the first site-packages dir
+        # (which is the user-site when the interpreter is not started with `-s`).
         if entry in sys.path:
             sys.path.remove(entry)
-        # Ahead of the first bundled site-packages, but after the install root
+        # Ahead of the first site-packages, but after the install root
         # and anything the caller put there deliberately.
         target = 0
         for i, p in enumerate(sys.path):
@@ -321,7 +522,7 @@ def add_pylibs_to_path() -> bool:
                 break
             target = i + 1
         sys.path.insert(target, entry)
-        log.info("pylibs precedes the bundled site-packages for %d package(s): %s",
+        log.info("pylibs precedes the shadowing site-packages for %d package(s): %s",
                  len(duplicated), ", ".join(sorted(duplicated)[:8]))
     elif entry not in sys.path:
         sys.path.append(entry)

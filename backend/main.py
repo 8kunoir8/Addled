@@ -103,6 +103,14 @@ def main():
     # import path or every install would be invisible to this process.
     app_paths.add_pylibs_to_path()
 
+    # Give Playwright its own browser cache, before anything imports it, so
+    # another Playwright on the machine (`npx playwright install`, a Docker
+    # image) cannot overwrite the Chromium revision this app runs.
+    try:
+        app_paths.configure_browsers_path()
+    except Exception as e:  # noqa: BLE001 - never block startup on this
+        print(f"[Addled] browser cache setup skipped: {e}", file=sys.stderr)
+
     _setup_logging()
     import logging
     log = logging.getLogger("addled")

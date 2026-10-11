@@ -85,6 +85,14 @@ extraResources:
       - '!memory/projects/**'
       - '!memory/conversations/**'
       - '!memory/logs/**'
+      # The browser's own state: Chromium's cache, cookies, local storage and
+      # the ~150 MB of browser binaries. Both live under the data directory,
+      # which on a real install is beside `backend/` — but a source checkout
+      # resolves the data directory into `backend/memory/`, so without these
+      # two lines a developer's profile (cookies, extension state, crash
+      # dumps) shipped inside the installer. `check_packaging.py` found it.
+      - '!memory/browser_profile/**'
+      - '!memory/ms-playwright/**'
       # The swarm roster is the user's own desks: their names, briefs, learned
       # corrections and pinned models. It is written on first run and edited by
       # hand, so shipping the developer's copy would replace a user's team with

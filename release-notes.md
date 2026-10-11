@@ -1,3 +1,134 @@
+# Addled 1.0.40
+
+## Browser tools work, and say so when they don't
+
+**The browser now actually drives a page.** Addled's browser tools were falling
+back to a plain HTTP fetch while reporting success — so a page came back with no
+screenshot, no JavaScript and nothing to click, and the only clue was that
+browsing "didn't work".
+
+Three things were wrong, and each hid the next:
+
+- **Playwright was read as "installed" from its Python package alone.** The
+  Chromium it drives is a separate ~150 MB download, and it was missing. The
+  Settings page showed a green tick, the Install button never appeared, and auto
+  install skipped — because the app believed it was already there. Availability
+  is now decided by the browser binary, at the exact revision the installed
+  Playwright asks for: a Chromium left behind by a *different* Playwright
+  release is not accepted, which is the state that made every launch fail.
+- **The Install button was writing where the app never looked.** A stray
+  `pip install --user playwright` from months earlier sat earlier on the import
+  path than Addled's own copy, so pressing Install added a second Playwright
+  that was never the one imported. Addled's copy now takes precedence.
+- **Playwright shared its browser cache with everything else on the machine.**
+  `npx playwright install`, a Docker image, any other project — all wrote to the
+  same folder, and any of them could overwrite the revision Addled needs. The
+  app now keeps its own, adopting a matching browser that is already on disk so
+  nobody re-downloads 150 MB to move it.
+
+**A fallback is now reported as a fallback.** When a real browser is unavailable
+the result is marked degraded, with the reason — "the Chromium browser is not
+downloaded" rather than silence. The browser page says so too, instead of
+printing "Page loaded" for a page it cannot interact with.
+
+Verified on the installed app: `browser.navigate` returns `engine: playwright`
+with a real screenshot, where it previously returned `engine: http`.
+
+### Bookseller pages, and the empty page that wasn't empty
+
+The browser fix above made the browser launch. It did not make it *read*. On a
+live Indonesian turn — "find me e-ink Android devices sold on Indonesian
+marketplaces, with prices" — the model browsed Tokopedia and got back an empty
+page, then told the user its extraction tool had "gone astray".
+
+It had not gone astray. Two things were happening:
+
+- **An empty page was reported as a successful one.** The extraction returned
+  `success: true` with no text at all, and there is no way to tell that apart
+  from a page that genuinely has no words on it. So the model did the reasonable
+  thing with a blank page: it gave up. An extraction that finds nothing is now
+  a **failure**, with the reason — still rendering, or blocked by a bot check —
+  and a pointer to `web_search` / `web_fetch`.
+- **The page was read before it had rendered.** Marketplaces build the product
+  grid with JavaScript after the page "loads", so reading immediately catches
+  the loading shell — Tokopedia's said *"Memuat, mohon tunggu…"* and nothing
+  else. The extractor now waits, briefly and boundedly, for real content.
+  `networkidle` was tried and rejected: these sites hold a connection open
+  forever, so it times out at 45s while the content was ready in under three.
+
+**And the browser stopped announcing itself.** `navigator.webdriver` was `true`
+— the single cheapest signal a site reads to spot automation — alongside a
+stale user agent, no locale, a UTC clock against an Indonesian user and an
+absent `window.chrome`. All four are now set, and the browser keeps a persistent
+profile so a second visit looks like a returning visitor rather than a fresh
+scraper.
+
+Tokopedia search for "boox", measured on the live app after the change:
+**0 characters before, 1931 characters and 13 prices after.** Shopee still
+refuses automated access and now says so, instead of returning an empty page
+that reads like success.
+
+
+## Every skill is visible to the model, on every turn
+
+**Addled keeps a library of skills** — the ones you install from the market,
+the ones you forge, the ones it ships with — and a local model has to be told
+which of them exist. It was being told only about the ones whose one-line
+description happened to share a word with what you typed. Everything else was
+invisible: present, callable, and never offered.
+
+The fix is the mechanism the open [Agent Skills](https://agentskills.io)
+standard prescribes, and Addled's market skills were already written for it: a
+model chooses from a catalogue of every skill, rather than a keyword filter
+choosing for it. The prompt now carries a directory of **every** skill — name
+and a short description — so the model can see `test-driven-development` when
+you say *"my feature keeps breaking after I change it"* without you having to
+say "test", "debug" or any other magic word.
+
+Measured on the installed app: for that sentence, the old keyword filter offered
+**one** market skill (and the wrong one — `using-git-worktrees`, for a bugfix
+question); the catalogue shows **all fifteen**. Nothing is hidden because of how
+you phrased the question.
+
+## What that changed underneath
+
+- **The catalogue is always present.** Every enabled skill is listed by name and
+  description, regardless of what you asked. The full instructions still load
+  only when a skill is actually used — this is the listing, not the content.
+- **`skill_search` and `skill_view` are always offered.** The catalogue tells
+  the model to call them, so they are now in the list it is given. They used to
+  appear only if your message happened to contain "skill" or "search", which
+  meant the prompt named two tools it was not offering.
+- **The core tools can no longer be dropped.** `web_search`, `read_file`,
+  `write_file` and `run_command` are guaranteed on every turn. A scoring
+  edge-case could previously drop all four at once on a small budget.
+- **The tool budget rose 16 → 18** to pay for the two extra guaranteed tools,
+  rather than taking their slots from the skills that were already reachable.
+  Measured at ~72 tokens, under 1% of the local model's window.
+
+## Notes
+
+- An upgrade keeps your setup: settings, memory, skills, tools, MCP servers and
+  the swarm roster all live beside the install, and the installer ships no copy
+  of any of them. Skills you installed arrive by installing them, not from this
+  installer — unchanged, and by design.
+- Skills and tools both stay reachable by name even when not listed, so nothing
+  that worked before stops working.
+
+## Verification
+
+All check suites pass. The reachability suite now asserts the general property
+rather than today's skill list: a synthetic skill registered at test time — one
+the code has never seen, with a description sharing no word with the query —
+must still appear in the catalogue, and the core and discovery tools must be
+offered on every turn including a bare `"hello"`. Both were confirmed to fail
+when the fix is reverted.
+
+Driven against the installed app over its real WebSocket: asked *"I keep
+breaking things when I edit code. Is there a skill for that? Load it."* — with
+no skill named — the model called `skill_search` and `skill_view` and loaded
+`test-driven-development` by itself.
+
 # Addled 1.0.39
 
 **The installer got smaller, and honest about how much.** The download drops

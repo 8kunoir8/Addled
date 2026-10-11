@@ -16,9 +16,16 @@ Run with the dev bundle, from the project root:
 Exits non-zero when a skill no realistic phrasing can reach.
 """
 
+import os
 import sys
 
-sys.path.insert(0, "E:/Kunoir/Codeground/Clicky/Addled")
+# Resolve the repo from THIS file, the way every other check does. It was
+# pinned to an absolute path in another worktree, so the suite tested whatever
+# copy happened to live there - and would not run at all on a machine without
+# it. A check that can silently measure a different tree is worse than no
+# check: it reports on code the user is not running.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from backend.skills.registry import skill_registry as R  # noqa: E402
 
@@ -184,20 +191,151 @@ PHRASINGS: dict[str, list[str]] = {
     # to know it can be offered, not that a user would request it by name.
     "ask_user": ["which file did you mean", "I am not sure what you mean",
                  "can you clarify", "ask me a question"],
+    # -- meetings (integrations) ---------------------------------------------
+    # These had no phrasing at all, so the check counted them unreachable
+    # without ever asking whether they were. They are reachable, and these are
+    # the asks that reach them.
+    "meeting_list": ["what meetings do I have", "list my meetings",
+                     "show me my meeting transcripts"],
+    "meeting_get": ["get the meeting transcript", "show me that meeting",
+                    "open the meeting notes"],
+    "meeting_actions": ["what action items came out of the meeting",
+                        "what were the action items from that meeting",
+                        "pull the follow-ups from the meeting"],
+    "meeting_save": ["save this meeting transcript", "save the meeting notes",
+                     "store this transcript"],
+    "meeting_summarise": ["summarise the meeting", "summarise this transcript",
+                          "what was decided in the meeting"],
+    # -- meta: asking the agent about its own skills --------------------------
+    "skill_search": ["what skills do you have", "do you have a skill for pdfs",
+                     "is there a skill that can do this"],
+    "skill_view": ["show me the details of that skill",
+                   "what can the pdf skill do",
+                   "how does that skill work"],
 }
 
 
-def offered_for(query: str, max_tools: int = 16) -> set[str]:
+def offered_for(query: str, max_tools: int = 18) -> set[str]:
     """What a real turn would offer this query.
 
     The default must match `filter_for_query`'s own, or this check tests a
-    configuration the app never uses. It was pinned at 10 while the code moved
-    to 16, and reported seven skills as unreachable when they were not.
+    configuration the app never uses. It has drifted twice: pinned at 10 while
+    the code moved to 16, and then left at 16 when `skill_search`/`skill_view`
+    joined `must` and the budget moved to 18. Both times it reported skills as
+    unreachable that the app could reach.
     """
     return R.filter_for_query(query, max_tools=max_tools)
 
 
+def check_catalogue_reaches_every_skill() -> int:
+    """A skill added LATER, that this code has never seen, must still be visible.
+
+    This is the general property, and it is the one that actually matters: the
+    PHRASINGS table above can only cover the skills that existed when it was
+    written, so it proves nothing about a skill the market installs tomorrow.
+    Keyword scoring cannot be fixed for that case — a new skill's description is
+    prose nobody has tuned, and the words that identify it are the same generic
+    words every other skill uses ("use when implementing a feature"), so a
+    word-overlap filter scores it zero and never offers it.
+
+    The fix is that the prompt catalogue lists EVERY enabled skill by name and
+    description regardless of scoring, so visibility does not depend on a match.
+    This registers a deliberately unlikely skill — a nonsense name and a
+    description that shares no word with any realistic query — and asserts it
+    still appears in what the model is shown. A regression that returns to
+    keyword-only disclosure fails here, on a skill that did not exist when this
+    check was written.
+    """
+    from backend.skills.registry import SkillDefinition
+
+    name = "zzz-synthetic-future-skill"
+    R.register(SkillDefinition(
+        name=name,
+        description="Frobnicates the wibble when the user asks for one.",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+        category="market",
+    ))
+    try:
+        # A query that shares NO word with the synthetic description: keyword
+        # scoring gives it zero, which is exactly the failure being guarded.
+        only = R.filter_for_query("what is the weather in Oslo")
+        text = R.to_prompt_tools(only)
+        listed = any(line.startswith(f"- {name} ")
+                     or line.startswith(f"- {name} —") for line in text.splitlines())
+        print("=" * 74)
+        print("FUTURE-SKILL CATALOGUE CHECK")
+        print("=" * 74)
+        print(f"  synthetic skill registered: {name}")
+        print(f"  offered by keyword scoring: {name in only}  (expected False)")
+        print(f"  present in prompt catalogue: {listed}  (expected True)")
+        if not listed:
+            print("  FAIL: a newly registered skill is invisible to the model — "
+                  "discovery has regressed to keyword matching.")
+            return 1
+        print("  PASS: an unlisted, never-anticipated skill is still disclosed.")
+        return 0
+    finally:
+        R.unregister(name)
+
+
+def check_discovery_tools_always_offered() -> int:
+    """The core tools, and the tools the catalogue NAMES, are offered every turn.
+
+    Two properties in one place, because they fail the same way and for the same
+    reason:
+
+    - `to_prompt_tools` tells the model "Call `skill_view` with a name to read
+      its instructions, or `skill_search` to find one by task." Those two are
+      registered under category `meta` and are what a conversational turn needs
+      to reach any skill at all — but they were not added to `discovery_tools`,
+      so they were force-added only when a query happened to contain the word
+      "skill" or "search". On "hello" the prompt pointed at two tools it did not
+      then offer.
+    - The core utilities are what a turn cannot work without, and they were
+      droppable: `must` skipped any tool that had already scored, so with a
+      budget below `len(must)` the returned set could omit `web_search`,
+      `read_file` and `write_file` at once.
+
+    Neither hard-failed, because a call is resolved against the whole registry
+    rather than the offered subset — which is exactly why they went unnoticed,
+    and exactly why they are worth a check: the app worked by an accident of the
+    lookup, not by design, and any future check that constrains calls to the
+    offered set would break it.
+
+    Asserts the property directly: whatever the query, all of them are offered.
+    """
+    required = ["web_search", "read_file", "write_file", "run_command",
+                "skill_search", "skill_view"]
+    probes = ["", "hello", "i feel tired today", "what is 2+2", "thanks!",
+              "convert this pdf to a spreadsheet"]
+    print("=" * 74)
+    print("ALWAYS-OFFERED TOOLS CHECK")
+    print("=" * 74)
+    print("  core utilities + the discovery tools the catalogue names, on every turn")
+    missing_any = []
+    for q in probes:
+        offered = offered_for(q)
+        missing = [n for n in required if n not in offered]
+        mark = "ok" if not missing else "MISSING " + ",".join(missing)
+        print(f"  {q!r:38} -> {mark}")
+        if missing:
+            missing_any.append((q, missing))
+    if missing_any:
+        print("  FAIL: a turn does not offer the tools it cannot work without,")
+        print("        or the catalogue names tools it does not offer.")
+        return 1
+    print("  PASS: core + discovery tools are offered on every turn, so the")
+    print("        catalogue's own instructions are actionable and a turn is")
+    print("        never left without the means to work or to look one up.")
+    return 0
+
+
 def main() -> int:
+    catalogue_rc = check_catalogue_reaches_every_skill()
+    print()
+    discovery_rc = check_discovery_tools_always_offered()
+    print()
     all_skills = {s.name: s for s in R.list_all()}
     enabled = {s.name: s for s in R.enabled_list_all()}
 
@@ -267,14 +405,18 @@ def main() -> int:
               "summarise this report", "read this word document"):
         print(f"  {q!r}\n     -> {sorted(offered_for(q) - CORE)}")
 
-    if builtin_never or missing:
+    if builtin_never or missing or catalogue_rc or discovery_rc:
         print(f"\nFAIL: {len(builtin_never)} built-in skill(s) reachable-only-by-name, "
-              f"{len(missing)} with no phrasing defined")
+              f"{len(missing)} with no phrasing defined, "
+              f"catalogue future-skill check rc={catalogue_rc}, "
+              f"discovery-tool visibility check rc={discovery_rc}")
         if market_never:
             print(f"      ({len(market_never)} market skills also never offered — "
                   f"they are installed content, reported separately)")
         return 1
-    print("\nPASS: every enabled built-in skill is reachable by some realistic phrasing")
+    print("\nPASS: every enabled built-in skill is reachable by some realistic "
+          "phrasing, a newly registered skill reaches the prompt catalogue, and "
+          "the discovery tools are offered on every turn")
     return 0
 
 

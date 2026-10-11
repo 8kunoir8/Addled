@@ -1171,6 +1171,97 @@ check("the 9router PROMPT path pairs its tool result (the live 11133 case)",
       "9router takes the prompt path every turn and its calls have no id; "
       "unpaired, the follow-up is HTTP 400 code 11133 against the real gateway")
 
+
+# --- when the model will not stop promising ---------------------------------
+#
+# The live failure this guards, measured on the dashboard on 2026-10-10: four
+# consecutive turns promised a destructive action and called nothing. The
+# nudge fired on the first, the model was asked again, and it promised a
+# SECOND time - which the old code accepted, because its budget was one. The
+# user then asked "how is it?" and there was nothing to report, because
+# nothing had ever started.
+#
+# The fix is two things: the nudge now retries twice, and when the model is
+# still promising after that, the promise is NOT the answer. It is replaced
+# with `_PROMISED_NOTHING_ANSWER`, which says plainly that nothing ran.
+#
+# The shapes that must NOT be rewritten are tested too, because the cheapest
+# way to fix "a lie reached the user" is to start rewriting honest replies: a
+# refusal is a real answer, and putting words in the model's mouth would be a
+# worse bug than the one being fixed.
+
+
+def _honest_answer():
+    from backend.skills.tool_loop import _PROMISED_NOTHING_ANSWER
+    return _PROMISED_NOTHING_ANSWER
+
+
+def _promise_forever_probe(reply, tools_arg=None):
+    """The model promises on every round, however many times it is asked."""
+    import asyncio
+    from backend.skills import tool_loop as _tl
+
+    class P:
+        provider_id = "fake"
+        has_native_tools = True
+
+        def __init__(self):
+            self.n = 0
+
+        async def chat(self, messages, model=None, max_tokens=4096,
+                       temperature=0.7, tools=None):
+            self.n += 1
+            return _scripted_reply(reply)   # never calls, never changes
+
+        async def chat_stream(self, *a, **k):
+            return
+            yield  # pragma: no cover
+
+    async def go():
+        p = P()
+        real = _tl.execute_skill
+
+        async def spy(name, params, provider):
+            return {"success": True, "data": {}}
+
+        _tl.execute_skill = spy
+        try:
+            out = await _tl.chat_with_tools(
+                p, [{"role": "user", "content": "delete the folder ./build"}],
+                tools=tools_arg, on_delta=None)
+        finally:
+            _tl.execute_skill = real
+        return p, out
+    return asyncio.run(go())
+
+
+
+_pf, _pf_out = _promise_forever_probe(_announcement)
+check("a promise that never becomes a call is replaced with the honest result",
+      _pf_out.get("response") == _honest_answer(),
+      "the turn said it was acting and called nothing; the user must be told "
+      "that nothing ran rather than shown the promise as the answer")
+check("the promise is retried, but a bounded number of times",
+      1 < _pf.n <= 3,
+      "one retry cannot tell 'will not call' from 'needs one more ask', and "
+      "an unbounded one costs a model call on every turn")
+
+# A refusal is a real answer. It must reach the user verbatim.
+_refusal = ("I can't run that one - it's a recursive force-delete of a "
+            "directory, and I don't run destructive commands on request.")
+_rf, _rf_out = _promise_forever_probe(_refusal)
+check("a refusal is passed through untouched, not rewritten",
+      _rf_out.get("response") == _refusal,
+      "rewriting a refusal would put words in the model's mouth; the guard "
+      "must tell 'I won't do this' apart from 'I am doing this'")
+
+# An ordinary answer is not a promise and must survive too.
+_plain = "The folder does not exist, so there is nothing to delete."
+_pa, _pa_out = _promise_forever_probe(_plain)
+check("an ordinary answer is passed through untouched",
+      _pa_out.get("response") == _plain,
+      "the replacement must only apply to the shape that claims an action")
+
 if fails:
     print(f"{len(fails)} FAILED")
     for f in fails:

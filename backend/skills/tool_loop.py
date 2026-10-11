@@ -605,9 +605,34 @@ MAX_VERIFY_NUDGES = 1
 # model called none of them, nothing has run yet, and the text claims the action
 # is under way. That is the shape of a dropped call and nothing else.
 #
-# One, because a model that is going to act does it on the first ask, and a
-# second costs a model call in a turn the user is waiting on.
-MAX_PROMISE_NUDGES = 1
+# Two, not one. One was not enough, and the live evidence is the reason: on
+# 2026-10-10 the dashboard produced four consecutive turns that promised a
+# destructive action and called nothing. The nudge fired on the first (the log
+# shows "Promise nudge: announced action, nothing called"), the model was asked
+# again, and it answered with a *second* promise - which the loop accepted,
+# because the single nudge had already been spent. One retry cannot tell "the
+# model will not call this tool" from "the model needs one more ask", and the
+# first of those is exactly the case that must never be shown as a promise.
+#
+# Still bounded, and the second is the last: a third costs a model call in a
+# turn the user is waiting on and has never changed the outcome. What happens
+# when the budget is spent is the other half of the fix - see the
+# `_PROMISED_NOTHING_ANSWER` fallback below, which is what the user sees when the
+# model keeps insisting it is acting and still does not.
+MAX_PROMISE_NUDGES = 2
+
+# What the user sees when the model promised an action, was asked twice to
+# actually call the tool, and promised again instead. It is deliberately plain
+# and deliberately not attributed to the model: the model's own words were the
+# thing that was untrue, and repeating them with an apology on top would leave
+# the promise in the transcript. The second sentence tells the user what to do
+# next, because "nothing ran" on its own is a dead end.
+_PROMISED_NOTHING_ANSWER = (
+    "I didn't actually run anything for that — I described what I would do, "
+    "called no tool, and there is no result to report. Nothing was changed. "
+    "If you still want it done, ask again and I'll make the call itself; if "
+    "you'd rather it was left alone, say so and I'll drop it."
+)
 
 # A claim that the work is happening NOW, rather than a description of what
 # could be done. Tensed deliberately: "I'll run it" is a plan, "I ran it" is a
@@ -637,6 +662,19 @@ _PROMISE_GERUND = re.compile(
 _PROMISE_INTENT = re.compile(
     r"\b(?:let me|i'?ll|i will|i'?m going to)\s+(?:\w+\s+){0,3}?\w+",
     re.IGNORECASE)
+# Social sign-offs that share the intent frame but promise nothing. "Let me
+# know if you need anything else" is a politeness, not a claim that an action
+# is under way, and it is the standard ending on the local model's replies -
+# measured 2026-10-10, where it made five legitimate completions read as
+# promises. Caught by the test for the local model's reported result in
+# scripts/check_announced_not_called.py, which failed until this existed.
+#
+# A deny-list rather than a stricter verb class, for the same reason
+# `_EXPLAINS_PAT` is one: the frame is deliberately open, and these are the
+# finite phrases that share it without meaning it.
+_SOCIAL_PAT = re.compile(
+    r"\b(?:let me know|let me clarify|let me summarise|let me summarize)\b",
+    re.IGNORECASE)
 
 # Announcing that the action is going ahead, with no subject at all. These are
 # idioms rather than a verb class, so they are listed: they are finite and the
@@ -659,6 +697,63 @@ _EXPLAINS_PAT = re.compile(
 _CARRY_OUT_PAT = re.compile(
     r"\b(?:i'?ll|i will|let me)\s+(?:go ahead and\s+)?"
     r"(?:carry|follow through|take care of)\b", re.IGNORECASE)
+
+# The same "I am acting now" claim, in the languages this app answers in.
+#
+# Why this exists: the frames above are English, and so the nudge was blind to
+# every other language. Measured live on 2026-10-11, in Indonesian: the user
+# asked for marketplace prices, the model said "Aku coba tarik data live dulu ya
+# bro ... Lanjut cek sekarang." and called nothing — twice. The guard's other
+# three conditions all held (tools were offered, no call was made, nothing had
+# run), and the promise reached the user as the answer. Only when the user
+# pushed a third time did the model actually call a tool. `_announced_work`
+# returned False for both replies; every English pattern missed, because the
+# grammar was Indonesian.
+#
+# Each entry is a pair of (verb frame, immediacy marker). A frame matches a
+# first-person action underway or about to start; the marker is what makes it a
+# claim of the PRESENT rather than a description ("Saya bisa mencari" — I can
+# search — is a capability, not a promise), so the two must appear together in
+# the same clause. The marker is optional for the verb forms that are already
+# present-tense in that language (Indonesian "sedang", Portuguese "estou a").
+#
+# Deliberately conservative, like the English patterns: a false positive
+# rewrites an honest answer, which is worse than a missed nudge. When a language
+# is ambiguous, the frame is dropped and the miss is accepted.
+_FOREIGN_ACTION_FRAMES: tuple[re.Pattern, ...] = (
+    # Indonesian — "aku/saya ... <verb>", "lagi <verb>", with sekarang/sebentar
+    re.compile(
+        r"\b(?:aku|saya|gue|gua)\s+(?:lagi\s+|sedang\s+|mau\s+|akan\s+|coba\s+)?"
+        r"\w+(?:in|kan)?\b[^.!?\n]{0,40}?\b(?:sekarang|langsung|bentar|"
+        r"sebentar|dulu|lagi)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:lagi|sedang)\s+(?:aku\s+|saya\s+)?\w+", re.IGNORECASE),
+    # Spanish — "voy a <verb>", "estoy <verb>ando"
+    re.compile(
+        r"\b(?:voy a|estoy|estoy a punto de)\s+\w+"
+        r"[^.!?\n]{0,40}?\b(?:ahora|ahora mismo|ya|enseguida)\b", re.IGNORECASE),
+    re.compile(r"\b(?:estoy|vamos)\s+\w+(?:ando|iendo)\b", re.IGNORECASE),
+    # French — "je vais <verb>", "je suis en train de"
+    re.compile(
+        r"\b(?:je vais|je suis en train de|je)\s+\w+"
+        r"[^.!?\n]{0,40}?\b(?:maintenant|tout de suite|là|de suite)\b",
+        re.IGNORECASE),
+    # German — "ich <verb>e gerade/jetzt", "ich werde ... "
+    re.compile(
+        r"\bich\s+\w+(?:e|en)?\b[^.!?\n]{0,40}?\b(?:jetzt|gerade|sofort|"
+        r"gleich)\b", re.IGNORECASE),
+    re.compile(
+        r"\bich\s+werde\s+\w+[^.!?\n]{0,40}?\b(?:jetzt|gleich|sofort)\b",
+        re.IGNORECASE),
+    # Portuguese — "vou <verb>", "estou a <verb>", "estou <verb>ndo"
+    re.compile(
+        r"\b(?:vou|estou|estou a)\s+\w+(?:ar|er|ir|ndo|ando|endo)?\b"
+        r"[^.!?\n]{0,40}?\b(?:agora|já|ja|mesmo)\b", re.IGNORECASE),
+    # Italian — "sto <verb>ando", "vado a <verb>", "adesso/ora"
+    re.compile(
+        r"\b(?:sto|vado a|voglio)\s+\w+(?:ando|endo|are|ere|ire)?\b"
+        r"[^.!?\n]{0,40}?\b(?:adesso|ora|subito)\b", re.IGNORECASE),
+)
 
 
 # Parameter names that mean "this call touched a file on disk".
@@ -749,6 +844,17 @@ def _announced_work(text: str) -> bool:
         return True
     if _CARRY_OUT_PAT.search(stripped):
         return True
+    # The same claim in another language. Tested BEFORE the length cap and the
+    # English deny-lists below, because both are English-tuned and would wrongly
+    # clear a foreign promise: a long reply in Indonesian is still a promise, and
+    # `_EXPLAINS_PAT` cannot see the Indonesian word for "explain". Each frame is
+    # a verb form plus a present-tense marker (see `_FOREIGN_ACTION_FRAMES`), so
+    # it is specific enough to stand on its own without the guards.
+    #
+    # This is what the running app was missing: an Indonesian promise reached the
+    # user twice on 2026-10-11 because every frame below it was English.
+    if any(frame.search(stripped) for frame in _FOREIGN_ACTION_FRAMES):
+        return True
     # The first-person intent frame ("let me...", "I'll...") is broad, so it
     # needs both guards: a length cap (an explanation runs long, a promise is
     # one line) and a deny-list of verbs that describe talking rather than
@@ -758,7 +864,7 @@ def _announced_work(text: str) -> bool:
     # works").
     if len(stripped) > 700:
         return False
-    if _EXPLAINS_PAT.search(stripped):
+    if _EXPLAINS_PAT.search(stripped) or _SOCIAL_PAT.search(stripped):
         return False
     return bool(_PROMISE_INTENT.search(stripped))
 
@@ -1148,6 +1254,53 @@ async def chat_with_tools(
                 })
                 log.info("Promise nudge: announced action, nothing called")
                 continue
+            # The nudge budget is spent and the model STILL says it is acting
+            # without calling anything. This is the reply that must not reach
+            # the user: measured live on 2026-10-10, four consecutive turns
+            # said "Firing the delete now; it's destructive so expect an
+            # approval prompt" and produced no call and no card. The user then
+            # asked "how is it?" and there was nothing to report, because
+            # nothing had ever started.
+            #
+            # The fix is not to nudge a third time - the first two showed that
+            # a retry does not turn this model into a caller. It is to refuse
+            # to pass the promise through. A reply that claims the action is
+            # under way, in a turn where nothing ran, is replaced by one that
+            # says so plainly. The user is told the truth instead of being
+            # left to discover that "Firing the delete now" fired nothing.
+            #
+            # Only this shape is rewritten. An ordinary answer, and a refusal
+            # ("I can't run that one - it's a recursive force-delete"), are
+            # both honest and are returned untouched: a refusal is a real
+            # answer, and rewriting it would be putting words in the model's
+            # mouth. `_announced_work` already separates the two, which is why
+            # the test for it lives there and not here.
+            if (not all_tool_results
+                    and _tools_were_offered(only)
+                    and _announced_work(result.get("response", ""))):
+                log.info("Promise nudge spent; replacing an unbacked promise "
+                         "with the honest result")
+                if result.get("streamed") and on_delta is not None:
+                    # The promise was buffered for the nudge and never emitted
+                    # (see the streamed round above), so there is nothing to
+                    # retract on the wire - but the replacement still has to be
+                    # sent, or the streaming surface shows nothing at all.
+                    try:
+                        on_delta(_PROMISED_NOTHING_ANSWER)
+                    except Exception:
+                        log.debug("stream listener failed", exc_info=True)
+                if learn:
+                    # Nothing ran, so there is no procedure worth learning -
+                    # but the review queue still wants the turn, for the same
+                    # reason a failed turn does.
+                    _queue_review(messages, [], _PROMISED_NOTHING_ANSWER)
+                return {
+                    "response": _PROMISED_NOTHING_ANSWER,
+                    "tokens": result.get("tokens", 0),
+                    "tool_rounds": rounds,
+                    "tool_results": [],
+                    "announced_nothing_ran": True,
+                }
             # Show your work before you claim it works.
             #
             # A turn that changed files and ran nothing is the turn that says "I
@@ -2565,7 +2718,27 @@ def _tool_result_message(tool_name: str, result: dict, tool_call_id: str | None 
     if result.get("success"):
         summary = json.dumps(result.get("data", {}), indent=2)[:3000]
         forged_note = " (newly forged!)" if result.get("forged") else ""
-        content = f"Tool '{tool_name}' succeeded{forged_note}.\nResult:\n{summary}"
+        # The tool ran, and it succeeded - but success is not the same as
+        # answering the question. `web_search` returns whatever the source had,
+        # and a set covering only part of the query is reported as `partial`
+        # rather than withheld (see `_evidence_quality` for why it is reported
+        # and not graded). Saying a flat "succeeded" for that is what let the
+        # model present unrelated rows as the answer - measured 2026-10-11,
+        # where Wikipedia pages about Falcon 9 launches and IKEA were handed
+        # over as the reply to a price question. Any skill may set `quality`,
+        # so this is not special-cased to search.
+        data = result.get("data") or {}
+        quality = str(data.get("quality") or "") if isinstance(data, dict) else ""
+        note = str(data.get("note") or "") if isinstance(data, dict) else ""
+        if quality == "partial":
+            content = (f"Tool '{tool_name}' ran and returned results, but they "
+                       f"only partly cover the query{forged_note}.")
+            if note:
+                content += f"\n{note}"
+            content += f"\nResult:\n{summary}"
+        else:
+            content = (f"Tool '{tool_name}' succeeded{forged_note}."
+                       f"\nResult:\n{summary}")
     else:
         content = f"Tool '{tool_name}' failed.\nError: {result.get('error', 'unknown')}"
         # A refusal is an instruction, not a dead end. `execute_skill` puts the

@@ -68,6 +68,11 @@ async def _run(backend: str) -> bool:
     # installed there are usable without a restart. `add_pylibs_to_path` is
     # idempotent and safe to call from a background task.
     app_paths.add_pylibs_to_path()
+    # Send the browser to Addled's own cache, not Playwright's machine-wide
+    # default that any other Playwright on the box can overwrite. Inherited by
+    # the `playwright install` subprocess below, which is what actually writes
+    # it. Idempotent, and a no-op when the variable is already set.
+    app_paths.configure_browsers_path()
     target = str(app_paths.PYLIBS_DIR)
     try:
         if backend == "playwright":
@@ -76,9 +81,9 @@ async def _run(backend: str) -> bool:
                  "--target", target, "--no-warn-script-location"],
                 # `playwright install chromium` reads the package from the
                 # target dir, so it must be on sys.path already (guaranteed
-                # above). The chromium browser itself is always placed in the
-                # user's own Playwright cache (~/.cache/ms-playwright), so no
-                # write into the install dir is needed for this step.
+                # above), and writes the browser into
+                # `PLAYWRIGHT_BROWSERS_PATH` (set above), so the download lands
+                # where the app's own launch looks for it.
                 #
                 # The subprocess needs target on PYTHONPATH because it does
                 # not inherit this process's sys.path modifications.

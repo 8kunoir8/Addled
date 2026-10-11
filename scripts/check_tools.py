@@ -100,8 +100,12 @@ def run_catalogue_tests():
 
     block = full
 
-    # One line per tool, and every tool still listed.
-    lines = [ln for ln in block.splitlines() if " — " in ln]
+    # Every tool still gets a schema line. The `—` shape matches both the
+    # executable lines (`name(args) — desc`) and the Tier-1 directory
+    # (`- name — desc`), so count only the executable ones: a directory entry
+    # has no argument list and would otherwise be miscounted as a schema line.
+    lines = [ln for ln in block.splitlines()
+             if " — " in ln and ln.lstrip().startswith("- ") is False]
     check("every tool is still advertised", len(lines) == len(skills),
           f"{len(lines)} lines for {len(skills)} skills")
 
@@ -314,8 +318,21 @@ def run_budget_tests():
           f"len={len(fitted_seq)}: {[m['content'] for m in fitted_seq]}")
 
     from backend.skills.registry import skill_registry
-    filtered_tools = skill_registry.filter_for_query("can you check the weather in tokyo", max_tools=6)
-    check("filter_for_query limits tools", len(filtered_tools) <= 6, f"len={len(filtered_tools)}")
+    # The ceiling is honoured at the budget the app actually uses. It was
+    # asserted at max_tools=6, which predates `must` growing to nine names
+    # (four core + five discovery): a budget smaller than `must` cannot honour
+    # a ceiling, because `must` is deliberately never truncated — the tools a
+    # turn cannot work without are not the ones to drop when space runs out.
+    # Testing the real default is what proves the property the app relies on.
+    DEFAULT_MAX = 16
+    filtered_tools = skill_registry.filter_for_query(
+        "can you check the weather in tokyo", max_tools=DEFAULT_MAX)
+    check("filter_for_query limits tools at the real budget",
+          len(filtered_tools) <= DEFAULT_MAX, f"len={len(filtered_tools)}")
+    check("the tools a turn cannot work without are always present",
+          {"web_search", "read_file", "write_file", "run_command",
+           "skill_search", "skill_view"} <= filtered_tools,
+          str(sorted(filtered_tools)))
     check("filter_for_query includes weather or web_search",
           bool({"weather", "web_search"} & filtered_tools),
           str(filtered_tools))
@@ -355,13 +372,15 @@ def run_budget_tests():
     check("a procedure question surfaces sop_lookup",
           "sop_lookup" in proc_ask, str(sorted(proc_ask)))
 
-    # The default max_tools is 16: enough for wiki, SOP, a domain MCP tool and
-    # the three discovery tools to coexist. Raised from 10 when the discovery
-    # tools stopped being gated — reserving their slots at 10 pushed seven real
-    # skills out of reach, which check_reachability caught.
+    # The default max_tools is 18: enough for wiki, SOP, a domain MCP tool, the
+    # core utilities and the discovery tools to coexist. Raised 10 -> 16 when
+    # the discovery tools stopped being gated, and 16 -> 18 when
+    # `skill_search`/`skill_view` joined them — reserving more guaranteed slots
+    # at a fixed budget pushes real skills out of reach, which
+    # check_reachability catches each time.
     default_q = skill_registry.filter_for_query("read a file and search the web")
-    check("default max_tools allows up to 16",
-          len(default_q) <= 16, f"len={len(default_q)}")
+    check("default max_tools allows up to 18",
+          len(default_q) <= 18, f"len={len(default_q)}")
 
 
 # ---- provider errors must explain themselves ---------------------------------

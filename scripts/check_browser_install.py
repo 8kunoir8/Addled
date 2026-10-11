@@ -15,11 +15,13 @@ decision to make by pressing the button.
 import os
 import sys
 import time
+from pathlib import Path
 
 ROOT = os.environ.get("ADDLED_ROOT") or os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+from backend import app_paths
 from backend.browser import auto_install
 
 fails = []
@@ -117,6 +119,120 @@ def run():
           "fetch_playwright.py" not in text,
           "the old 'see README' row is still there")
 
+    # ---- availability reflects the BINARY, not just the package -----------
+    #
+    # The bug this pins: `_playwright_available` returned True whenever the
+    # `playwright` package imported, so an install missing its Chromium (or
+    # holding the wrong revision, which is what a second Playwright's
+    # `npx playwright install` leaves behind) reported "installed" to the
+    # Settings page and the Install button never appeared.
+    from backend.browser.browser_engine import PlaywrightBrowser
+    check("availability is not just the package import",
+          hasattr(PlaywrightBrowser, "_chromium_available"),
+          "nothing checks the browser binary")
+    check("importability is its own question",
+          hasattr(PlaywrightBrowser, "_playwright_importable"),
+          "package presence and browser presence are conflated")
+
+    real_importable = PlaywrightBrowser._playwright_importable
+    real_chromium = PlaywrightBrowser._chromium_available
+    try:
+        # Package present, browser missing → NOT available.
+        PlaywrightBrowser._playwright_importable = staticmethod(lambda: True)
+        PlaywrightBrowser._chromium_available = staticmethod(lambda: False)
+        check("package without a browser is not 'available'",
+              PlaywrightBrowser._playwright_available() is False,
+              "the old lie: package import alone reads as installed")
+        # Package missing → NOT available, regardless of a stray binary.
+        PlaywrightBrowser._playwright_importable = staticmethod(lambda: False)
+        PlaywrightBrowser._chromium_available = staticmethod(lambda: True)
+        check("a browser without the package is not 'available'",
+              PlaywrightBrowser._playwright_available() is False, "")
+    finally:
+        PlaywrightBrowser._playwright_importable = real_importable
+        PlaywrightBrowser._chromium_available = real_chromium
+
+    # ---- the revision is what matters, not the folder name ----------------
+    #
+    # A real install held chromium-1243 while the resolved package wanted
+    # chromium-1234. A check for "a chromium-* directory" passed and every
+    # launch failed; the executable path must be derived from browsers.json.
+    needed = app_paths._playwright_needed_revisions()
+    check("needed revisions come from the package's own browsers.json",
+          isinstance(needed, set), str(type(needed)))
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        browsers = Path(tmp) / "ms-playwright"
+        browsers.mkdir()
+        wanted = sorted(needed) if needed else ["1234"]
+        # Present, but the WRONG revision: must still read as unavailable.
+        wrong = browsers / f"chromium-{int(wanted[0]) + 100}"
+        (wrong / "chrome-win64").mkdir(parents=True)
+        (wrong / "chrome-win64" / "chrome.exe").write_bytes(b"")
+        saved_env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+        try:
+            check("a chromium of the WRONG revision does not count",
+                  PlaywrightBrowser._chromium_available() is False,
+                  "folder-name matching would accept it and every launch "
+                  "would then fail on the missing executable")
+        finally:
+            if saved_env is None:
+                os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+            else:
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = saved_env
+
+    # ---- the browser cache is Addled's own --------------------------------
+    check("Addled keeps its browsers under its own data dir",
+          hasattr(app_paths, "BROWSERS_DIR"), "no isolated browser cache")
+    check("the env var Playwright reads is the one that is set",
+          app_paths.PLAYWRIGHT_BROWSERS_ENV == "PLAYWRIGHT_BROWSERS_PATH",
+          "Playwright would not see the override")
+    saved = os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+    try:
+        check("configure points Playwright at that directory",
+              app_paths.configure_browsers_path()
+              and os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+              == str(app_paths.BROWSERS_DIR),
+              "Playwright still shares the machine-wide cache")
+        # An operator override must survive.
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "X:/deliberate"
+        app_paths.configure_browsers_path()
+        check("a deliberate override is respected",
+              os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "X:/deliberate",
+              "the app overwrote a path the operator set")
+    finally:
+        if saved is None:
+            os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+        else:
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = saved
+
+    # ---- user-site packages can no longer shadow pylibs -------------------
+    #
+    # The second half of the bug: the app's interpreter is not `-s`, so a
+    # stray `pip install --user playwright` sat ahead of `pylibs` on sys.path
+    # and the Install button's work was never the copy that got imported.
+    check("the duplication test knows about the user-site",
+          hasattr(app_paths, "_user_site_names"),
+          "only the bundled site-packages is considered")
+    check("pylibs is placed ahead of the first site-packages when a name "
+          "is shared",
+          "site-packages" in inspect.getsource(app_paths.add_pylibs_to_path),
+          "the insertion that makes pylibs win is gone")
+
+    # ---- degradation is reported, not hidden ------------------------------
+    engine_src = inspect.getsource(PlaywrightBrowser)
+    check("an HTTP fallback is marked degraded",
+          "degraded" in engine_src,
+          "a plain fetch is presented as a browse with no way to tell")
+    check("the reason a browser was not used is carried",
+          "_playwright_unavailable_reason" in engine_src,
+          "the user is told nothing about why")
+    nav = inspect.getsource(PlaywrightBrowser.navigate)
+    check("navigate sets the degraded flag on its HTTP path",
+          "degraded" in nav, "navigate hides the fallback")
+
+
 def main() -> int:
     run()
     if fails:
@@ -125,7 +241,8 @@ def main() -> int:
             print("  - " + f)
         print(f"\n{len(fails)} failure(s)")
         return 1
-    print("PASS: browser install — status shape, backoff reset, button wired")
+    print("PASS: browser install — status shape, backoff reset, button wired, "
+          "availability reflects the binary, cache is Addled's own")
     return 0
 
 if __name__ == "__main__":

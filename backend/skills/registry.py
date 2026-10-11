@@ -30,6 +30,17 @@ log = logging.getLogger("addled.skills")
 # context once its reply budget is set aside.
 PROMPT_DESC_CHARS = 110
 
+# How much of a description survives into the Tier-1 catalogue directory.
+#
+# The directory lists every skill, so this bound multiplies by the skill count
+# rather than applying once. Measured on the local model against its 8,192-token
+# window: the full 110-char description costs ~2,650 tokens, 40 chars ~2,140,
+# names alone ~470. 40 keeps enough of each description ("Use when implementing
+# any feature or bugfix") for the model to recognise the relevant skill while
+# leaving room for the reply budget and the schema list that share the window.
+# The full description is one `skill_search` away, so clipping loses nothing.
+CATALOGUE_DESC_CHARS = 40
+
 # Search engine health. Scraped engines rot and networks block them: on the
 # machine this was reported from, every DuckDuckGo endpoint timed out, so each
 # search spent 15s failing on it before falling through to something that
@@ -402,8 +413,70 @@ def _published_key(item: dict) -> float:
         return 0.0
 
 
+def _evidence_quality(query: str, items: list[dict]) -> tuple[str, str]:
+    """What a result set covers, stated as fact rather than a verdict.
+
+    Not a gate, and deliberately not a judgement. `_looks_relevant` decides
+    whether a set may be RETURNED; this decides what the model is TOLD about
+    it, and the two must not be confused.
+
+    The failure this exists for is not that a search returns imperfect rows -
+    sources are imperfect and always will be. It is that `_tool_result_message`
+    told the model the tool SUCCEEDED and handed over the rows with nothing to
+    distinguish them from an answer, so the model presented them as one.
+    Measured 2026-10-11: "Odin 2 Mini price Indonesia" returned Wikipedia rows
+    about Falcon 9 launches, IKEA and a Citroen 2CV - matching the Norse god
+    "Odin" and a Starlink "Mini" - and they were repeated to the user as the
+    reply to a price question while the console showed nothing useful.
+
+    The obvious fix is to grade the results and tell the model which grade is
+    too low to use. That was tried and abandoned. Four discriminators were
+    tested against the live row sets - longest-term-as-subject, hit ratio,
+    per-document co-occurrence, and term-occurrence count - and none could
+    separate the irrelevant set (2 of 4 terms, "odin" and "mini") from a
+    legitimate thin one (a Jakarta news snippet matching only "jakarta", while
+    the longer words around it are not in the text). They are genuinely alike
+    in every measurable way, and a rule tuned to reject the first also rejects
+    the second. Suppressing real results is a worse defect than the one being
+    fixed, so no such rule is applied here.
+
+    What is measurable is coverage, and that is what is reported: which of the
+    query's significant terms appear in the results and which do not. A model
+    reading "these results cover 'odin' and 'mini' but not 'price' or
+    'indonesia'" can tell that a price question was not answered, without any
+    code deciding for it whether that is acceptable.
+
+    Returns (quality, note):
+      strong  - every significant term appears. Empty note.
+      partial - some appear, some do not. The note lists both, factually.
+
+    Two grades, not three: a finer scale would be inventing distinctions the
+    measurements above do not support.
+    """
+    terms = _significant_terms(query)
+    if not terms:
+        return "strong", ""
+    haystack = " ".join(
+        " ".join(str(item.get(k) or "") for k in ("title", "context"))
+        for item in items or []).lower()
+    hits = [term for term in terms if term in haystack]
+    missing = [term for term in terms if term not in hits]
+    if len(hits) == len(terms):
+        return "strong", ""
+    covered = ", ".join(hits) if hits else "none"
+    return "partial", (
+        f"These results mention {covered} but not "
+        f"{', '.join(missing)}. If what the user asked about is among the "
+        f"missing words, these results do not answer it - say so, or retry "
+        f"with different keywords, rather than presenting them as the answer.")
+
+
 def _search_payload(query: str, engine: str, items: list[dict]) -> dict:
-    """Shape the results the way _tool_result_message hands them to the model."""
+    """Shape the results the way _tool_result_message hands them to the model.
+
+    Carries `quality` and `note` so the caller can tell the model how strong
+    the evidence is - see `_evidence_quality`.
+    """
     lines: list[str] = []
     for index, item in enumerate(items, 1):
         lines.append(f"{index}. {item.get('title', '')}")
@@ -415,13 +488,18 @@ def _search_payload(query: str, engine: str, items: list[dict]) -> dict:
             lines.append(f"   {item['context']}")
         if item.get("url"):
             lines.append(f"   {item['url']}")
-    return {
+    quality, note = _evidence_quality(query, items)
+    payload = {
         "success": True,
         "query": query,
         "engine": engine,
+        "quality": quality,
         "results": items,
         "snippet": "\n".join(lines)[:2000],
     }
+    if note:
+        payload["note"] = note
+    return payload
 
 
 async def _search_google_news(query: str) -> dict:
@@ -695,24 +773,27 @@ class SkillRegistry:
             return len(self.enabled_list_all())
         return sum(1 for s in self.enabled_list_all() if s.name in only)
 
-    def filter_for_query(self, query: str, max_tools: int = 16) -> set[str]:
+    def filter_for_query(self, query: str, max_tools: int = 18) -> set[str]:
         """Select a concise subset of relevant skills for prompt-based tool calling.
 
         Instead of injecting 50+ tool schemas (~4,700 tokens) into the context
         of local models, selects core utilities plus skills relevant to the
         user's query.
 
-        ``max_tools`` is 16, raised from 10 when the acquisition tools stopped
-        being gated behind a magic word. Reserving slots for them at 10 pushed
-        SEVEN real skills — `browser_extract`, `pdf_redact`, `memory_link`,
-        `wiki_ingest`, `wiki_write`, `self_propose`, `swarm_notes` — out of reach
-        entirely, which `check_reachability` caught. Stealing from real tools to
-        pay for the discovery ones is not a trade worth making.
+        ``max_tools`` is 18, raised from 16 when `skill_search` and `skill_view`
+        were made always-offered. The budget has to move with `must`, not stay
+        put and let it eat the scored slots: reserving two more guaranteed tools
+        at a fixed 16 took two away from the scored list, and `check_reachability`
+        caught `memory_link` and `self_propose` falling out of reach — the same
+        failure this docstring records from the 10 -> 16 raise, for the same
+        reason. The budget covers `must` (4 core + 5 discovery = 9) plus room
+        for scored skills; below that, a raise is just theft from real tools.
 
-        Measured on the local model against its 8,192-token window: the
-        catalogue costs ~459 tokens at 10 and ~776 at 16. The extra 317 tokens
-        are under 4% of the window, which buys the seven skills back and keeps
-        the discovery tools always present.
+        The first raise cost ~317 tokens (459 -> 776) for 7 skills. This one
+        was measured with the Tier-1 catalogue in place: ~2,482 tokens of
+        prompt-tools payload at 18 versus ~2,410 at 16, so the two extra slots
+        are ~72 tokens against an 8,192-token window — under 1%, and the reply
+        budget is untouched.
         """
         import re
 
@@ -721,7 +802,27 @@ class SkillRegistry:
             return set()
 
         core_tools = {"web_search", "read_file", "write_file", "run_command"}
-        discovery_tools = {"find_mcp_server", "forge_skill", "list_forged"}
+        discovery_tools = {"find_mcp_server", "forge_skill", "list_forged",
+                           "skill_search", "skill_view"}
+        # `skill_search` and `skill_view` belong here for a reason the other
+        # three do not have: the prompt catalogue NAMES them.
+        #
+        # `to_prompt_tools` tells the model "Call `skill_view` with a name to
+        # read its instructions, or `skill_search` to find one by task" — and
+        # on a conversational turn the offered set was core+three, so neither
+        # name was in it. The model could still call them (lookup reaches the
+        # whole registry, not the offered subset), so this was never a hard
+        # failure; it was an instruction pointing at tools the prompt did not
+        # advertise, which works by luck and breaks the moment anything checks
+        # that calls come from the offered set.
+        #
+        # They were omitted because they scored zero without a literal "skill"
+        # or "search" in the query, exactly like `forge_skill` before it — and
+        # the fix is the same one, for the same reason it records: a turn with
+        # no tools offered is the turn that most needs to be able to look one
+        # up. Cost measured on the local 8,192-token window: +265 chars (~66
+        # tokens) to always offer both, with `room` falling 9 -> 7 scored slots.
+
         # Wiki/knowledge intent: when the user asks about docs, notes, or what
         # Addled knows, the wiki tools should be offered — not only when the
         # literal word "wiki" appears.
@@ -941,13 +1042,42 @@ class SkillRegistry:
                      if s.category.lower() in {"cli", "forged", "mcp"}}
 
         must: list[str] = []
+        guaranteed = set(discovery_tools) | set(core_tools)
+        # Build in priority order: the discovery tools first, then the core
+        # utilities, then the user's own.
+        #
+        # The rule this encodes, and the bug that taught it: a tool in the
+        # guaranteed set is offered WHICHEVER way the arithmetic falls. Two
+        # ways to get that wrong, both seen live:
+        #
+        #   1. Listing it in `must` but letting the scored slice drop it.
+        #      `set(selected[:room] + must)` cannot do that directly, but
+        #      SKIPPING it from `must` because it already scored can, once
+        #      `room` is 0 and the slice returns nothing. A discovery tool that
+        #      scored was therefore droppable — the exact failure these five
+        #      names exist to prevent. Caught on the live install: "how are you"
+        #      matched `skill_view`/`skill_search`, so both were left out of
+        #      `must`, and the full scored list then pushed them off the end.
+        #   2. Double-counting it: present in `selected` AND in `must`, so one
+        #      tool occupies two of the budget's slots.
+        #
+        # So: guaranteed names are never drawn from `selected`, and the scored
+        # slice is taken from what is left after removing them. `own_tools` is
+        # not guaranteed — it is unbounded (one entry per connected server or
+        # forged tool) and forcing all of it would push the budget arbitrarily
+        # over `max_tools`; it is reserved only when it scored.
         for name in list(discovery_tools) + list(core_tools) + sorted(own_tools):
-            if name in enabled and name not in must and name not in selected:
-                must.append(name)
+            if name not in enabled or name in must:
+                continue
+            if name in selected and name not in guaranteed:
+                continue
+            must.append(name)
+        pool = [n for n in selected if n not in must]
         room = max(0, max_tools - len(must))
-        return set(selected[:room] + must)
+        return set(pool[:room] + must)
 
-    def to_prompt_tools(self, only: set[str] | None = None) -> str:
+    def to_prompt_tools(self, only: set[str] | None = None,
+                        catalogue: bool = True) -> str:
         """For providers without native tool support: the catalogue.
 
         Deliberately terse. It travels as its own message immediately before the
@@ -955,18 +1085,76 @@ class SkillRegistry:
         (see `tool_loop._call_prompt_tools`), so every token here is a token the
         model cannot spend on the question.
 
-        `only` narrows the catalogue to those skill names; None means every
-        enabled skill. An empty set is honoured as "no tools" rather than being
-        treated as "no filter" — the difference matters to a caller that has
-        deliberately given an agent a restricted set.
+        `only` narrows the *executable* catalogue to those skill names; None
+        means every enabled skill. An empty set is honoured as "no tools" rather
+        than being treated as "no filter" — the difference matters to a caller
+        that has deliberately given an agent a restricted set.
+
+        `catalogue` prepends a Tier-1 directory listing EVERY enabled skill by
+        name and description, independent of keyword scoring. This is the
+        discoverability fix, and it is the mechanism the Agent Skills standard
+        prescribes: the model reads the whole catalogue and decides what is
+        relevant, rather than a harness guessing from keywords.
+
+        Why it is separate from `only`: `filter_for_query` scores on word
+        overlap, so a skill whose one-line description shares no word with the
+        user's phrasing scores zero and is never offered — which is how all
+        fourteen bundled market skills stayed invisible until the query happened
+        to contain their words. Keyword pre-filtering cannot be made to work
+        here; the descriptions are prose ("Use when implementing any feature or
+        bugfix") and the words that identify the skill are the same generic
+        words that appear in every other one. Listing every skill sidesteps the
+        guess entirely, and a skill added tomorrow is visible the moment it is
+        registered — there is no rule to keep in step with it.
+
+        The executable schemas stay budgeted by `only`: full JSON parameter
+        blocks are what cost tokens, and a name directory is nearly free (all
+        130 names measure ~470 tokens against the local model's 8,192-token
+        window, about what the 16 filtered tools cost now).
         """
         lines = ["\n## Tools", self.PROMPT_CALL_FORMAT,
                  "A trailing '?' marks an optional argument.", ""]
+        # An empty `only` means "this agent was deliberately given nothing", not
+        # "no filter" — the same distinction `to_openai_tools(set())` honours,
+        # and `check_parity` asserts both. Listing the directory anyway would
+        # advertise 130 skills to an agent that was handed none.
+        if catalogue and only != set():
+            # The directory is the COMPLETE list, not `only`. Narrowing it by the
+            # query filter would rebuild the very blindness it exists to remove:
+            # a skill scored zero by keyword matching is exactly the one that
+            # needs to stay visible.
+            directory = self.catalogue_lines()
+            if directory:
+                lines.append("### Available skills")
+                lines.append("Every skill this install has. Call `skill_view` "
+                             "with a name to read its instructions, or "
+                             "`skill_search` to find one by task.")
+                lines.extend(directory)
+                lines.append("")
         for skill in self.enabled_list_all():
             if only is not None and skill.name not in only:
                 continue
             lines.append(skill.to_prompt_desc())
         return "\n".join(lines)
+
+    def catalogue_lines(self, only: set[str] | None = None) -> list[str]:
+        """One ``name — description`` line per enabled skill, for the directory.
+
+        Includes every enabled skill regardless of `filter_for_query`, so no
+        skill can be invisible to the model because a keyword scored it out.
+        `only` is accepted for callers that genuinely need a restricted
+        directory, but the default (None) is the complete list, which is the
+        point.
+        """
+        out = []
+        for skill in self.enabled_list_all():
+            if only is not None and skill.name not in only:
+                continue
+            desc = " ".join((skill.description or "").split())
+            if len(desc) > CATALOGUE_DESC_CHARS:
+                desc = desc[:CATALOGUE_DESC_CHARS].rstrip() + "…"
+            out.append(f"- {skill.name} — {desc}" if desc else f"- {skill.name}")
+        return out
 
     async def execute(self, name: str, params: dict) -> SkillResult:
         """Execute a skill by name. Returns result for the AI provider.
@@ -3983,6 +4171,25 @@ class SkillRegistry:
                     continue
                 result = await fn(query)
                 ok = bool(result.get("success"))
+                # The same relevance gate the scraped engines below already
+                # apply. It was missing here, and here it matters most:
+                # `news+reference` is tried FIRST, so a result set it accepts
+                # short-circuits every later engine and their checks never run.
+                #
+                # Live on 2026-10-11 a search for "Odin 2 Mini price Indonesia"
+                # returned Wikipedia rows for Falcon 9 launches and IKEA, and
+                # nothing else was ever tried - so the browser fallback, which
+                # would have searched for real, was never reached. The gate does
+                # not make a coincidental match (the Norse god "Odin" appearing
+                # in unrelated articles) go away on its own - see
+                # scripts/check_web_search_relevance.py, which records that the
+                # current rule still passes it. What the gate does is stop that
+                # set from being treated as the final answer, so the engines
+                # behind it get their turn.
+                if ok and not _looks_relevant(query, result):
+                    ok = False
+                    result = {"success": False,
+                              "error": "results did not match the query"}
                 _record_engine(name, ok)
                 if ok:
                     return result
@@ -4023,6 +4230,13 @@ class SkillRegistry:
                         candidate = {"success": True, "query": query,
                                      "engine": "browser", "url": nav.get("url"),
                                      "snippet": text[:2000]}
+                        # A browser page is one document, not a result list,
+                        # so quality is judged against its text.
+                        quality, note = _evidence_quality(
+                            query, [{"title": text[:500], "context": text}])
+                        candidate["quality"] = quality
+                        if note:
+                            candidate["note"] = note
                         if _looks_relevant(query, candidate):
                             return candidate
                         problems.append(

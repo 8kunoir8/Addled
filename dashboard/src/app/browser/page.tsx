@@ -3,6 +3,14 @@
 import { useState } from 'react';
 import { useWS } from '@/lib/useWS';
 
+/**
+ * The message from a thrown value. `catch` binds `unknown`, so this is the one
+ * place the shape is narrowed; the three catch sites below share it so they
+ * cannot drift into one reading `.message` and another printing `[object Object]`.
+ */
+const errMessage = (e: unknown): string =>
+  e instanceof Error ? e.message : String(e);
+
 export default function BrowserPage() {
   const { state: wsState, send } = useWS();
   const [url, setUrl] = useState('');
@@ -28,7 +36,7 @@ export default function BrowserPage() {
         : `Failed (${engine}): ${r?.error || 'unknown'}`);
       if (r?.text) addLog(`Result: ${String(r.text).slice(0, 160)}...`);
       else if (r?.result_text) addLog(`Result: ${String(r.result_text).slice(0, 160)}...`);
-    } catch (e: any) { addLog(`Task error: ${e.message}`); }
+    } catch (e) { addLog(`Task error: ${errMessage(e)}`); }
     setTaskRunning(false);
   };
 
@@ -38,8 +46,17 @@ export default function BrowserPage() {
     try {
       const r = await send('browser.navigate', { url: url.trim() });
       if (r?.screenshotUrl) setScreenshot(r.screenshotUrl);
-      addLog('Page loaded'); setSessionActive(true);
-    } catch (e: any) { addLog(`Error: ${e.message}`); }
+      // A degraded result is a plain HTTP fetch standing in for a browser:
+      // there is no screenshot and no page to click. Saying "Page loaded"
+      // here would present it as a real browse, which is exactly the
+      // confusion this flag exists to end.
+      if (r?.degraded) {
+        addLog(`Fetched over HTTP — ${r?.fallback_reason || 'browser unavailable'} (no page to interact with)`);
+        setSessionActive(false);
+      } else {
+        addLog(`Page loaded (${r?.engine || 'browser'})`); setSessionActive(true);
+      }
+    } catch (e) { addLog(`Error: ${errMessage(e)}`); }
     setLoading(false);
   };
 
@@ -50,7 +67,7 @@ export default function BrowserPage() {
       const r = await send(`browser.${action}`, selector ? { selector } : {});
       if (r?.screenshotUrl) setScreenshot(r.screenshotUrl);
       if (r?.text) addLog(`Extracted: ${r.text.slice(0,100)}...`);
-    } catch (e: any) { addLog(`Error: ${e.message}`); }
+    } catch (e) { addLog(`Error: ${errMessage(e)}`); }
     setLoading(false);
   };
 
