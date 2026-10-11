@@ -1,5 +1,36 @@
 # Addled 1.0.40
 
+## The agent acts on the first ask, in any language
+
+**Ask in Indonesian and Addled used to promise, then wait to be pushed.** The
+app has a guard for exactly this: when a reply says the work is happening but
+no tool was called, it nudges the model, and if the model still will not act it
+tells the user the truth instead of passing the promise on. The guard worked.
+It had fired before. It never fired here.
+
+It never fired because its test for *"does this claim an action is under way?"*
+was built from English phrases — "I'll…", "…ing now", "on it". Fed the two
+replies an Indonesian user actually received:
+
+> *"Aku coba tarik data live dulu ya bro… Lanjut cek sekarang."* → not a promise
+> *"aku buka marketplace-nya sekarang… Bentar ya, tak cari dulu"* → not a promise
+
+Every pattern missed. Both promises reached the user, and only a third push —
+*"info itu keluar karena kamu ngejar"*, the model admitted — produced a tool
+call.
+
+The language detector was already there and already correct: it returns `id` for
+those turns. The guard simply never asked it. Present-tense action frames now
+cover Indonesian, Spanish, French, German, Portuguese and Italian, tested ahead
+of the English deny-lists — those are English-tuned and would otherwise clear a
+foreign promise.
+
+Measured on the installed app, same Indonesian request, one message, no pushes:
+**nine tool calls** — two `web_search`, four `browser_navigate`, two
+`browser_extract`, one `browser_task` — where before there were two dead
+promises and zero calls.
+
+
 ## Browser tools work, and say so when they don't
 
 **The browser now actually drives a page.** Addled's browser tools were falling
@@ -117,17 +148,26 @@ you phrased the question.
 
 ## Verification
 
-All check suites pass. The reachability suite now asserts the general property
-rather than today's skill list: a synthetic skill registered at test time — one
-the code has never seen, with a description sharing no word with the query —
-must still appear in the catalogue, and the core and discovery tools must be
-offered on every turn including a bare `"hello"`. Both were confirmed to fail
-when the fix is reverted.
+All 111 check suites pass (one skipped: it needs a workspace). Both fixes in
+this release have a suite that fails loudly against the old code —
+`check_announced_not_called.py` replays the recorded replies from the promise
+incidents (7 failures when reverted) and `check_browser_extract.py` pins the
+honesty rule for an empty page (14 failures when reverted).
 
-Driven against the installed app over its real WebSocket: asked *"I keep
-breaking things when I edit code. Is there a skill for that? Load it."* — with
-no skill named — the model called `skill_search` and `skill_view` and loaded
-`test-driven-development` by itself.
+Driven against the installed app over its real WebSocket:
+
+- Asked in Indonesian for e-ink Android devices on Indonesian marketplaces, one
+  message, no pushes: **nine tool calls**, and Tokopedia search for "boox"
+  returned **1931 characters and 13 prices** — from **0 characters** before the
+  fix.
+- Asked *"I keep breaking things when I edit code. Is there a skill for that?
+  Load it."* — with no skill named — the model called `skill_search` and
+  `skill_view` and loaded `test-driven-development` by itself.
+
+Shopee refuses automated access and now says so, rather than returning an empty
+page that reads like success. That one needs residential proxies to solve and is
+not attempted here.
+
 
 # Addled 1.0.39
 
