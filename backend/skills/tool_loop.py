@@ -11,7 +11,9 @@ import asyncio
 import json
 import logging
 import re
+import time
 
+from backend.actions import trajectory_log as _trajectory_log
 from backend.providers import budget
 from backend.skills.registry import skill_registry, SkillResult
 
@@ -952,6 +954,28 @@ def _activity_for(tool_name: str) -> str:
     return name.replace("_", " ").capitalize()
 
 
+def _token_split(result: dict) -> dict:
+    """The token in/out split a provider reported, or {} when it reported none.
+
+    The split was always available — every provider adapter reads
+    `usage.prompt_tokens` / `usage.completion_tokens` into `tokens_in` and
+    `tokens_out` — and every turn collapsed it to one number on the way out.
+    This carries it, additively, without disturbing that sum.
+
+    An absent key means "not reported", which is not the same as zero and must
+    not be shown as zero. A streamed round genuinely has no real count; it is
+    flagged `tokens_estimated` for the same reason.
+    """
+    out = {}
+    for key in ("tokens_in", "tokens_out"):
+        value = result.get(key)
+        if isinstance(value, (int, float)):
+            out[key] = int(value)
+    if result.get("tokens_estimated"):
+        out["tokens_estimated"] = True
+    return out
+
+
 def _learn_procedure(messages: list[dict], tool_results: list[dict],
                      system_prompt: str = "") -> None:
     """Keep the route a turn actually took, when it worked.
@@ -1008,6 +1032,73 @@ def _queue_review(messages: list[dict], tool_results: list[dict],
         log.debug("Review queueing skipped: %s", e)
 
 
+def _summarize_tool_results(tool_results: list[dict]) -> str:
+    """A readable account of what the round-cap turn actually did.
+
+    Used only when the forced final answer could not be produced. The reply it
+    replaces was "I've completed the requested actions." — a sentence that is
+    not true and tells the user nothing, shown exactly when the task ran longest
+    and cost the most. The tools DID run, and their outcomes are right here, so
+    reporting them is both honest and more useful than a placeholder.
+
+    Deterministic on purpose: this exists because an LLM call failed, so making
+    the fallback depend on another LLM call would fail the same way.
+    """
+    if not tool_results:
+        return ("I ran the tools but could not put together an answer, and no "
+                "tool results were recorded. Please try again, or ask me to "
+                "run one step at a time.")
+
+    succeeded = sum(1 for r in tool_results if r.get("success"))
+    failed = len(tool_results) - succeeded
+    lines = [
+        f"I ran {len(tool_results)} tool call(s) ({succeeded} succeeded, "
+        f"{failed} failed) but could not produce a final summary. "
+        "Here is what each one returned:",
+        "",
+    ]
+    for r in tool_results:
+        name = r.get("tool") or "unknown"
+        if r.get("success"):
+            detail = _brief_tool_output(r.get("result"))
+            lines.append(f"- **{name}**: succeeded" + (f" — {detail}" if detail else ""))
+        else:
+            err = str(r.get("error") or "").strip()
+            lines.append(f"- **{name}**: failed" + (f" — {err[:300]}" if err else ""))
+    return "\n".join(lines)
+
+
+def _brief_tool_output(result: object) -> str:
+    """One short line from a tool's payload, for the fallback summary.
+
+    Tools return different shapes (a dict with `stdout`, one with `text`, a
+    plain list of rows), so this reads the common ones and falls back to a
+    trimmed repr rather than pretending to understand every tool.
+    """
+    if result is None:
+        return ""
+    if isinstance(result, dict):
+        for key in ("stdout", "text", "output", "message", "content", "result"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return _one_line(value)
+        if not result:
+            return ""
+        return _one_line(repr(result))
+    if isinstance(result, (list, tuple)):
+        if not result:
+            return ""
+        return _one_line(f"{len(result)} item(s)")
+    return _one_line(str(result))
+
+
+def _one_line(text: str, limit: int = 200) -> str:
+    """Collapse to a single trimmed line, so the summary stays scannable."""
+    flat = " ".join(str(text).split())
+    return flat[:limit] + ("…" if len(flat) > limit else "")
+
+
+
 async def chat_with_tools(
     provider,
     messages: list[dict],
@@ -1019,6 +1110,9 @@ async def chat_with_tools(
     learn: bool = True,
     on_delta=None,
     on_activity=None,
+    *,
+    turn_id: str | None = None,
+    conversation_id: str | None = None,
 ) -> dict:
     """
     Run a chat completion with automatic tool execution.
@@ -1084,6 +1178,7 @@ async def chat_with_tools(
     # being silently lost. Providers that keep it are untouched.
     from backend.providers import system_role
     full_messages = system_role.prepare(provider, full_messages)
+
 
     async def _final_answer(tool_results):
         """One more LLM call forced to plain text, using gathered results.
@@ -1353,6 +1448,13 @@ async def chat_with_tools(
             return {
                 "response": result.get("response", ""),
                 "tokens": result.get("tokens", 0),
+                # Where the tokens went, when the provider said. Carried out
+                # alongside the sum rather than replacing it: `tokens` is what
+                # callers already read, and this turn's accounting was
+                # previously collapsed to one number and the split discarded.
+                # Absent keys mean "not reported", which the caller must show
+                # as unknown rather than as zero.
+                **_token_split(result),
                 "tool_rounds": rounds,
                 "tool_results": (all_tool_results
                                  or result.get("tool_results", [])),
@@ -1361,6 +1463,11 @@ async def chat_with_tools(
         # Execute tool calls (with auto-forge for missing skills)
         tool_results = []
         executed: list[tuple[dict, dict]] = []
+        # The step counter is `all_tool_results`, which spans the WHOLE turn.
+        # `tool_results` is per-round — reset here and drained into the message
+        # each round — so anything derived from its length is 0 for the first
+        # call of every round. Two calls in different rounds both got `seq=0`
+        # and the order of the turn was lost. Observed live.
         for tc in result["tool_calls"]:
             # Say what is running, before it runs. A tool round is the long
             # silence in a turn - a web search or a model load is seconds - and
@@ -1375,8 +1482,49 @@ async def chat_with_tools(
                     on_activity(_activity_for(tc["name"]))
                 except Exception:
                     log.debug("activity notice failed", exc_info=True)
+            # Timed here, around the call and nothing else, so the number means
+            # "how long this tool took" rather than "how long this round took".
+            # `monotonic` rather than `time.time`: a duration must not jump if
+            # the system clock is adjusted mid-turn, which is the same reason
+            # the console times its commands this way.
+            #
+            # Recorded for EVERY call, including the ones that fail, time out,
+            # or are denied. That is deliberate and it is the point: a tool that
+            # took 20 seconds and then failed is exactly the thing a work record
+            # exists to show, and it is the case a success-only log loses.
+            # The trajectory row is built BEFORE the call, not after, so a step
+            # that hangs, crashes or kills the process still leaves evidence it
+            # started. A record written only on completion is missing exactly
+            # the steps worth looking at.
+            _step = None
+            if turn_id:
+                # RECORDED, not just built. `finish` later looks the step up by
+                # id, so a step that is constructed and never stored is a step
+                # that silently completes into nothing - which is exactly what
+                # this did before the store was exercised end to end.
+                _step = _trajectory_log.record(_trajectory_log.make_step(
+                    turn_id=turn_id, tool=tc["name"],
+                    seq=len(all_tool_results),
+                    arguments=tc.get("params", {}),
+                    conversation=conversation_id))
+            _tool_started = time.monotonic()
             exec_result = await execute_skill(
                 tc["name"], tc.get("params", {}), provider)
+            _tool_ended = time.monotonic()
+            # ONE measurement, shared. Two independent subtractions of the same
+            # pair would be two chances to disagree, and a step whose trace said
+            # 41ms while its record said 40ms would make both numbers suspect.
+            _elapsed_ms = int((_tool_ended - _tool_started) * 1000)
+            if _step is not None:
+                # The result is capped and redacted INSIDE the store: a tool can
+                # return a whole file, and this payload is rendered in a browser.
+                _trajectory_log.finish(
+                    _step["id"],
+                    success=bool(exec_result.get("success")),
+                    result=exec_result.get("data", {}),
+                    error=exec_result.get("error"),
+                    duration_ms=_elapsed_ms,
+                )
             log.info("Tool call: %s(%s) -> success=%s error=%s",
                      tc["name"], json.dumps(tc.get("params", {}))[:200],
                      exec_result["success"], str(exec_result.get("error"))[:200])
@@ -1388,6 +1536,9 @@ async def chat_with_tools(
                 "forged": exec_result.get("forged", False),
                 "requires_approval": bool(
                     (exec_result.get("data") or {}).get("requires_approval")),
+                # The same `_elapsed_ms` the trajectory step recorded, so the
+                # two surfaces can never disagree about one call.
+                "duration_ms": _elapsed_ms,
             })
             executed.append((tc, exec_result))
 
@@ -1581,8 +1732,13 @@ async def chat_with_tools(
                           final.get("response", ""))
         return final
 
+    # The forced summary could not be produced. Report what actually happened
+    # rather than a placeholder: the tools ran, the user paid for them, and
+    # "I've completed the requested actions." was neither true nor useful.
+    log.warning("Final summarization produced nothing after %d round(s); "
+                "falling back to a tool-result summary", rounds)
     return {
-        "response": "I've completed the requested actions.",
+        "response": _summarize_tool_results(tool_results if tool_results else []),
         "tokens": 0,
         "tool_rounds": rounds,
         "tool_results": tool_results if tool_results else [],
@@ -1686,6 +1842,7 @@ async def _streamed_answer(provider, messages: list[dict],
     # that a call happened, which is the whole thing this flag exists to carry.
     if saw_tool_call:
         return {"response": text, "tokens": len(text) // 4,
+                "tokens_estimated": True,
                 "stream_tool_call": True}
     if not text:
         return {"response": "", "tokens": 0, "stream_failed": True}
@@ -1698,7 +1855,10 @@ async def _streamed_answer(provider, messages: list[dict],
     text = _strip_control_tags(text)
     # Rough: providers report real counts only on the batch path, and a stream
     # gives none. ~4 chars/token is the same estimate the compaction code uses.
-    return {"response": text, "tokens": len(text) // 4}
+    # Flagged as an estimate rather than presented as a count: a number this
+    # code invented must not be shown as though the provider reported it.
+    return {"response": text, "tokens": len(text) // 4,
+            "tokens_estimated": True}
 
 
 async def _stream_round(provider, messages: list[dict], model, only,
@@ -1841,10 +2001,13 @@ async def _call_native_tools(provider, messages: list[dict],
                 except json.JSONDecodeError:
                     params = {}
                 tool_calls.append({"name": name, "params": params, "id": tc.get("id")})
+        # The split, carried alongside the sum (see `_call_prompt_tools`).
+        split = {"tokens_in": result.tokens_in, "tokens_out": result.tokens_out}
         if tool_calls:
             return {
                 "response": response_text,
                 "tokens": tokens,
+                **split,
                 "tool_calls": tool_calls,
                 "raw_tool_calls": result.tool_calls,
                 "reasoning_content": getattr(result, "reasoning_content", ""),
@@ -1856,10 +2019,11 @@ async def _call_native_tools(provider, messages: list[dict],
             return {
                 "response": response_text,
                 "tokens": tokens,
+                **split,
                 "tool_calls": text_calls,
             }
 
-        return {"response": response_text, "tokens": tokens}
+        return {"response": response_text, "tokens": tokens, **split}
 
     except Exception as e:
         log.warning("Native tool call failed: %s", e)
@@ -2016,6 +2180,12 @@ async def _call_prompt_tools(provider, messages: list[dict],
             # never hand back the tag this just stripped.
             "response": visible_response or _strip_control_tags(response_text),
             "tokens": tokens,
+            # The split, carried alongside the sum rather than replacing it.
+            # `tokens` has readers that want one number; these are for the
+            # callers that need to say where the tokens went. Absent is the
+            # honest answer when the provider did not report usage.
+            "tokens_in": result.tokens_in,
+            "tokens_out": result.tokens_out,
             "tool_calls": tool_calls,
             "malformed": parsed["malformed"],
         }

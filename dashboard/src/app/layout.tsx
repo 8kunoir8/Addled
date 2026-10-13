@@ -17,6 +17,7 @@ import ApprovalCard from '@/components/ApprovalCard';
 import QuestionCard from '@/components/QuestionCard';
 import CommandConsole from '@/components/CommandConsole';
 import { upsertCommand, type CommandEntry } from '@/lib/consoleStore';
+import { upsertStep, type TrajectoryStep } from '@/lib/trajectoryStore';
 import "./globals.css";
 
 const NAV_ITEMS = [
@@ -29,6 +30,7 @@ const NAV_ITEMS = [
   { href: '/goals', label: 'Goals', icon: '🎯' },
   { href: '/code', label: 'Code', icon: '💻' },
   { href: '/console', label: 'Console', icon: '▶' },
+  { href: '/trajectory', label: 'Trajectory', icon: '🧭' },
   { href: '/swarm', label: 'Swarm', icon: '🐝' },
   { href: '/browser', label: 'Browser', icon: '🌐' },
   { href: '/calendar', label: 'Calendar', icon: '📅' },
@@ -114,6 +116,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   useEffect(() => onNotification('chat.command', (p: any) => {
     if (!p?.id) return;
     upsertCommand(p as CommandEntry);
+  }), [onNotification]);
+
+  // Every tool call the agent makes, as it runs.
+  //
+  // Owned by the layout for the same reason as the console: `onNotification`
+  // keeps exactly ONE handler per method, so a page-level subscriber would be
+  // replaced the moment another page mounted, and the steps of a turn that ran
+  // in that gap would be lost from the trajectory.
+  useEffect(() => onNotification('chat.trajectory', (p: any) => {
+    if (!p?.id) return;
+    upsertStep(p as TrajectoryStep);
   }), [onNotification]);
 
   useEffect(() => subscribeApprovals(setApprovals), []);

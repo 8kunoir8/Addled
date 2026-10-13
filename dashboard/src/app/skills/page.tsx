@@ -53,6 +53,16 @@ export default function SkillsPage() {
   const [marketQuery, setMarketQuery] = useState('');
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [searching, setSearching] = useState(false);
+  /** An upload in flight — the file read plus the round trip. */
+  const [uploading, setUploading] = useState(false);
+  /**
+   * A skill name already installed, waiting for the user to confirm that
+   * replacing it is what they meant. The backend refuses to overwrite by
+   * default, deliberately: the user may not know a skill of that name is
+   * already there, and would otherwise lose it silently. So the refusal is
+   * turned into a question here rather than an error.
+   */
+  const [clash, setClash] = useState<{ name: string; file: File } | null>(null);
 
   const load = useCallback(async () => {
     if (wsState !== 'connected') return;
@@ -130,6 +140,69 @@ export default function SkillsPage() {
     load();
   };
 
+  /**
+   * Upload a skill as a .zip.
+   *
+   * The archive is read to base64 and sent over the same socket as every
+   * other call — the webview cannot hand the backend a filesystem path, and
+   * this mirrors `character.uploadSkin` in settings rather than inventing a
+   * second way to move a file.
+   *
+   * `overwrite` is only ever true on the second, confirmed attempt. The
+   * backend refuses to replace an existing skill by default, so the first
+   * call doubles as the "is this name taken?" check: a refusal whose message
+   * says so becomes a confirm prompt instead of an error.
+   */
+  const uploadZip = async (file: File, overwrite = false) => {
+    if (!file) return;
+    if (!/\.zip$/i.test(file.name)) {
+      setMsg({ ok: false, text: 'A skill is uploaded as a .zip file' });
+      return;
+    }
+    setUploading(true);
+    setMsg(null);
+    try {
+      const dataUrl: string = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result as string);
+        fr.onerror = () => rej(new Error('Could not read the file'));
+        fr.readAsDataURL(file);
+      });
+      const b64 = dataUrl.split(',')[1] || '';
+      const r = await send('skills.installUpload',
+                           { filename: file.name, data: b64, overwrite });
+      if (r?.success) {
+        const scripts: string[] = r.scripts || [];
+        setMsg({
+          ok: true,
+          text: `Installed "${r.skill}"` + (scripts.length
+            ? ` — ${scripts.length} script${scripts.length > 1 ? 's' : ''}, needs approval before it runs`
+            : ''),
+        });
+        setClash(null);
+        load();
+      } else if (!overwrite && /already installed/i.test(r?.error || '')) {
+        // Not an error the user has to parse — a question. The name is in
+        // the message; pull it out rather than re-deriving it client-side,
+        // so the two cannot disagree.
+        const name = (r.error.match(/named '([^']+)'/) || [])[1] || r.skill || '';
+        setClash({ name, file });
+      } else {
+        setMsg({ ok: false, text: r?.error || 'Upload failed' });
+      }
+    } catch (e: unknown) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : 'Upload failed' });
+    }
+    setUploading(false);
+  };
+
+  const confirmOverwrite = async () => {
+    const pending = clash;
+    if (!pending) return;
+    setClash(null);
+    await uploadZip(pending.file, true);
+  };
+
   const searchMarket = async () => {
     const q = marketQuery.trim();
     if (!q) return;
@@ -188,6 +261,53 @@ export default function SkillsPage() {
                 className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium">
                 Install
               </button>
+            </div>
+            {/* Upload a .zip. Kept in the same card as the URL/repo install
+                because it is the same job by a different route, not a
+                separate feature — a divider makes that visible without a
+                second heading competing for attention. */}
+            <div className="mt-3 pt-3 border-t border-[#21262d]">
+              <div className="flex items-center gap-2">
+                <label className={`cursor-pointer bg-[#21262d] hover:bg-[#30363d] text-[#e8eaed] rounded-lg px-3 py-2 text-xs font-medium ${uploading ? 'opacity-50 cursor-wait' : ''}`}>
+                  {uploading ? 'Reading…' : '📦 Upload a .zip'}
+                  <input
+                    type="file"
+                    accept=".zip,application/zip"
+                    disabled={uploading}
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      // Reset first, so choosing the SAME file again still
+                      // fires onChange — otherwise a retry after a failure
+                      // looks like nothing happened.
+                      e.target.value = '';
+                      if (f) uploadZip(f);
+                    }}
+                  />
+                </label>
+                <span className="text-[10px] text-[#8b949e]">
+                  a skill folder zipped up — SKILL.md, plus any scripts or references
+                </span>
+              </div>
+
+              {clash && (
+                <div className="mt-3 rounded-md border border-[#9e6a03] bg-[#2d2305] px-3 py-2">
+                  <p className="text-xs text-[#d29922]">
+                    A skill named <span className="font-mono">{clash.name}</span> is already installed.
+                    {' '}Its files will be replaced.
+                  </p>
+                  <div className="flex gap-2 mt-2">
+                    <button onClick={confirmOverwrite}
+                      className="text-xs px-3 py-1 rounded bg-[#9e6a03] hover:bg-[#bb8009] text-white font-medium">
+                      Replace it
+                    </button>
+                    <button onClick={() => setClash(null)}
+                      className="text-xs px-3 py-1 rounded bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9]">
+                      Keep the existing one
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

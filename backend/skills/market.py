@@ -42,6 +42,82 @@ MAX_SKILL_MD = 1024 * 1024
 MAX_SCRIPT = 1024 * 1024
 MAX_FILES = 20
 
+# ---- uploaded skill zips ---------------------------------------------------
+#
+# Caps, all three, because each bounds a different attack. The archive cap
+# stops a huge upload; the extracted-total stops a zip bomb (small on disk,
+# enormous when written); the entry count stops a zip of a million empty
+# files. `info.file_size` is attacker-controlled, so the extracted total is
+# counted while writing rather than read from the header.
+MAX_ZIP_BYTES = 25 * 1024 * 1024
+MAX_ZIP_TOTAL = 20 * 1024 * 1024
+MAX_ZIP_FILES = 200
+
+# Names Windows treats as devices rather than files. Creating one is not
+# merely useless - `CON` and friends can hang or misbehave, and on some
+# systems a write to the name escapes the directory. Matched case-folded,
+# with or without an extension (`CON`, `con.txt`, `LPT1.log`).
+_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
+
+class UnsafeZipMember(ValueError):
+    """A zip entry that must not be written to disk."""
+
+
+def _safe_zip_member(name: str) -> str:
+    """Return the relative path an entry may be written to, or raise.
+
+    Every check here was written against a real escape, not a guessed one:
+
+      - `../x` and `../../x` are the classic zip-slip. `extractall()` does
+        NOT stop these - measured, it wrote `x` outside the destination.
+      - `/abs/x` and `C:/x` are absolute. A leading separator or a drive
+        letter means the entry names a place, not a file inside the skill.
+      - `C:x.txt` is DRIVE-RELATIVE on Windows: not absolute, and it resolves
+        against the per-drive working directory. A plain join puts it inside
+        the destination, so it passes an innocent-looking "is it contained"
+        test while still being an attacker-chosen location. Rejected on the
+        `:` alone.
+      - `name:stream` is a Windows alternate data stream - a hidden file
+        attached to another one. Also rejected on the `:`.
+      - Symlinks. A zip can carry an entry whose mode is a symlink, and a
+        later entry written "through" it lands at the link's target. Found in
+        testing: an entry with mode `S_IFLNK` read back `/etc/hosts`.
+      - Reserved device names, which are not files at all.
+
+    Backslashes are normalised first, because a zip written on Windows uses
+    them and `Path` on POSIX would treat the whole string as one filename.
+    """
+    if not name or not name.strip():
+        raise UnsafeZipMember("empty entry name")
+    raw = name.replace("\\", "/").strip()
+    if raw.endswith("/"):
+        raise UnsafeZipMember(f"directory entry: {name!r}")
+    # A drive letter or a stream separator. Both are `:`, and no legitimate
+    # file inside a skill has one on Windows.
+    if ":" in raw:
+        raise UnsafeZipMember(f"drive-relative or stream name: {name!r}")
+    if raw.startswith("/"):
+        raise UnsafeZipMember(f"absolute path: {name!r}")
+    parts = [p for p in raw.split("/") if p not in ("", ".")]
+    if not parts:
+        raise UnsafeZipMember(f"no filename in {name!r}")
+    if any(p == ".." for p in parts):
+        raise UnsafeZipMember(f"'..' in path: {name!r}")
+    leaf = parts[-1]
+    stem = leaf.split(".", 1)[0].lower()
+    if stem in _RESERVED_NAMES:
+        raise UnsafeZipMember(f"reserved device name: {name!r}")
+    if leaf.startswith(".") and leaf.lower() not in (".gitignore",):
+        # Dotfiles are how archives smuggle config (`.ssh`, `.env`). The one
+        # exception is `.gitignore`, which real skill folders sometimes carry.
+        raise UnsafeZipMember(f"hidden file: {name!r}")
+    return "/".join(parts)
+
 def installed_dir(name: str) -> Path | None:
     """Where an installed skill lives, or None if it is not one.
 
@@ -161,11 +237,21 @@ def _pick_script(scripts: list[str], skill_name: str) -> str:
     """Pick preferred entrypoint script over naive alphabetical order."""
     if not scripts:
         return ""
-    lowered = {s.lower(): s for s in scripts}
+    # Match on the BASENAME as well as the whole path: scripts are now found
+    # at any depth, so the entry point may arrive as `scripts/main.py` rather
+    # than `main.py`, and comparing the full relative path against a bare
+    # candidate would never match - silently falling back to alphabetical
+    # order and picking the wrong file to run.
+    by_base: dict[str, str] = {}
+    for s in scripts:
+        by_base.setdefault(s.rsplit("/", 1)[-1].lower(), s)
     for candidate in (f"{skill_name.lower()}.py", "main.py", "run.py", "cli.py", "tool.py"):
-        if candidate in lowered:
-            return lowered[candidate]
-    return scripts[0]
+        if candidate in by_base:
+            return by_base[candidate]
+    # Prefer a shallower file when nothing matched by name: the closer to the
+    # skill root, the more likely it is the documented entry point.
+    return min(scripts, key=lambda s: (s.count("/"), s))
+
 
 
 def _safe_name(name: str) -> str:
@@ -245,10 +331,18 @@ def _script_handler(skill_name: str, script_rel: str, base_dir: Path):
             return {"success": False,
                     "error": "Script skills require opt-in (Settings → Tools)."}
         from backend.actions.terminal import TerminalExecutor
-        script_path = base_dir / script_rel
+
+        # Scripts are found at any depth now, so `script_rel` can carry a
+        # directory (`scripts/run.py`). It is produced by our own rglob rather
+        # than by input, so this is belt-and-braces: it costs one resolve and
+        # makes "the script always runs from inside the skill" a property of
+        # this function rather than a fact about its one caller.
+        script_path = (base_dir / script_rel).resolve(strict=False)
+        root = base_dir.resolve(strict=False)
+        if root not in script_path.parents:
+            return {"success": False, "error": f"Script outside the skill: {script_rel}"}
         if not script_path.is_file():
             return {"success": False, "error": f"Script missing: {script_rel}"}
-        args = params.get("args") or []
         if isinstance(args, str):
             args = [args]
         # Passed as an ARGV, not folded into a command string. The previous
@@ -286,8 +380,24 @@ class SkillMarket:
             raise ValueError(f"SKILL.md too large (maximum size is {MAX_SKILL_MD // (1024 * 1024)}MB)")
         meta = parse_skill_md(text, fallback_name=d.name)
         name = _safe_name(meta["name"])
-        scripts = sorted(p.name for p in d.iterdir()
-                         if p.is_file() and p.suffix.lower() == ".py")
+        # Every `.py` in the skill, at any depth - not just the folder root.
+        #
+        # This used to be `d.iterdir()`, which is non-recursive, so a skill
+        # following the conventional layout (the script in `scripts/`) was
+        # invisible here. Since `requires_approval` is decided by `if scripts:`
+        # below, that made an executable skill register as instruction-only:
+        # the approval gate did not see executable skills that were laid out
+        # the normal way. Confirmed against a real skill zip, where
+        # `scripts/merge_scenes.py` (mode 0755) was missed entirely.
+        #
+        # `.as_posix()` so a nested script is addressed as `scripts/x.py`
+        # regardless of platform - `_script_handler` joins it onto the skill
+        # folder, and a backslash would be a literal filename character there.
+        scripts = sorted(
+            p.relative_to(d).as_posix()
+            for p in d.rglob("*.py")
+            if p.is_file() and "__pycache__" not in p.parts
+        )
         meta["name"] = name
         meta["scripts"] = scripts
         meta["dir"] = d
@@ -314,6 +424,11 @@ class SkillMarket:
             # that breaks), but `skill_view` can read it directly - which is the
             # only way the model can be guided BY a skill it has not yet chosen.
             body=meta.get("instructions", "") or "",
+            # The skill's own directory, absolute and resolved once, so a
+            # skill that ships templates can be asked for them by name instead
+            # of the model globbing the process working directory and getting
+            # whichever copy of the skill happens to be nearest.
+            folder=str(d.resolve()),
         )
         skill_registry.register(skill)
         self._skills[name] = meta
@@ -481,6 +596,151 @@ class SkillMarket:
             except Exception as e:
                 log.debug("skip %s: %s", f.get("name"), e)
         return self._register_dir(d)
+
+    def install_from_zip(self, filename: str, data: bytes,
+                         overwrite: bool = False) -> dict:
+        """Install a skill from an uploaded `.zip`.
+
+        `data` is the raw archive, already decoded by the caller - the same
+        contract as `sprite_skin.save_uploaded_zip`, so the WS handler can
+        stay a thin base64-decode.
+
+        Extraction is manual, never `extractall`. Measured on this machine,
+        `extractall` wrote entries containing `../` and `/abs/` OUTSIDE the
+        destination directory, so it is not a safe primitive for anything
+        attacker-supplied.
+
+        `overwrite` defaults False on purpose. `install_from_text` and
+        `install_from_github` both delete an existing skill of the same name
+        first; for an upload that is the wrong default, because the user may
+        not know a skill of that name is already installed and would lose it
+        without being told.
+        """
+        import io
+        import stat
+        import zipfile
+
+        if not data:
+            raise ValueError("No file data provided")
+        if len(data) > MAX_ZIP_BYTES:
+            raise ValueError(
+                f"ZIP too large ({len(data)} bytes, max {MAX_ZIP_BYTES})")
+        if data[:2] != b"PK":
+            raise ValueError("Not a ZIP file")
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            raise ValueError("Invalid ZIP file")
+
+        try:
+            infos = zf.infolist()
+            if len(infos) > MAX_ZIP_FILES:
+                raise ValueError(
+                    f"ZIP has {len(infos)} entries (max {MAX_ZIP_FILES})")
+
+            # Decide the paths first, so a refusal happens before anything is
+            # written and a half-extracted skill never reaches the registry.
+            planned: list[tuple[zipfile.ZipInfo, str]] = []
+            seen: set[str] = set()
+            for info in infos:
+                if info.is_dir():
+                    continue
+                mode = (info.external_attr >> 16) & 0xFFFF
+                if stat.S_ISLNK(mode):
+                    raise ValueError(
+                        f"ZIP contains a symlink ({info.filename!r}); "
+                        "a link can point outside the skill folder")
+                rel = _safe_zip_member(info.filename)
+                # Case-folded, because Windows is case-insensitive: `A.py` and
+                # `a.py` in one archive would silently become one file.
+                key = rel.lower()
+                if key in seen:
+                    raise ValueError(
+                        f"ZIP has two entries that collide on this filesystem: "
+                        f"{rel!r}")
+                seen.add(key)
+                planned.append((info, rel))
+
+            if not planned:
+                raise ValueError("ZIP contains no files")
+
+            # A single wrapping folder is the normal shape (`name/SKILL.md`,
+            # `name/scripts/...`) and it MUST be stripped: registering the
+            # extract root finds nothing, because the SKILL.md is one level
+            # down. Only strip when every entry shares that one folder, so a
+            # zip with files at the root is left alone.
+            tops = {rel.split("/", 1)[0] for _, rel in planned}
+            strip = ""
+            if len(tops) == 1:
+                only = next(iter(tops))
+                if all("/" in rel for _, rel in planned):
+                    strip = only
+
+            def final(rel: str) -> str:
+                if not strip:
+                    return rel
+                return rel.split("/", 1)[1]
+
+            staged = [final(rel) for _, rel in planned]
+            md_rel = next(
+                (r for r in staged if r.lower() in
+                 ("skill.md", "readme.md")),
+                None,
+            ) or next((r for r in staged if r.lower().endswith(".md")), None)
+            if not md_rel:
+                raise ValueError(
+                    "no skill documentation found in the ZIP "
+                    "(need SKILL.md, README.md, or a .md file)")
+
+            info_by_rel = {final(rel): info for info, rel in planned}
+            md_info = info_by_rel[md_rel]
+            if md_info.file_size > MAX_SKILL_MD:
+                raise ValueError("SKILL.md in the ZIP is too large")
+            md_text = zf.read(md_info).decode("utf-8", errors="replace")
+            meta = parse_skill_md(md_text, fallback_name=Path(filename).stem)
+            name = _safe_name(meta["name"])
+
+            d = MARKET_DIR / name
+            if d.exists() and not overwrite:
+                raise ValueError(
+                    f"A skill named {name!r} is already installed. "
+                    "Turn on overwrite to replace it.")
+
+            # Write to a staging folder, then swap. A failure part-way
+            # through leaves the existing skill intact rather than half
+            # replaced.
+            staging = MARKET_DIR / f".staging-{name}"
+            if staging.exists():
+                shutil.rmtree(staging)
+            staging.mkdir(parents=True)
+            total = 0
+            try:
+                for info, rel in planned:
+                    out_rel = final(rel)
+                    total += info.file_size
+                    if total > MAX_ZIP_TOTAL:
+                        raise ValueError(
+                            "ZIP contents too large when extracted "
+                            f"(max {MAX_ZIP_TOTAL})")
+                    target = (staging / out_rel).resolve(strict=False)
+                    root_resolved = staging.resolve(strict=False)
+                    if root_resolved not in target.parents:
+                        raise ValueError(
+                            f"refusing to write outside the skill: {out_rel!r}")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(zf.read(info))
+
+                if d.exists():
+                    shutil.rmtree(d)
+                staging.rename(d)
+            except Exception:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+        finally:
+            zf.close()
+
+        return self._register_dir(d)
+
 
     # ---- deletion ----------------------------------------------------------
 

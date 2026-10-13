@@ -18,6 +18,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 log = logging.getLogger("addled.skills")
@@ -40,6 +41,17 @@ PROMPT_DESC_CHARS = 110
 # leaving room for the reply budget and the schema list that share the window.
 # The full description is one `skill_search` away, so clipping loses nothing.
 CATALOGUE_DESC_CHARS = 40
+
+# Filenames that ARE the skill's instructions rather than an attachment.
+#
+# `list_files` skips these so the model is not offered the same document under
+# two names - `skill_view` already returns the body, and a second route to it
+# would be a way to read it twice and a reason to wonder which is current.
+# Matches the candidate list `market._find_candidate_file_in_dir` accepts, so a
+# folder registered as a skill never lists its own entry point as an extra.
+_SKILL_MD_NAMES = frozenset(
+    {"skill.md", "readme.md", "claude.md", "agents.md"}
+)
 
 # Search engine health. Scraped engines rot and networks block them: on the
 # machine this was reported from, every DuckDuckGo endpoint timed out, so each
@@ -103,6 +115,25 @@ class SkillDefinition:
     # the same progressive disclosure the prompt catalogue has always used for
     # the skills themselves.
     body: str = ""
+
+    # Where this skill's own files live, when it has any.
+    #
+    # A skill that ships more than its prose - templates, reference notes, a
+    # helper script - says "read `visual-companion.md` in this directory" and
+    # the model has no way to find that directory. Six of the fifteen installed
+    # market skills do this, 137 KB of files that are shipped, stored, named in
+    # the body, and unreachable.
+    #
+    # Leaving `path` resolution to the model was not merely unreliable, it was
+    # wrong: `search_files` globs the process working directory, which for the
+    # running app is whatever folder it was launched from. A search for
+    # `visual-companion.md` returned a *different project's* copy of the same
+    # skill - right filename, different contents, no signal that it happened.
+    #
+    # An absolute path resolved once at registration is the same discipline
+    # `forge.py` already uses for forged skills, and it is what makes files
+    # addressable without the model having to guess a location.
+    folder: str = ""
 
     def normalise(self, params: dict | None) -> dict:
         """Fill real parameter names from their aliases, and report problems.
@@ -173,6 +204,74 @@ class SkillDefinition:
             return given, trouble
         return given, ""
 
+    def list_files(self, limit: int = 200) -> list[str]:
+        """This skill's own files, relative to its folder, in a stable order.
+
+        The skill's own markdown is excluded: `skill_view` already returns it,
+        and listing it here would invite the model to read the same document
+        twice through two names.
+
+        Returns empty for a skill with no folder - a built-in tool, or a
+        market skill registered before this field existed. Empty is the honest
+        answer: there is nothing to list, and inventing a path would be worse
+        than saying so.
+        """
+        if not self.folder:
+            return []
+        try:
+            root = Path(self.folder).resolve(strict=False)
+            if not root.is_dir():
+                return []
+            out: list[str] = []
+            for path in sorted(root.rglob("*")):
+                if not path.is_file():
+                    continue
+                if path.name.lower() in _SKILL_MD_NAMES:
+                    continue
+                if "__pycache__" in path.parts:
+                    continue
+                out.append(path.relative_to(root).as_posix())
+                if len(out) >= limit:
+                    break
+            return out
+        except OSError:
+            return []
+
+    def resolve_file(self, rel_path: str) -> Path | None:
+        """Resolve a named file inside this skill's folder, or None.
+
+        Returns None rather than raising, because every caller is answering a
+        model that asked for a path and needs a reason, not a traceback.
+
+        Containment is enforced by collapsing both sides before comparing, so
+        `..` and a symlink out of the tree are both already resolved away. The
+        same check exists as `codemode.resolve_in_workspace` for the editor
+        handlers; it is repeated rather than imported because that module is
+        about a user-bound workspace and this is about a skill's own folder,
+        and coupling the two would mean a change to one silently relocating
+        the other.
+        """
+        if not self.folder:
+            return None
+        wanted = str(rel_path or "").strip()
+        if not wanted:
+            return None
+        try:
+            root = Path(self.folder).resolve(strict=False)
+            if not root.is_dir():
+                return None
+            candidate = Path(wanted)
+            if candidate.is_absolute() or (os.name == "nt" and ":" in wanted):
+                return None
+            resolved = (root / candidate).resolve(strict=False)
+            if resolved == root or root not in resolved.parents:
+                return None
+            if not resolved.is_file():
+                return None
+            return resolved
+        except OSError:
+            return None
+
     def to_openai_tool(self) -> dict:
         """OpenAI/DeepSeek function-calling format."""
         return {
@@ -217,6 +316,15 @@ class SkillDefinition:
 # that belongs in a file, not a tool result. The cap is a backstop against a
 # single call eating the whole window, not a target.
 _SKILL_BODY_CHARS = 24000
+
+# How much of a skill's bundled file `skill_read` will return in one go.
+#
+# Larger than the body cap because a reference document is read deliberately,
+# after the model has chosen to open it, and a template that arrives truncated
+# is worse than useless - the model would follow half of it. The installed
+# skills' largest attachment is 46 KB (`writing-skills`), so this admits every
+# one of them whole while still refusing a file that is plainly not a document.
+_SKILL_FILE_CHARS = 48000
 
 @dataclass
 
@@ -773,27 +881,32 @@ class SkillRegistry:
             return len(self.enabled_list_all())
         return sum(1 for s in self.enabled_list_all() if s.name in only)
 
-    def filter_for_query(self, query: str, max_tools: int = 18) -> set[str]:
+    def filter_for_query(self, query: str, max_tools: int = 19) -> set[str]:
         """Select a concise subset of relevant skills for prompt-based tool calling.
 
         Instead of injecting 50+ tool schemas (~4,700 tokens) into the context
         of local models, selects core utilities plus skills relevant to the
         user's query.
 
-        ``max_tools`` is 18, raised from 16 when `skill_search` and `skill_view`
-        were made always-offered. The budget has to move with `must`, not stay
-        put and let it eat the scored slots: reserving two more guaranteed tools
-        at a fixed 16 took two away from the scored list, and `check_reachability`
+        ``max_tools`` is 19, raised from 18 when `skill_read` joined the
+        always-offered set. The budget has to move with `must`, not stay put
+        and let it eat the scored slots: reserving one more guaranteed tool at
+        a fixed 18 took one away from the scored list, and `check_reachability`
         caught `memory_link` and `self_propose` falling out of reach — the same
-        failure this docstring records from the 10 -> 16 raise, for the same
-        reason. The budget covers `must` (4 core + 5 discovery = 9) plus room
-        for scored skills; below that, a raise is just theft from real tools.
+        failure this docstring records from the 10 -> 16 and 16 -> 18 raises,
+        for the same reason. The budget covers `must` (4 core + 6 discovery =
+        10) plus room for scored skills; below that, a raise is just theft from
+        real tools.
 
-        The first raise cost ~317 tokens (459 -> 776) for 7 skills. This one
-        was measured with the Tier-1 catalogue in place: ~2,482 tokens of
-        prompt-tools payload at 18 versus ~2,410 at 16, so the two extra slots
-        are ~72 tokens against an 8,192-token window — under 1%, and the reply
-        budget is untouched.
+        `skill_read` joins `skill_search`/`skill_view` for their reason: the
+        other two now TELL the model to open a skill's bundled file by name,
+        and a tool named in a result but absent from the offered set is an
+        instruction pointing at something the prompt does not advertise.
+
+        The first raise cost ~317 tokens (459 -> 776) for 7 skills. The 16 -> 18
+        one was measured with the Tier-1 catalogue in place: ~2,482 tokens of
+        prompt-tools payload at 18 versus ~2,410 at 16, so two slots are ~72
+        tokens against an 8,192-token window — under 1%. One slot is ~36.
         """
         import re
 
@@ -803,7 +916,7 @@ class SkillRegistry:
 
         core_tools = {"web_search", "read_file", "write_file", "run_command"}
         discovery_tools = {"find_mcp_server", "forge_skill", "list_forged",
-                           "skill_search", "skill_view"}
+                           "skill_search", "skill_view", "skill_read"}
         # `skill_search` and `skill_view` belong here for a reason the other
         # three do not have: the prompt catalogue NAMES them.
         #
@@ -4473,13 +4586,95 @@ class SkillRegistry:
                 return {"success": True, "name": skill.name,
                         "description": skill.description,
                         "body": "",
+                        "files": skill.list_files(),
                         "note": ("This skill has no written instructions. Its "
                                  "one-line description is all there is; call "
                                  "it if it looks relevant.")}
-            return {"success": True, "name": skill.name,
-                    "description": skill.description, "body": body,
-                    "truncated": len(body) > _SKILL_BODY_CHARS,
-                    }
+            files = skill.list_files()
+            out = {"success": True, "name": skill.name,
+                   "description": skill.description, "body": body,
+                   "truncated": len(body) > _SKILL_BODY_CHARS,
+                   }
+            if files:
+                # Named so the model knows they exist and how to get them.
+                # Without this the body can say "use the template in
+                # references/" and there is no way to learn the file is there
+                # or what it is called - which was the whole defect.
+                out["files"] = files
+                out["files_note"] = (
+                    "This skill also ships the files above. Read one with "
+                    "`skill_read` (name + path) instead of guessing a "
+                    "location: their names are relative to the skill's own "
+                    "folder, which is fixed and not the working directory."
+                )
+            return out
+
+        # --------------------------------------------------------- skill_read
+        async def skill_read(params: dict) -> dict:
+            """Read one of a skill's own bundled files.
+
+            `skill_view` returns a skill's instructions and the names of the
+            files beside them; a skill that ships a template says "use
+            references/foo.md" and this is how that file is opened. Without
+            it the name was a dead reference: shipped, stored, named in the
+            body, and unreachable.
+
+            Resolution is against the skill's own folder, never the process
+            working directory. That distinction is the bug this fixes -
+            `search_files` globs the cwd, so the same filename could resolve
+            to a different project's copy of the skill with no signal.
+            """
+            name = str(params.get("name") or params.get("skill") or "").strip()
+            rel = str(params.get("path") or params.get("file") or "").strip()
+            if not name:
+                return {"success": False, "error": "No skill name given"}
+            if not rel:
+                return {"success": False,
+                        "error": "No file path given",
+                        "hint": "Call skill_view first; it lists the skill's files."}
+            skill = skill_registry.get(name)
+            if skill is None:
+                return {"success": False, "error": f"No skill named {name!r}"}
+            if not getattr(skill, "folder", ""):
+                return {"success": False,
+                        "error": f"Skill {name!r} has no files of its own"}
+            target = skill.resolve_file(rel)
+            if target is None:
+                return {"success": False,
+                        "error": f"{rel!r} is not a file inside skill {name!r}",
+                        "files": skill.list_files()}
+            try:
+                size = target.stat().st_size
+            except OSError as e:
+                return {"success": False, "error": f"could not stat {rel!r}: {e}"}
+            if size > _SKILL_FILE_CHARS * 4:
+                return {"success": False,
+                        "error": (f"{rel!r} is {size} bytes; too large to read "
+                                  f"(limit {_SKILL_FILE_CHARS * 4})")}
+            try:
+                text = target.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                return {"success": False, "error": f"could not read {rel!r}: {e}"}
+            return {"success": True, "name": skill.name, "path": rel,
+                    "content": text[:_SKILL_FILE_CHARS],
+                    "truncated": len(text) > _SKILL_FILE_CHARS,
+                    "bytes": size}
+
+        self.register(SkillDefinition(
+            "skill_read",
+            "Read a file that a skill ships alongside its instructions. Call "
+            "`skill_view` first: it lists the file names. Use this when a "
+            "skill's steps say to use one of its own templates or references, "
+            "instead of searching the filesystem for the name.",
+            {"type": "object", "properties": {
+                "name": {"type": "string",
+                         "description": "The skill name, exactly as listed"},
+                "path": {"type": "string",
+                         "description": "A file name from skill_view's files "
+                                        "list, relative to the skill"}},
+             "required": ["name", "path"]},
+            skill_read, "meta",
+        ))
 
         self.register(SkillDefinition(
             "skill_view",

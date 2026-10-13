@@ -11,10 +11,49 @@ type WSMessage = {
   params?: any;
 };
 
+/**
+ * A timer handle, named rather than spelled `ReturnType<typeof setTimeout>`.
+ *
+ * In the browser this is a number; under Node's types it is a `Timeout` object.
+ * The dashboard is built for both, so naming it keeps the difference in one
+ * place instead of at every timer, and lets the two callers below share it.
+ */
+type TimerHandle = ReturnType<typeof setTimeout>;
+
 type PendingRequest = {
   resolve: (value: any) => void;
   reject: (error: any) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer: TimerHandle;
+  // Kept so activity can push the deadline out for the requests allowed to run
+  // long. Without it the map key is the only identity a pending request has, and
+  // `req-7` says nothing about whether it is a chat turn or a status poll.
+  method: string;
+};
+
+/**
+ * How long a request may go without the server saying anything.
+ *
+ * Not a cap on how long a turn may take - a local model with tool rounds can
+ * legitimately run for minutes. It is a cap on SILENCE. Any sign of progress
+ * (`chat.delta`, `chat.activity`, `chat.tools`) restarts the clock, so a turn
+ * that is still working is never declared dead. Before this the clock ran
+ * regardless: a slow turn was rejected at three minutes and the reply, which
+ * did arrive, was discarded because nothing was waiting for its id.
+ */
+const REQUEST_TIMEOUT_MS = 180000;
+
+/**
+ * Notifications the server sends *while* a chat turn is being worked on.
+ *
+ * All three mean the same thing to the clock: something is still happening.
+ * `chat.delta` streams the answer as it is written, `chat.activity` names the
+ * step ("Looking at photo.png…"), and `chat.tools` reports what has been called
+ * so far. A turn that is doing any of these has not hung.
+ */
+const CHAT_PROGRESS_METHODS: Record<string, true> = {
+  'chat.delta': true,
+  'chat.activity': true,
+  'chat.tools': true,
 };
 
 type WSState = 'disconnected' | 'connecting' | 'connected';
@@ -26,6 +65,26 @@ export type Insight = {
   text: string;
   timestamp: number;
 };
+
+/**
+ * Restart the silence clock for every request still waiting on a chat turn.
+ *
+ * Called for each progress notification. The server sending anything at all
+ * about this conversation is proof it is still working on it, so the deadline
+ * moves out rather than expiring under a turn that is doing exactly what it
+ * should. Only chat requests are reset: a `browser.status` poll that has gone
+ * quiet for three minutes is a genuine failure and should still time out.
+ */
+function noteActivity(): void {
+  pending.forEach((entry, id) => {
+    if (!entry.method.startsWith('chat.')) return;
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => {
+      pending.delete(id);
+      entry.reject(new Error(`Request ${entry.method} timed out`));
+    }, REQUEST_TIMEOUT_MS);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Shared singleton connection — lives at module level so navigating between
@@ -138,6 +197,12 @@ function connect() {
 
       // Server push notification
       if (msg.method && !msg.id) {
+        // Progress, not silence: the turn is still running, so the deadline
+        // moves. Done before the listeners below so a page with no handler for
+        // these still benefits from them.
+        if (CHAT_PROGRESS_METHODS[msg.method]) {
+          noteActivity();
+        }
         const handler = notificationHandlers.get(msg.method);
         if (handler) handler(msg.params || {});
 
@@ -202,29 +267,32 @@ export function useWS() {
   }, []);
 
   const send = useCallback((method: string, params: any = {}): Promise<any> => {
-    return new Promise((resolve, reject) => {
-      if (!sharedSocket || sharedSocket.readyState !== WebSocket.OPEN) {
-        reject(new Error('WebSocket not connected'));
-        return;
-      }
-      const ws = sharedSocket;
+    const { promise, resolve, reject } = Promise.withResolvers<any>();
+    if (!sharedSocket || sharedSocket.readyState !== WebSocket.OPEN) {
+      reject(new Error('WebSocket not connected'));
+      return promise;
+    }
+    const ws = sharedSocket;
 
-      const id = `req-${++idCounter}`;
-      // Chat + tool rounds can legitimately take a while.
-      const timer = setTimeout(() => {
+    const id = `req-${++idCounter}`;
+    const entry: PendingRequest = {
+      resolve,
+      reject,
+      timer: setTimeout(() => {
         pending.delete(id);
         reject(new Error(`Request ${method} timed out`));
-      }, 180000);
+      }, REQUEST_TIMEOUT_MS),
+      method,
+    };
+    pending.set(id, entry);
 
-      pending.set(id, { resolve, reject, timer });
-
-      ws.send(JSON.stringify({
-        jsonrpc: '2.0',
-        id,
-        method,
-        params,
-      }));
-    });
+    ws.send(JSON.stringify({
+      jsonrpc: '2.0',
+      id,
+      method,
+      params,
+    }));
+    return promise;
   }, []);
 
   const onNotification = useCallback((method: string, handler: (params: any) => void) => {

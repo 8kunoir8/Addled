@@ -77,6 +77,30 @@ param(
     [string]$InstallRoot = ""
 )
 
+# A file hash without `Get-FileHash`.
+#
+# `Get-FileHash` ships in `Microsoft.PowerShell.Utility`, which is not present
+# in every environment this script runs in. When it is missing the call dies
+# with a CommandNotFoundException, taking the whole deploy with it — including
+# a dry run, which needs no elevation and should never depend on this. Observed
+# exactly here, and only once a settings.json existed to hash, so the guard
+# that uses it was quietly unreachable before that.
+#
+# `[System.Security.Cryptography.SHA256]` is part of the .NET runtime the shell
+# already runs on, so it cannot go missing the same way. Same algorithm and
+# same hex output as `Get-FileHash -Algorithm SHA256`, so a hash captured
+# before this change still compares equal to one taken after it.
+function Get-FileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '')
+        } finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 
@@ -202,7 +226,7 @@ if ($DryRun) {
 }
 
 $settings = Join-Path $resources 'backend\memory\settings.json'
-$beforeHash = if (Test-Path $settings) { (Get-FileHash $settings).Hash } else { '' }
+$beforeHash = if (Test-Path $settings) { Get-FileSha256 $settings } else { '' }
 $beforeJson = if (Test-Path $settings) {
     Get-Content $settings -Raw | ConvertFrom-Json
 } else { $null }
@@ -318,7 +342,7 @@ if ($DryRun) {
 
 # The guard that would have caught the original mistake.
 if (Test-Path $settings) {
-    $afterHash = (Get-FileHash $settings).Hash
+    $afterHash = Get-FileSha256 $settings
     if ($beforeHash -and $afterHash -ne $beforeHash) {
         Write-Host "WARNING: settings.json changed during the deploy." -ForegroundColor Red
         Write-Host "Something in the exclude list is wrong - the user's settings" -ForegroundColor Red

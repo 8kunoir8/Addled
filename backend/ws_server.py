@@ -261,12 +261,23 @@ class WSServer:
         that is not a broadcast, so a caller does not have to reach into
         `_loop` and re-derive the running-loop check.
 
-        Fire and forget: the caller is a ticking loop that will try again, so a
-        dropped job is not a lost state, only a delayed one. The reference is
-        kept so the task is not collected before it runs — the same reason
-        `broadcast_nowait` holds one.
+        Fire and forget in the sense that the caller does not wait for it — but
+        NOT in the sense that a drop is harmless. That was true of the ticking
+        loops this was written for; it is false of `resume_after_decision`, whose
+        continuation this is the only route for. A dropped resume means the
+        action was approved, ran, and was reported to nobody. So a failure to
+        schedule is logged as a warning rather than at debug, where it was
+        invisible in a normal run. The reference is kept so the task is not
+        collected before it runs — the same reason `broadcast_nowait` holds one.
         """
         if self._loop is None or self._loop.is_closed():
+            # Not debug. For a caller that will retry, a dropped job is merely
+            # delayed; for `resume_after_decision` this is the ONLY delivery
+            # path, so a silent drop means an approved action ran and nobody
+            # was ever told. That is indistinguishable from the app ignoring
+            # the user, and it used to leave no trace at all.
+            log.warning("cannot run background work: the server loop is %s",
+                        "missing" if self._loop is None else "closed")
             coro.close()
             return
         try:
@@ -280,7 +291,7 @@ class WSServer:
         try:
             asyncio.run_coroutine_threadsafe(coro, self._loop)
         except Exception as e:  # noqa: BLE001
-            log.debug("could not schedule background work: %s", e)
+            log.warning("could not schedule background work: %s", e)
             coro.close()
 
     async def call(self, method: str, params: dict | None = None) -> dict:
@@ -425,6 +436,18 @@ class WSServer:
         except websockets.ConnectionClosed:
             log.debug("Client went away before the reply to %s",
                       msg.get("method") if isinstance(msg, dict) else "?")
+        except asyncio.CancelledError:
+            # The socket closed and took this task with it. Not an error - it is
+            # the disconnect path doing its job - so it is not logged as one,
+            # and it is caught here rather than left to propagate so the
+            # `finally` in `_handle_connection` is not the only thing that ever
+            # sees it.
+            #
+            # Note `except Exception` below does NOT cover this: CancelledError
+            # derives from BaseException, not Exception, which is why an
+            # unhandled cancellation used to escape this method silently.
+            log.debug("Cancelled %s for %s before its reply",
+                      msg.get("method") if isinstance(msg, dict) else "?", peer)
         except Exception:
             log.exception("Error handling message from %s", peer)
             try:
@@ -904,6 +927,56 @@ def _tool_usage_snapshot(used: list | None = None) -> dict:
             calls.append(name)
     return {"skills": skills, "mcpServers": mcp_servers,
             "mcpTools": mcp_tools, "used": calls}
+
+
+def _stored_tokens(result: dict) -> dict | None:
+    """The token accounting to persist with an assistant message, or None.
+
+    Three cases, because there are three truths and only two numbers to hold:
+
+    - **The provider reported a split** — store it verbatim.
+    - **It reported nothing, and the count is this code's own estimate** (a
+      streamed round, `len(text) // 4`) — store it under `out` WITH
+      `estimated: True`. Unmarked, a guess would be indistinguishable from
+      reported usage on the next read.
+    - **Nothing at all** — return None, so the caller omits the field rather
+      than storing a fabricated zero.
+
+    Both halves were wrong before: `out` was the constant 0, and `in` was given
+    the SUM of the two, so every stored message claimed no output tokens and
+    labelled the total as input.
+    """
+    has_in = isinstance(result.get("tokens_in"), (int, float))
+    has_out = isinstance(result.get("tokens_out"), (int, float))
+    if has_in or has_out:
+        stored: dict = {}
+        if has_in:
+            stored["in"] = int(result["tokens_in"])
+        if has_out:
+            stored["out"] = int(result["tokens_out"])
+        return stored
+
+    # No split reported. A streamed round still produced a count, but it is
+    # this code's estimate of the output, not the provider's measurement — so
+    # it is stored as `out` WITH the marker, never as a plain pair. Storing it
+    # unmarked would make a guess indistinguishable from reported usage on the
+    # next read, which is the exact failure this marker exists to prevent.
+    if result.get("tokens_estimated") and isinstance(result.get("tokens"), (int, float)):
+        return {"out": int(result["tokens"]), "estimated": True}
+    return None
+
+
+def _maybe_token_usage(result: dict) -> dict:
+    """`{"tokenUsage": {...}}` for the reply payload, or {} when unreported.
+
+    Separate from `_stored_tokens` only in the wire key (`in`/`out`, matching
+    the `tokens` shape the dashboard already declares in `ws-types.ts`). Returns
+    an empty dict rather than a zero-valued one, so "the provider said nothing"
+    stays distinguishable from "the provider said zero" all the way out.
+    """
+    stored = _stored_tokens(result)
+    return {"tokenUsage": stored} if stored else {}
+
 
 
 def _announce_turn(params: dict, message: str, reply: str) -> None:
@@ -1430,6 +1503,17 @@ async def _run_chat_pipeline_inner(
 
     # params is optional; several paths below read from it unconditionally.
     params = params or {}
+
+    # Minted once, here, and threaded down to the tool loop. One id per turn is
+    # what lets the dashboard group the steps back into "what happened when you
+    # asked that" without guessing from timestamps.
+    #
+    # Minted for EVERY turn, including the ones that record nothing: the id is
+    # the turn's, not the record's, and a turn that runs tools and is not saved
+    # to history still has work worth showing in the trajectory.
+    from backend.actions import trajectory_log
+
+    turn_id = trajectory_log.new_turn_id()
 
     # The auto-forge path fires from deep inside the tool loop, where the only
     # thing in hand is a function name the model invented. Publishing the
@@ -2037,6 +2121,14 @@ async def _run_chat_pipeline_inner(
             reply_directive=reply_lang,
             on_delta=_on_delta,
             on_activity=_on_activity,
+            # The trajectory is recorded HERE, at execution time, and is NOT
+            # gated on `record` below. `record` decides what is saved to the
+            # conversation; this decides what the turn DID. A turn the user
+            # asked not to remember still ran its tools, and a work record that
+            # vanishes with the history write would hide exactly the turns
+            # someone is trying to inspect.
+            turn_id=turn_id,
+            conversation_id=_stream_conversation or None,
             # A turn the caller said not to record must not be learned either.
             # Those flags mean "this is my own internal call, not something the
             # user asked for" — the Code page's planner is the case that matters
@@ -2091,8 +2183,21 @@ async def _run_chat_pipeline_inner(
                 write_history, write_memory, write_journal = _record_scope(record)
                 if write_history:
                     chat_history.add_message("user", message)
-                    chat_history.add_message("assistant", response_text,
-                        tokens={"in": result.get("tokens", 0), "out": 0})
+                    # `out` was hardcoded to 0, and `in` was handed the SUM of
+                    # both halves, so every stored turn lied in two ways: it
+                    # claimed no output tokens were produced and mislabelled the
+                    # total as input. The provider reports the real split - the
+                    # adapters have read it into `tokens_in`/`tokens_out` all
+                    # along - and `tool_loop` now carries it out.
+                    #
+                    # Where the split is genuinely absent (a streamed round
+                    # reports no usage), the keys are omitted rather than set to
+                    # zero: "not reported" and "reported as none" are different
+                    # facts, and a stored 0 for both is the kind of invented
+                    # number this codebase keeps having to remove.
+                    chat_history.add_message(
+                        "assistant", response_text,
+                        tokens=_stored_tokens(result))
                 if write_memory:
                     # Remember for the long term. Only a real exchange: a
                     # refusal or a provider error is not knowledge, and memory
@@ -2107,6 +2212,12 @@ async def _run_chat_pipeline_inner(
             return {
                 "response": response_text,
                 "tokens": result.get("tokens", 0),
+                # A NEW key, additively. `tokens` is a flat number that
+                # existing callers read and must keep receiving, so the split
+                # travels beside it rather than replacing it. Absent when the
+                # provider reported nothing - see `_stored_tokens` for why that
+                # is not the same as zero.
+                **_maybe_token_usage(result),
                 "conversationId": (chat_history.current_conversation_id
                                    if record else None),
                 "toolRounds": tool_rounds,
@@ -2148,13 +2259,19 @@ async def _run_chat_pipeline_inner(
 async def start_ws_server(host: str = "127.0.0.1", port: int = 9876):
     """Start the singleton WebSocket server."""
     _register_default_handlers()
-    # Hand the console a way to reach the socket. Injected rather than imported
-    # because the console module must not import this one - the cycle would
-    # resolve unpredictably depending on which side was imported first.
+    # Hand the console and the trajectory a way to reach the socket. Injected
+    # rather than imported because neither module may import this one - the
+    # cycle would resolve unpredictably depending on which side was imported
+    # first, and an observability module that can fail to import is not one.
     try:
         from backend.actions import console_log as _console
-        _console.set_broadcast(
-            lambda method, params: _server.broadcast_nowait(method, params))
+        from backend.actions import trajectory_log as _trajectory
+
+        def _broadcast(method: str, params: dict) -> None:
+            _server.broadcast_nowait(method, params)
+
+        _console.set_broadcast(_broadcast)
+        _trajectory.set_broadcast(_broadcast)
     except Exception as e:  # noqa: BLE001
         log.debug("could not wire the console broadcast: %s", e)
     await _server.start(host, port)
@@ -2597,7 +2714,23 @@ def _register_default_handlers():
         message = params.get("message", "")
         if not message:
             return {"response": "I didn't catch that.", "tokens": 0, "conversationId": None}
-        result = await run_chat_pipeline(message, params)
+        # Shielded so a disconnect does not take the answer with it.
+        #
+        # `_handle_connection` cancels this connection's in-flight tasks when
+        # the socket closes, which is right for a handler waiting on a decision
+        # nobody can send any more. It was wrong for this one. The pipeline
+        # never touches the socket - it reads and writes the conversation, the
+        # memory and the journal - so cancelling it threw away work that was
+        # already paid for: the tools had run, and the reply was never written
+        # because the history write is the last thing the pipeline does. The
+        # user saw a task complete and no answer, which is the bug this shields.
+        #
+        # The effect is that a turn survives the socket that asked for it. The
+        # reply itself is not lost either: `chat.history` already exists to
+        # recover a reply the dashboard missed, and once the write happens there
+        # is something for it to find. Sending into a dead socket still fails
+        # harmlessly - `_serve` catches that below.
+        result = await asyncio.shield(run_chat_pipeline(message, params))
         reply = result.get("response", "") if isinstance(result, dict) else ""
         # Guarantee the delegation acknowledgement, rather than trusting the
         # model to relay it. `swarm_delegate` starts the agent and returns a
@@ -2786,6 +2919,37 @@ def _register_default_handlers():
             limit=limit,
         )
         return {"success": True, **snap}
+
+    async def trajectory_list(params: dict, ws) -> dict:
+        """What the agent DID, grouped into turns, oldest first.
+
+        The console answers "what did Addled run?" and can only ever see the
+        terminal. This answers "what did Addled do on that turn?" — a turn that
+        searched, read twice and wrote has no single command to show.
+
+        Read by a dashboard that has just opened, for the same reason
+        `console.list` exists: a broadcast reaches only a tab that is already
+        watching, so a reload would otherwise show an empty trace beside a
+        conversation full of work.
+        """
+        from backend.actions import trajectory_log
+        limit = params.get("limit")
+        try:
+            limit = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            limit = None
+        snap = trajectory_log.snapshot(
+            turn_id=params.get("turn_id") or None,
+            conversation=params.get("conversation") or None,
+            limit=limit,
+        )
+        return {"success": True, **snap}
+
+    async def trajectory_clear(params: dict, ws) -> dict:
+        """Forget the recorded steps - all of them, or one conversation."""
+        from backend.actions import trajectory_log
+        removed = trajectory_log.clear(params.get("conversation") or None)
+        return {"success": True, "removed": removed}
 
     async def console_clear(params: dict, ws) -> dict:
         """Forget the recorded commands - all of them, or one conversation."""
@@ -6174,6 +6338,10 @@ def _register_default_handlers():
                 "always_allowed": skill_registry.is_always_allowed(s.name),
                 "deletable": s.category in ("forged", "market"),
                 "source": s.category,
+                # How many files the skill ships beside its prose. Without
+                # this a skill whose steps depend on a bundled template looked
+                # identical to one that is pure prose.
+                "files": len(s.list_files()),
             })
         try:
             from backend.approvals import policy
@@ -6258,9 +6426,48 @@ def _register_default_handlers():
                     str(params.get("path", "")).strip(),
                     ref=str(params.get("ref", "")).strip(),
                 )
+
         except Exception as e:
             return {"success": False, "error": str(e)}
         return {"success": True, "skill": meta["name"],
+                "scripts": meta.get("scripts", []),
+                "license": meta.get("license", "")}
+
+    async def skills_install_upload(params: dict, ws) -> dict:
+        """Install a skill from an uploaded .zip.
+
+        Mirrors `character_upload_skin` below: base64 in, decoded here, and
+        the branch on the `PK` magic that decides it is really an archive.
+        The webview cannot hand the backend a file path, so base64 over the
+        socket is the transport the rest of the app already uses for uploads.
+        """
+        import base64
+        from backend.skills.market import market
+        data_b64 = params.get("data", "")
+        filename = str(params.get("filename", "") or "skill.zip")
+        if not data_b64:
+            return {"success": False, "error": "No file data provided"}
+        try:
+            raw = base64.b64decode(data_b64)
+        except Exception:
+            return {"success": False, "error": "Invalid base64 data"}
+        if raw[:2] != b"PK":
+            return {"success": False,
+                    "error": "Expected a .zip file (a skill archive)"}
+        try:
+            meta = market.install_from_zip(
+                filename, raw,
+                overwrite=bool(params.get("overwrite", False)),
+            )
+        except ValueError as e:
+            # A refused archive is a user-facing answer, not a crash: the
+            # message names what was wrong with the upload.
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            log.exception("skill upload failed")
+            return {"success": False, "error": f"could not install: {e}"}
+        return {"success": True, "skill": meta["name"],
+                "description": meta.get("description", ""),
                 "scripts": meta.get("scripts", []),
                 "license": meta.get("license", "")}
 
@@ -6358,6 +6565,8 @@ def _register_default_handlers():
     _server.register("console.list", console_list)
     _server.register("console.clear", console_clear)
     _server.register("console.run", console_run)
+    _server.register("trajectory.list", trajectory_list)
+    _server.register("trajectory.clear", trajectory_clear)
     _server.register("console.input", console_input)
     _server.register("approvals.list", approvals_list)
     _server.register("approvals.alwaysAllow", approvals_always_allow)
@@ -6535,6 +6744,7 @@ def _register_default_handlers():
     _server.register("skills.delete", skills_delete)
     _server.register("skills.searchMarket", skills_search_market)
     _server.register("skills.installFrom", skills_install_from)
+    _server.register("skills.installUpload", skills_install_upload)
 
     # Excel operations
     _server.register("excel.read", excel_read)

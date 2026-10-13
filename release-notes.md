@@ -1,3 +1,110 @@
+# Addled 1.0.41
+
+## Upload a skill as a zip, and the files it ships actually open
+
+**Drop a `.zip` on the Skills page and it installs.** Wrapper folder and all —
+unzip `my-skill/` containing `SKILL.md`, `scripts/`, `references/`, and the
+skill lands named, described and readable. `SKILL.md` supplies the name and
+description; anything executable is detected and gated behind approval.
+
+The second half is the part that mattered. Before this release, **six of the
+fifteen installed skills named their own files and the model could not open a
+single one.** A skill could say *"read `references/template.md`"* and that file
+was unreachable. A zip full of references would have installed into the same
+dead end — you would have uploaded a working skill and watched it fail.
+
+## Why the files were unreachable
+
+Skills resolved their own files against the process's working directory. On a
+real install that directory is not the skill's folder, so a read went somewhere
+else entirely — and not always to nothing. Asked to open a file belonging to
+`spec-document-reviewer`, a search on this machine returned a **different
+project's copy**, one that had since diverged from the skill's own.
+
+Silently reading the wrong file is worse than failing to find it, because
+nothing in the answer looks wrong. A skill now records the folder it was
+registered from and resolves against that, so a file is either the skill's own
+or the read is refused. Absolute paths, drive-relative names like `C:x`,
+alternate data streams like `x:stream` and anything landing outside the folder
+are all rejected — each of those passes a naive "is it inside the folder" test,
+which is why each has its own rejection.
+
+## The upload refuses to overwrite, on purpose
+
+Installing a zip whose name is already taken asks first, rather than replacing
+the skill and mentioning it afterwards. You may not know a skill of that name is
+installed, and losing it silently is not a thing you can undo. The refusal
+becomes a question with the name in it:
+
+> A skill named `pdf-tools` is already installed. Its files will be replaced.
+> **[Replace it]** **[Keep the existing one]**
+
+## What the upload refuses
+
+Extraction is done by hand, not with the standard library's `extractall`.
+Measured on this machine, `extractall` wrote entries containing `../` and `/abs/`
+**outside** the destination directory — so it is not a safe primitive for a file
+someone else built. Every hostile archive below was refused with nothing written
+outside the skill folder:
+
+| Archive | Refused because |
+|---|---|
+| `../evil`, `../../evil`, `a/../../evil` | escapes the folder |
+| `..\evil` | same, Windows separators |
+| `/abs/evil`, `C:/Windows/evil` | absolute |
+| `C:evil` | drive-relative — passes a naive containment check |
+| `evil.txt:stream` | Windows alternate data stream |
+| `CON`, `con.txt`, `LPT1.log` | reserved device name, not a file |
+| `.env` | dotfile, how archives smuggle config |
+| a symlink entry | a link can point outside the skill |
+| 301 entries / 26 MB | caps on count and size |
+
+Extraction stages to a temporary folder and then swaps, so a failure part-way
+through cannot leave a half-replaced skill behind.
+
+## Scripts are found wherever they are
+
+This is the quiet one. A skill's scripts were only detected in the folder's
+*root*, so a skill laid out the way skills usually are — the entry point in
+`scripts/` — registered as **instruction-only** and skipped the approval gate.
+An executable skill that never asked permission. Scripts are now found at any
+depth, and the conventional layout installs as `needs approval`, which is what
+it always should have been.
+
+## Notes
+
+- An upgrade keeps your setup: settings, memory, skills, tools, MCP servers and
+  the swarm roster all live beside the install, and the installer ships no copy
+  of any of them.
+- `skill_read` is a new tool, so the model can open a skill's own files by name.
+  A refusal lists the files that *do* exist rather than dead-ending, which is
+  the difference between a model that recovers and one that gives up.
+- Every turn now records what it ran — tool, arguments, result and whether it
+  succeeded. `/trajectory` shows the last few. This is why the verification
+  below could be checked against the run instead of taken on trust.
+
+## Verification
+
+All 114 check suites pass (one skipped: it needs an office install).
+`check_skill_files.py` is new and carries 55 checks; it fails loudly against the
+old code — reverting the recursive script scan fails 3 checks, and removing the
+`:` rejection lets drive-relative names through and fails 4.
+
+The real example zip (`seedance-60s-video-generator`, 10.5 KB, a `scripts/` and
+a `references/` folder) was uploaded over the app's real WebSocket:
+
+- **Installed** with the wrapper stripped and `references/` and `scripts/`
+  preserved. `scripts: ['scripts/merge_scenes.py']`, `requires_approval: true`
+  — the script would have gone unnoticed before.
+- **A real turn read a bundled file.** Asked to open
+  `references/seedance-prompt-template.md`, the trajectory log records
+  `skill_read` → `ok` returning the file's actual first line,
+  `# Template Prompt Seedance 2.5 per Adegan`. That is the backend's own record
+  of the call, not the model's claim about it.
+- **Six hostile archives refused live**, with nothing written outside the skill
+  folder, and installing over an existing name asked instead of replacing it.
+
+
 # Addled 1.0.40
 
 ## The agent acts on the first ask, in any language

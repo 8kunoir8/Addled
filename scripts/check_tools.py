@@ -372,15 +372,15 @@ def run_budget_tests():
     check("a procedure question surfaces sop_lookup",
           "sop_lookup" in proc_ask, str(sorted(proc_ask)))
 
-    # The default max_tools is 18: enough for wiki, SOP, a domain MCP tool, the
+    # The default max_tools is 19: enough for wiki, SOP, a domain MCP tool, the
     # core utilities and the discovery tools to coexist. Raised 10 -> 16 when
-    # the discovery tools stopped being gated, and 16 -> 18 when
-    # `skill_search`/`skill_view` joined them — reserving more guaranteed slots
-    # at a fixed budget pushes real skills out of reach, which
-    # check_reachability catches each time.
+    # the discovery tools stopped being gated, 16 -> 18 when
+    # `skill_search`/`skill_view` joined them, and 18 -> 19 when `skill_read`
+    # did — reserving more guaranteed slots at a fixed budget pushes real
+    # skills out of reach, which check_reachability catches each time.
     default_q = skill_registry.filter_for_query("read a file and search the web")
-    check("default max_tools allows up to 18",
-          len(default_q) <= 18, f"len={len(default_q)}")
+    check("default max_tools allows up to 19",
+          len(default_q) <= 19, f"len={len(default_q)}")
 
 
 # ---- provider errors must explain themselves ---------------------------------

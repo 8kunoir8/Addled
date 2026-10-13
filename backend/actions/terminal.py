@@ -15,6 +15,65 @@ from pathlib import Path
 log = logging.getLogger("addled.terminal")
 
 
+async def _stop_process_tree(proc, grace: float = 5.0) -> None:
+    """Stop a timed-out command, whole.
+
+    On Windows `proc.kill()` is not enough. The command runs through a shell —
+    `create_subprocess_shell` starts `cmd.exe`, which starts the real program —
+    so killing the shell leaves the program running. Measured here: after
+    `proc.kill()`, nine `python.exe` processes were still alive, holding the
+    stdout pipe open. That is not only wasted CPU and locked files: a child
+    still holding the write end means the reader never sees EOF, so the output
+    cannot be collected and the call hangs until its own grace expires.
+    `taskkill /F /T` takes the tree, the pipe closes, and the reader finishes.
+    That is the whole reason this function is Windows-aware.
+
+    Killing only — the caller owns the reads, which it starts before waiting.
+    Reading here would compete with those tasks for the same stream, and the
+    loser silently returns nothing.
+
+    Never raises: this runs on the failure path, where a second exception would
+    replace a useful timeout message with a confusing one.
+    """
+    if proc.returncode is None:
+        try:
+            if sys.platform == "win32":
+                # `/T` is the part that matters: without it only the shell dies.
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/T", "/PID", str(proc.pid),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL)
+                await asyncio.wait_for(killer.wait(), timeout=grace)
+            else:
+                proc.kill()
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not stop the timed-out process tree: %s", e)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace)
+        except Exception:  # noqa: BLE001
+            # Already gone, or refusing to report. Either way the caller's read
+            # task decides what we get back.
+            pass
+
+
+async def _task_output(task, grace: float = 5.0) -> str:
+    """The decoded text a read task collected, or "" if it cannot be had.
+
+    A read that has not finished is given a short grace rather than dropped: by
+    the time this runs the process tree is dead and the pipe closed, so the read
+    completes almost immediately. The timeout is the belt to that braces — a
+    stream that somehow never ends must not turn a reported failure into a hung
+    tool call.
+    """
+    try:
+        chunk = await asyncio.wait_for(task, timeout=grace)
+    except Exception:  # noqa: BLE001
+        task.cancel()
+        return ""
+    return (chunk or b"").decode("utf-8", errors="replace")[:50000]
+
+
+
 def _console_record(command: str, result: dict, *, argv: list | None = None,
                     cwd: str | None = None, tool: str | None = None,
                     started: float | None = None,
@@ -175,18 +234,51 @@ class TerminalExecutor:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                 )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            out = {
-                "success": proc.returncode == 0,
-                "stdout": stdout.decode("utf-8", errors="replace")[:50000],
-                "stderr": stderr.decode("utf-8", errors="replace")[:10000],
-                "exit_code": proc.returncode,
-                "rewritten": rewritten,
-            }
-            _console_record(command, out, cwd=cwd, started=_t0)
-            return out
-        except asyncio.TimeoutError:
-            out = {"success": False, "error": f"Command timed out after {timeout}s"}
+            # One mechanism, not two. `communicate()` and a direct `read()` on
+            # the same stream fight over it, and the loser silently gets
+            # nothing - so this reads the pipes itself and never calls
+            # `communicate`.
+            #
+            # The reads are started BEFORE anything is waited on, which is what
+            # makes the output survive a timeout: a read begun after the kill
+            # races the transport teardown and can find an empty buffer, and
+            # `wait_for(proc.communicate())` cannot be used at all, because
+            # cancelling it tears down the very pipes it was reading.
+            out_task = asyncio.ensure_future(proc.stdout.read())
+            err_task = asyncio.ensure_future(proc.stderr.read())
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                # The command ran too long. Stop the whole process tree and
+                # report what it printed first - see `_stop_process_tree` for
+                # why `taskkill /T` rather than `proc.kill()`, and why the
+                # partial output is worth recovering.
+                timed_out = True
+                await _stop_process_tree(proc)
+            else:
+                timed_out = False
+
+            stdout = await _task_output(out_task)
+            stderr = await _task_output(err_task)
+            if timed_out:
+                out = {
+                    "success": False,
+                    "error": (f"Command timed out after {timeout}s and was "
+                              "stopped."),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": -1,
+                    "timed_out": True,
+                    "rewritten": rewritten,
+                }
+            else:
+                out = {
+                    "success": proc.returncode == 0,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": proc.returncode,
+                    "rewritten": rewritten,
+                }
             _console_record(command, out, cwd=cwd, started=_t0)
             return out
         except Exception as e:

@@ -102,8 +102,18 @@ def main() -> int:
 
     # No model call may be anywhere near it. This is the assertion that keeps
     # the notices honest: the moment someone generates this text, it can lie.
-    i = src.index("def _activity_for")
-    body = src[i:i + 2000]
+    #
+    # The body is taken from the AST, not a guessed character window. The old
+    # fixed 2000-char slice ran ~937 characters past the end of this function
+    # into whatever followed — so it false-positived on unrelated code, and
+    # could equally MISS a provider call deeper inside the function than the
+    # slice reached. `ast` gives the exact span, which is what this always
+    # meant to assert.
+    import ast as _ast
+    _mod = _ast.parse(src)
+    _fn = next(n for n in _ast.walk(_mod)
+               if isinstance(n, _ast.FunctionDef) and n.name == "_activity_for")
+    body = _ast.get_source_segment(src, _fn) or ""
     for forbidden in ("provider", "await ", "chat(", "complete("):
         check(f"_activity_for does not call {forbidden.strip()}",
               forbidden not in body,

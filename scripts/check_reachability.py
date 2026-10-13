@@ -212,10 +212,12 @@ PHRASINGS: dict[str, list[str]] = {
     "skill_view": ["show me the details of that skill",
                    "what can the pdf skill do",
                    "how does that skill work"],
+    "skill_read": ["open the template that skill ships",
+                   "read the skill's reference file"],
 }
 
 
-def offered_for(query: str, max_tools: int = 18) -> set[str]:
+def offered_for(query: str, max_tools: int = 19) -> set[str]:
     """What a real turn would offer this query.
 
     The default must match `filter_for_query`'s own, or this check tests a
@@ -305,8 +307,11 @@ def check_discovery_tools_always_offered() -> int:
 
     Asserts the property directly: whatever the query, all of them are offered.
     """
+    # `skill_read` belongs here with the other two: `skill_view` now tells the
+    # model to open a skill's bundled file by name, and a tool named in a
+    # result but not offered on the turn is a dead end the model cannot take.
     required = ["web_search", "read_file", "write_file", "run_command",
-                "skill_search", "skill_view"]
+                "skill_search", "skill_view", "skill_read"]
     probes = ["", "hello", "i feel tired today", "what is 2+2", "thanks!",
               "convert this pdf to a spreadsheet"]
     print("=" * 74)
