@@ -16,6 +16,7 @@ sys.path.insert(0, ROOT)
 from backend.config import config
 from backend.mcp_client import approval
 from backend.mcp_client.manager import mcp_manager
+from backend.mcp_client import protocol as mcp_protocol
 
 fails = []
 # The interpreter that runs THIS check, not a bundled path. The bundle exists
@@ -415,6 +416,45 @@ async def main():
         finally:
             forge_module.skill_forge.forge = original_forge
             config._data["skills"]["market_search"] = market
+
+
+        # ---- 9b. SSE framing -------------------------------------------
+        # The streamable-HTTP layer of the official MCP Python SDK is built on
+        # `sse-starlette`, whose DEFAULT_SEPARATOR is CRLF. parse_sse split on
+        # "\n\n" alone, so a CRLF-framed body had no separator: every event
+        # collapsed into one block whose joined `data:` lines were not valid
+        # JSON, and all of them were dropped in silence. A single-event stream
+        # survived by accident, which is why a two-event one is the test.
+        #
+        # The fixtures are built the way `sse_starlette.ServerSentEvent.encode`
+        # builds them (`data: <chunk><sep>` per line, then a bare `<sep>`), so
+        # the test tracks that library rather than our idea of the format.
+        def _sse(data, sep):
+            out = ""
+            for line in str(data).splitlines() or [""]:
+                out += f"data: {line}{sep}"
+            return out + sep
+
+        _a = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"a": 1}})
+        _n = json.dumps({"jsonrpc": "2.0", "method": "notifications/progress"})
+        for _label, _sep in (("CRLF", "\r\n"), ("LF", "\n"), ("CR", "\r")):
+            _body = _sse(_a, _sep) + _sse(_n, _sep)
+            _got = mcp_protocol.parse_sse(_body)
+            check(f"{_label}-framed SSE parses both messages",
+                  len(_got) == 2,
+                  f"got {len(_got)} of 2 — a server framing with {_label!r} "
+                  f"would be unusable")
+
+        _single = mcp_protocol.parse_sse(_sse(_a, "\r\n"))
+        check("a single CRLF event still parses",
+              len(_single) == 1 and _single[0].get("result") == {"a": 1},
+              str(_single))
+
+        check("a multi-line data payload is joined, not split",
+              mcp_protocol.parse_sse(
+                  'data: {"jsonrpc":"2.0",\r\n'
+                  'data: "id":1,"result":{"a":1}}\r\n\r\n')[0]["id"] == 1,
+              "SSE joins multiple data: lines in one event with a newline")
 
         # ---- 10. shutdown ----------------------------------------------
         state = mcp_manager._servers.get(SID)

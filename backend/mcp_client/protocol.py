@@ -142,6 +142,20 @@ def initialize_params() -> dict:
 def parse_sse(body: str) -> list[dict]:
     """Extract JSON-RPC messages from a ``text/event-stream`` body."""
     import json
+
+    # SSE permits CRLF, LF, or CR as the line terminator (WHATWG HTML, event
+    # stream interpretation). This split used to be on "\n\n" alone, which is
+    # the LF spelling only. `sse-starlette` - the streamable-HTTP layer of the
+    # official MCP Python SDK (`from sse_starlette import EventSourceResponse`)
+    # - frames every event with CRLF by default (`DEFAULT_SEPARATOR = "\r\n"`),
+    # so a body from it contained no "\n\n" at all: the whole stream collapsed
+    # into one block, its `data:` lines were joined by a newline, `json.loads`
+    # failed, and the `except json.JSONDecodeError: continue` below dropped
+    # every message in silence. A one-event stream survived by accident, which
+    # is why this only appeared against a server that sent two - i.e. any
+    # server that emits a notification before its result, which the spec
+    # allows. Normalising first makes it correct for all three terminators.
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
     messages = []
     for block in body.split("\n\n"):
         payload = []
