@@ -30,6 +30,53 @@ DEFAULT_TIMEOUT = 30.0
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
+# The variables a child process needs to function, and nothing else.
+#
+# This used to be `dict(os.environ)` — the whole parent environment — which
+# handed every stdio MCP server the user's ANTHROPIC_API_KEY, OPENAI_API_KEY,
+# cloud credentials, and the values entered for *other* MCP servers. An MCP
+# server is third-party code that runs with the user's permissions, and the
+# agent can acquire one on its own initiative, so passing it the keys to
+# everything was handing a stranger the run of the house to save it a config
+# line.
+#
+# A server needs to find its own runtime (PATH, PATHEXT, SystemRoot), to write
+# temporary files (TEMP, TMP), and to locate a home directory. It does not need
+# a credential. Anything a specific server genuinely requires is declared in
+# its own `env`, which is merged after this — that is the supported way to give
+# a server a secret, and it is explicit rather than incidental.
+_PASSTHROUGH = (
+    # Runtime discovery
+    "PATH", "Path", "PATHEXT", "SystemRoot", "SystemDrive", "windir",
+    "COMSPEC", "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
+    # Filesystem and locale
+    "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "HOMEDRIVE",
+    "HOMEPATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    # Python servers need these to behave (unbuffered stdio, encoding)
+    "PYTHONIOENCODING", "PYTHONUNBUFFERED", "PYTHONUTF8",
+)
+
+
+def _base_env() -> dict:
+    """The environment a stdio server starts with.
+
+    Filtered to `_PASSTHROUGH` by default. `mcp.inherit_env` restores the old
+    pass-everything behaviour for the server that needs a variable nobody
+    anticipated — the point of the filter is to stop *credentials* leaking by
+    accident, and a user who hits a server that needs more should be able to
+    say so from Settings rather than edit code.
+    """
+    try:
+        from backend.config import config
+        if bool(config.get("mcp", "inherit_env", default=False)):
+            return dict(os.environ)
+    except Exception:  # noqa: BLE001 — never fail to launch over a config read
+        pass
+    return {name: os.environ[name] for name in _PASSTHROUGH
+            if name in os.environ}
+
+
 class McpStdioClient:
     """A running stdio MCP server session."""
 
@@ -64,7 +111,7 @@ class McpStdioClient:
         return argv
 
     def _env(self) -> dict:
-        env = dict(os.environ)
+        env = _base_env()
         extra = self.spec.get("env") or {}
         if isinstance(extra, dict):
             env.update({str(k): str(v) for k, v in extra.items()})

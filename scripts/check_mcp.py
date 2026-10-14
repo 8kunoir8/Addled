@@ -456,6 +456,61 @@ async def main():
                   'data: "id":1,"result":{"a":1}}\r\n\r\n')[0]["id"] == 1,
               "SSE joins multiple data: lines in one event with a newline")
 
+        # ---- 9c. environment isolation ---------------------------------
+        # A stdio server is third-party code running with the user's
+        # permissions, and the agent can acquire one on its own. It used to be
+        # started with `dict(os.environ)` — every API key, cloud credential and
+        # other server's secret in this process. These checks hold the
+        # allowlist in place, since the failure is silent by nature: nothing
+        # breaks when a server can read a key it should not have.
+        from backend.mcp_client.stdio import McpStdioClient
+
+        _probe = McpStdioClient("probe", {"command": ["cmd"], "env": {"DECLARED": "1"}})
+        os.environ["ADDED_CHECK_CANARY"] = "must-not-reach-the-child"
+        try:
+            _child = _probe._env()
+        finally:
+            os.environ.pop("ADDED_CHECK_CANARY", None)
+
+        check("a parent-only variable does not reach a stdio server",
+              "ADDED_CHECK_CANARY" not in _child,
+              "the child inherited the parent environment; a server can read "
+              "this process's credentials")
+        check("no credential-shaped variable reaches a stdio server",
+              not [k for k in _child
+                   if k.upper().endswith(("_API_KEY", "_TOKEN", "_SECRET"))],
+              f"leaked: {[k for k in _child if k.upper().endswith(('_API_KEY', '_TOKEN', '_SECRET'))]}")
+        check("PATH still reaches the child",
+              bool(_child.get("PATH") or _child.get("Path")),
+              "a server cannot find its own runtime without PATH")
+        for _name in ("TEMP", "TMP"):
+            if _name in os.environ:
+                check(f"{_name} still reaches the child", _name in _child,
+                      "a server cannot write temp files without it")
+        check("a server's own declared env still reaches it",
+              _child.get("DECLARED") == "1",
+              "declaring env is the supported way to give a server a secret")
+        check("the allowlist is much smaller than the parent environment",
+              len(_child) < len(os.environ),
+              f"child={len(_child)} parent={len(os.environ)}")
+
+        # The escape hatch: a server needing something unanticipated can still
+        # be given it, from Settings, without editing code.
+        _before = config.get("mcp", "inherit_env", default=False)
+        try:
+            config.set("mcp", "inherit_env", value=True)
+            _full = _probe._env()
+            check("mcp.inherit_env restores the full environment",
+                  len(_full) >= len(os.environ) - 1,
+                  f"opted in but got {len(_full)} of {len(os.environ)}")
+            config.set("mcp", "inherit_env", value=False)
+            _filtered = _probe._env()
+            check("turning inherit_env back off re-filters",
+                  len(_filtered) < len(_full),
+                  f"still {len(_filtered)} vars after opting out")
+        finally:
+            config.set("mcp", "inherit_env", value=bool(_before))
+
         # ---- 10. shutdown ----------------------------------------------
         state = mcp_manager._servers.get(SID)
         proc = getattr(state.client, "_proc", None) if state else None

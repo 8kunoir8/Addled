@@ -470,6 +470,11 @@ function McpSection({settings,update,saving,status}: any){
         onChange={e=>update('mcp','auto_deactivate_minutes',parseInt(e.target.value||'0'))}
         className={`${inp} w-24`}/>
     </SettingRow>
+    <SettingRow label="Pass this app's environment to servers"
+      description="Off (recommended) starts a server with PATH, TEMP and the like but not your API keys or other servers' credentials. Turn on only for a server that needs a variable nobody declared.">
+      <input type="checkbox" checked={m.inherit_env===true}
+        onChange={e=>update('mcp','inherit_env',e.target.checked)}/>
+    </SettingRow>
     <div className="flex items-center gap-2 px-1 pt-1 text-[11px]">
       <button onClick={()=>act('mcp.reload',{},'reload')}
         disabled={busy==='reload'||wsState!=='connected'} className={btn}>

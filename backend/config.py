@@ -455,6 +455,12 @@ DEFAULT_SETTINGS: dict = {
         # Minutes of idleness before a server the agent added is disconnected
         # again. Its configuration stays, so reconnecting is instant.
         "auto_deactivate_minutes": 30,
+        # Hand a stdio server the whole parent environment instead of the
+        # small allowlist in `mcp_client/stdio.py`. Off means a server gets
+        # PATH, TEMP and the like but not this process's API keys, cloud
+        # credentials, or the values entered for other MCP servers. Turn it on
+        # only for a server that genuinely needs a variable nobody declared.
+        "inherit_env": False,
     },
     "browser": {
         "user_browser": False,
