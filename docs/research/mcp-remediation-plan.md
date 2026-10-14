@@ -1,8 +1,38 @@
 # MCP: remediation plan
 
-Derived from `mcp-deep-audit.md` and `mcp-management-comparison.md`. **Nothing
-here is implemented yet** — this is a plan for approval, ordered so the
+Derived from `mcp-deep-audit.md` and `mcp-management-comparison.md`. Phases 1
+and 3.2 are implemented (see Progress below); the rest is ordered so the
 highest-severity, lowest-risk work lands first.
+
+## Progress
+
+Branch `mcp-remediation`, based on `ea05fad`.
+
+| Commit | What | State |
+|---|---|---|
+| `d37c888` | Carried-forward work from earlier sessions | done |
+| `9d21fdf` | **1.1** SSE framing (F1) | done, verified with teeth |
+| `c6a418a` | **1.2** Environment isolation (F2) | done, verified with teeth, opt-out in Settings |
+| `e86be6c` | **3.2** Model cannot self-approve (F5) | done, verified with teeth, 11 assertions rewritten |
+
+Next per the revised order: **Phase 6** (calendar callback — shares the
+`/oauth/callback` route and PKCE with 5.1a), then 3.1 (F4), Phase 2 (F3),
+Phase 4 (F6/F8/F9/F10), then 5.2 before 5.1a/b/c, then 5.3.
+
+**F5 note for whoever picks this up.** The fix is spread over five files on
+purpose, and each seam is load-bearing — reverting any one of them re-opens
+the hole or breaks the approve path:
+
+- `approval.py` — the refusal no longer says how to get past the gate.
+- `manager.py` — untrusted tools register with `requires_approval`; the
+  handler refuses and no longer calls `approve()` on a flag; the
+  skill→tool map lives here.
+- `registry.py` — `_needs_approval` asks for `mcp__*` unconditionally (the
+  DestructionGate cannot know dynamic names); `_is_granted` reads the MCP
+  store.
+- `tool_loop.py` — the turn ends on a refusal instead of nudging a retry.
+- `executor.py` — `approve()` records the MCP grant, or the user's Allow runs
+  nothing.
 
 Every phase is independently shippable and independently revertible. Phases 1–3
 are bug fixes; 4–5 are trust-model design decisions; 6+ are the competitive gaps.

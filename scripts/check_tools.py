@@ -813,13 +813,19 @@ def run_shell_access_tests():
 
     asyncio.run(drive())
 
-    # The retry nudge is an MCP mechanism; sending a shell command round again
-    # repeats a call that cannot succeed, because run_command has no `confirm`.
+    # The MCP retry nudge used to live in the loop, scoped to `mcp__` names so
+    # a shell command — which has no `confirm` argument — was not sent round
+    # again. That nudge is gone: the loop now ENDS the turn on an approval
+    # refusal, because the retry was how a model approved its own call. What
+    # the old check was protecting still matters, so it is asserted directly.
     loop_src = Path(ROOT, "backend", "skills", "tool_loop.py").read_text(
         encoding="utf-8")
-    check("the confirm retry is scoped to MCP tools only",
-          'startswith("mcp__")' in loop_src,
-          "the nudge also fires for shell commands")
+    check("the loop no longer nudges an MCP retry with confirm=true",
+          "plus confirm=true" not in loop_src,
+          "the self-approval nudge is still in the loop")
+    check("a gated call still ends the turn rather than retrying",
+          "requires_approval" in loop_src,
+          "the loop must stop on an approval refusal")
 
 
 def main():
