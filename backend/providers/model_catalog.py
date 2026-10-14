@@ -88,6 +88,27 @@ def cached(pid: str) -> list[str]:
     models = entry.get("models")
     return [str(m) for m in models] if isinstance(models, list) else []
 
+def cached_limits(pid: str) -> dict[str, int]:
+    """Discovered context windows for a provider: model id -> tokens.
+
+    Empty when the provider published none, in which case the caller falls back
+    to a static guess. The numbers are the provider's own, so one gateway can
+    report a different window per model — the live one spans 200k to 1.05M.
+    """
+    entry = _load().get(pid) or {}
+    raw = entry.get("limits")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for mid, value in raw.items():
+        try:
+            window = int(value)
+        except (TypeError, ValueError):
+            continue
+        if window > 0:
+            out[str(mid)] = window
+    return out
+
 
 def cached_meta(pid: str) -> dict:
     entry = _load().get(pid) or {}
@@ -151,6 +172,39 @@ def enabled() -> bool:
 # ---- discovery ---------------------------------------------------------------
 
 
+# Window fields seen in the wild: the gateway's own "context_length", the
+# OpenAI-docs spelling "context_window"/"contextWindow", and OpenRouter's
+# "top_provider.context_length". Nested "capabilities" carries it on some
+# builds. Read the first one that is a positive number.
+_WINDOW_KEYS = ("context_length", "context_window", "contextWindow",
+                "max_context_length", "max_input_tokens", "max_tokens")
+
+
+def _window_from_item(item: dict) -> int:
+    """The context window a /models entry advertises, or 0 when it says nothing."""
+    def _read(src: object) -> int:
+        if not isinstance(src, dict):
+            return 0
+        for key in _WINDOW_KEYS:
+            raw = src.get(key)
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return 0
+
+    found = _read(item)
+    if found:
+        return found
+    for nested in ("top_provider", "capabilities", "metadata"):
+        found = _read(item.get(nested))
+        if found:
+            return found
+    return 0
+
+
 async def _fetch_openai_compatible(pid: str, cfg: dict) -> dict:
     import httpx
     base = str(cfg.get("base_url") or "").rstrip("/")
@@ -181,11 +235,27 @@ async def _fetch_openai_compatible(pid: str, cfg: dict) -> dict:
     elif isinstance(data, list):
         items = data
     models = []
+    # The window a model can actually take. The gateway publishes it on this
+    # very endpoint ("context_length") and OpenAI-compatible servers spell it
+    # several ways, so accept the known aliases — an unlisted provider was
+    # otherwise assumed to be 32k when its gateway advertised 200k, and every
+    # long conversation was trimmed to fit a window that did not exist.
+    limits: dict[str, int] = {}
     for item in items or []:
-        mid = item.get("id") if isinstance(item, dict) else item
-        if mid:
-            models.append(str(mid))
-    return {"status": "ok", "models": sorted(set(models)), "source": "api"}
+        if not isinstance(item, dict):
+            if item:
+                models.append(str(item))
+            continue
+        mid = item.get("id")
+        if not mid:
+            continue
+        mid = str(mid)
+        models.append(mid)
+        window = _window_from_item(item)
+        if window:
+            limits[mid] = window
+    return {"status": "ok", "models": sorted(set(models)),
+            "limits": limits, "source": "api"}
 
 
 async def _fetch_ollama(pid: str, cfg: dict) -> dict:
@@ -309,6 +379,14 @@ async def refresh(force: bool = False, only: list[str] | None = None) -> dict:
             else:
                 # Keep whatever we had; only record why this attempt failed.
                 entry.setdefault("models", [])
+            # Windows are cached beside the ids. A provider that published
+            # none this round keeps the ones it published before, for the same
+            # reason the model list is merged rather than replaced.
+            limits = result.get("limits")
+            if isinstance(limits, dict) and limits:
+                entry["limits"] = limits
+            else:
+                entry.setdefault("limits", {})
             data[pid] = entry
             if result.get("error"):
                 log.debug("model discovery for '%s': %s (%s)", pid,

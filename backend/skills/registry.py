@@ -195,7 +195,20 @@ class SkillDefinition:
         # I expected path". Only reported when something required is missing,
         # so a harmless extra key does not block a working call.
         unrecognised = [k for k in given if k not in props]
-        missing = [k for k in required if k not in given or given.get(k) in ("", None)]
+        # `x-allow-empty` names the parameters for which an empty string is a
+        # VALUE, not an omission. An empty `path` really is a missing path, so
+        # the plain rule is right for almost every argument - but `write_file`
+        # must be able to create a zero-byte file, and it could not: `content`
+        # was declared required, the empty string read as missing, and the call
+        # was rejected before reaching `FileOps.write`, which would have written
+        # the empty file happily. Measured live 2026-10-14: the model asked to
+        # write an empty file, was refused, and correctly reported the refusal.
+        # Driven from the schema rather than a hardcoded name so the next skill
+        # that needs it declares it rather than editing this line.
+        empty_ok = set((self.parameters or {}).get("x-allow-empty", []) or [])
+        missing = [k for k in required
+                   if k not in given
+                   or (given.get(k) in ("", None) and k not in empty_ok)]
         if missing:
             trouble = f"missing required parameter(s): {', '.join(missing)}"
             if unrecognised:
@@ -2463,7 +2476,13 @@ class SkillRegistry:
             {"type": "object", "properties": {
                 "path": {"type": "string", "description": "File path to write"},
                 "content": {"type": "string", "description": "Content to write"},
-            }, "required": ["path", "content"]},
+            }, "required": ["path", "content"],
+             # An empty string is a legitimate `content`: it creates a
+             # zero-byte file, which is a real thing to want. Without this the
+             # empty string read as a missing parameter and the call was
+             # refused. `path` is NOT listed - an empty path is genuinely
+             # missing.
+             "x-allow-empty": ["content"]},
             write_file, "files", True,
             aliases={"path": ("file_path", "filepath", "filename", "file"),
                      "content": ("text", "data", "contents", "body")},

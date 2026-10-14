@@ -4,9 +4,10 @@ System controls — volume, brightness, lock, screenshot, clipboard.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import sys
 import subprocess
+import sys
 
 log = logging.getLogger("addled.system_ctrl")
 
@@ -15,31 +16,71 @@ class SystemControls:
     """Desktop system operations."""
 
     async def set_volume(self, level: int) -> dict:
-        """Set system volume 0-100."""
-        try:
-            if sys.platform == "win32":
-                import ctypes
-                # Send volume up/down keys via keybd_event
-                # Simple approach: use nircmd or sndvol
-                subprocess.run(["nircmd", "setsysvolume", str(int(level * 655.35))],
-                             capture_output=True)
-                return {"success": True, "level": level}
-            return {"success": False, "error": "Volume control only on Windows with nircmd"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        """Set system volume 0-100, and confirm it took.
+
+        Delegates to `backend.actions.audio`, which talks to the Windows Core
+        Audio endpoint directly and READS THE VALUE BACK. That readback is the
+        point: two earlier versions of this method reported success without
+        changing anything - the first shelled out to `nircmd`, never bundled,
+        behind an unconditional `{"success": True}`; the second drove
+        `VK_VOLUME_UP` through `SendMessage`, exited 0, and left the level
+        untouched (verified by readback: 100% after asking for 30%).
+
+        A tool that reports success it did not achieve is the same defect as a
+        model that reports work it did not do. Neither belongs here.
+        """
+        from backend.actions import audio
+        return await asyncio.to_thread(audio.set_volume, level)
 
     async def set_brightness(self, level: int) -> dict:
-        """Set screen brightness 0-100."""
+        """Set screen brightness 0-100.
+
+        The previous body ran PowerShell, **discarded its output entirely**, and
+        returned `{"success": True, "level": level}` on every path. Measured
+        live 2026-10-14: the command returned exit code 1 with `Get-WmiObject :
+        Not supported` - this monitor has no DDC/CI - and the tool still
+        reported success. It was wrong 100% of the time on that machine.
+
+        Now the exit code and the WMI result are checked, and a monitor that
+        cannot be controlled says so. `WmiMonitorBrightnessMethods` only
+        populates on internal panels and DDC/CI-capable externals, so "not
+        supported" is a normal answer the user needs to receive.
+        """
         try:
-            if sys.platform == "win32":
-                import ctypes
-                # WMI approach
-                import subprocess
-                cmd = f'powershell (Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{level})'
-                subprocess.run(cmd, shell=True, capture_output=True)
-                return {"success": True, "level": level}
-            return {"success": False, "error": "Brightness control only on Windows"}
-        except Exception as e:
+            if sys.platform != "win32":
+                return {"success": False,
+                        "error": "Brightness control is Windows-only"}
+            pct = max(0, min(100, int(level)))
+            script = (
+                "$ErrorActionPreference='Stop';"
+                "try{"
+                "$m=Get-CimInstance -Namespace root/WMI "
+                "-ClassName WmiMonitorBrightnessMethods -ErrorAction Stop;"
+                "if(-not $m){Write-Output 'FAIL no controllable display';exit 0};"
+                f"$m | Invoke-CimMethod -MethodName WmiSetBrightness "
+                f"-Arguments @{{Timeout=1;Brightness={pct}}} | Out-Null;"
+                "Write-Output 'OK'"
+                "}catch{Write-Output ('FAIL ' + $_.Exception.Message)}"
+            )
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 script],
+                capture_output=True, text=True, timeout=40)
+            out = (proc.stdout or "").strip()
+            if out == "OK":
+                return {"success": True, "level": pct}
+            # The script reports its own diagnosis on stdout with a `FAIL `
+            # marker, so the message the model reads is a diagnosis and not a
+            # copy of the PowerShell source.
+            detail = out[5:].strip() if out.startswith("FAIL ") else ""
+            if not detail:
+                detail = (proc.stderr or "").strip()[:160] or "no output"
+            return {
+                "success": False,
+                "error": ("could not set the brightness (this usually means the "
+                          "display has no DDC/CI control): " + detail[:200]),
+            }
+        except Exception as e:  # noqa: BLE001
             return {"success": False, "error": str(e)}
 
     async def lock(self) -> dict:

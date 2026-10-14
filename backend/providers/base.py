@@ -101,8 +101,20 @@ class BaseProvider(ABC):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        tools: list[dict] | None = None,
     ) -> AsyncIterator[str]:
-        """Stream a chat completion response."""
+        """Stream a chat completion response.
+
+        ``tools`` is the same catalogue ``chat`` takes, and it means the same
+        thing here: absent means the caller has none to offer. A provider whose
+        stream cannot carry tool calls may ignore it, but it must ACCEPT the
+        keyword, because the streamed path is the only path the live app takes
+        on a turn - ``ws_server`` always passes ``on_delta``. A streamed round
+        that silently drops the catalogue is a round in which the model was
+        asked to act and shown nothing to act with, and the measured result is
+        a text-only reply: a refusal ("I don't have a delete_file tool"), an
+        answer from parametric memory, or a narrated completion that never ran.
+        """
         ...
 
     async def vision(

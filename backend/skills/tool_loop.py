@@ -623,6 +623,17 @@ MAX_VERIFY_NUDGES = 1
 # model keeps insisting it is acting and still does not.
 MAX_PROMISE_NUDGES = 2
 
+# The same shape, one tense on: the reply claims the work is DONE. One nudge,
+# not two, and for a different reason than the promise budget. A promise is a
+# plan and may genuinely need one more ask before the model commits to calling.
+# A completed-action claim is a different failure - the model believes a result
+# exists - and asking it to call the tool usually does produce the call, so one
+# retry is worth the model call. A second is not: measured live, the reply that
+# claimed "**Gone.** delete_file reported success" had not called anything at
+# all, and a model that has already narrated the outcome tends to narrate it
+# again rather than start the work.
+MAX_CLAIM_NUDGES = 1
+
 # What the user sees when the model promised an action, was asked twice to
 # actually call the tool, and promised again instead. It is deliberately plain
 # and deliberately not attributed to the model: the model's own words were the
@@ -635,6 +646,117 @@ _PROMISED_NOTHING_ANSWER = (
     "If you still want it done, ask again and I'll make the call itself; if "
     "you'd rather it was left alone, say so and I'll drop it."
 )
+
+# The same statement, per language. Measured live on 2026-10-14: the user asked
+# in Indonesian ("bro, kamu punya skill apa aja ?") and this line came back in
+# English, because the fallback is a constant and never passes through
+# `language.reply_directive` the way a normal reply does. A canned English
+# sentence answering an Indonesian question is its own defect - the user cannot
+# tell whether the app understood them.
+#
+# Only the languages this app has been measured answering in are translated.
+# An untranslated language falls back to English rather than to a bad
+# translation: a wrong-language apology is bad, an ungrammatical one is worse.
+_PROMISED_NOTHING_BY_LANG: dict[str, str] = {
+    "id": (
+        "Aku sebenarnya nggak menjalankan apa pun untuk itu — aku cuma "
+        "menjelaskan apa yang akan aku lakukan, nggak memanggil tool, dan "
+        "nggak ada hasil untuk dilaporkan. Nggak ada yang berubah. Kalau kamu "
+        "masih mau itu dikerjakan, bilang lagi ya dan aku akan benar-benar "
+        "memanggil tool-nya; kalau kamu lebih suka dibiarkan, bilang aja."
+    ),
+    "es": (
+        "En realidad no ejecuté nada para eso: describí lo que haría, no llamé "
+        "a ninguna herramienta y no hay ningún resultado que informar. No se "
+        "cambió nada. Si sigues queriendo que se haga, pídemelo de nuevo y "
+        "haré la llamada de verdad; si prefieres dejarlo, dímelo y lo dejo."
+    ),
+    "fr": (
+        "Je n'ai en fait rien exécuté pour cela : j'ai décrit ce que je ferais, "
+        "je n'ai appelé aucun outil, et il n'y a aucun résultat à signaler. "
+        "Rien n'a été modifié. Si tu veux toujours que ce soit fait, redemande "
+        "et je ferai vraiment l'appel ; si tu préfères laisser tomber, dis-le."
+    ),
+    "de": (
+        "Ich habe dafür tatsächlich nichts ausgeführt — ich habe nur "
+        "beschrieben, was ich tun würde, kein Werkzeug aufgerufen, und es gibt "
+        "kein Ergebnis zu melden. Es wurde nichts geändert. Wenn du es weiterhin "
+        "erledigt haben möchtest, frag noch einmal und ich rufe das Werkzeug "
+        "wirklich auf; wenn es lieber bleiben soll, sag es einfach."
+    ),
+    "pt": (
+        "Na verdade eu não executei nada para isso — descrevi o que faria, não "
+        "chamei nenhuma ferramenta, e não há resultado para relatar. Nada foi "
+        "alterado. Se você ainda quer que seja feito, peça de novo e eu vou "
+        "fazer a chamada de verdade; se preferir deixar como está, é só dizer."
+    ),
+    "it": (
+        "In realtà non ho eseguito nulla per questo — ho descritto cosa avrei "
+        "fatto, non ho chiamato nessuno strumento e non c'è alcun risultato da "
+        "riferire. Non è stato cambiato nulla. Se vuoi ancora che venga fatto, "
+        "chiedilo di nuovo e farò davvero la chiamata; se preferisci lasciarlo "
+        "stare, dimmelo e lo lascio."
+    ),
+}
+
+
+# The replacement for a completion that was claimed but never ran. Same shape
+# and same reasoning as `_PROMISED_NOTHING_ANSWER` above - a canned line, so it
+# must be in the user's language, and translated only for the languages this
+# app has been measured answering in.
+#
+# Wording matters here more than usual. The user has just been told something
+# was done; the correction must (a) say plainly that it was not, (b) not
+# pretend the earlier sentence was never sent, and (c) not blame the user. So
+# it names the specific failure: a result was reported, no tool ran.
+_CLAIMED_NOTHING_ANSWER = (
+    "I have to correct myself: I reported that as done, but no tool actually "
+    "ran, so nothing was changed. I don't want to leave you with a result that "
+    "isn't real. If you still want it done, ask again and I'll make the call "
+    "and report only what it returns."
+)
+
+_CLAIMED_NOTHING_BY_LANG: dict[str, str] = {
+    "id": (
+        "Aku harus mengoreksi diriku: aku bilang itu sudah beres, tapi "
+        "sebenarnya nggak ada tool yang jalan, jadi nggak ada yang berubah. "
+        "Aku nggak mau kamu pegang hasil yang nggak nyata. Kalau masih mau "
+        "dikerjakan, bilang lagi ya, nanti aku benar-benar panggil tool-nya "
+        "dan cuma melaporkan apa yang dikembalikan."
+    ),
+    "es": (
+        "Tengo que corregirme: lo di por hecho, pero no se ejecutó ninguna "
+        "herramienta, así que no se cambió nada. No quiero dejarte con un "
+        "resultado que no es real. Si sigues queriendo que se haga, pídemelo "
+        "de nuevo y haré la llamada, informando solo lo que devuelva."
+    ),
+    "fr": (
+        "Je dois me corriger : je l'ai annoncé comme fait, mais aucun outil "
+        "n'a réellement tourné, donc rien n'a été modifié. Je ne veux pas te "
+        "laisser avec un résultat qui n'est pas réel. Si tu veux toujours que "
+        "ce soit fait, redemande et je ferai l'appel, en ne rapportant que ce "
+        "qu'il renvoie."
+    ),
+    "de": (
+        "Ich muss mich korrigieren: Ich habe das als erledigt gemeldet, aber es "
+        "wurde kein Werkzeug ausgeführt, also wurde nichts geändert. Ich möchte "
+        "dich nicht mit einem Ergebnis zurücklassen, das nicht real ist. Wenn "
+        "du es weiterhin erledigt haben möchtest, frag noch einmal und ich "
+        "rufe das Werkzeug auf und melde nur, was es zurückgibt."
+    ),
+    "pt": (
+        "Preciso me corrigir: eu informei que estava feito, mas nenhuma "
+        "ferramenta rodou de fato, então nada foi alterado. Não quero te deixar "
+        "com um resultado que não é real. Se ainda quiser que seja feito, peça "
+        "de novo e eu farei a chamada, relatando apenas o que ela retornar."
+    ),
+    "it": (
+        "Devo correggermi: l'ho dichiarato fatto, ma nessuno strumento è stato "
+        "eseguito, quindi non è stato cambiato nulla. Non voglio lasciarti con "
+        "un risultato che non è reale. Se vuoi ancora che venga fatto, "
+        "richiedilo e farò la chiamata, riportando solo ciò che restituisce."
+    ),
+}
 
 # A claim that the work is happening NOW, rather than a description of what
 # could be done. Tensed deliberately: "I'll run it" is a plan, "I ran it" is a
@@ -693,6 +815,87 @@ _PROMISE_IDIOM = re.compile(
 _EXPLAINS_PAT = re.compile(
     r"\b(?:explain|describe|summari[sz]e|clarify|outline|walk you through|"
     r"note that|mention|point out|answer|tell you about)\b", re.IGNORECASE)
+
+# Verbs that describe TELLING or SHOWING, never doing, when they follow the
+# first-person frame. The deny-list above is not enough on its own, and the
+# live failure is why: asked "what skills do you have?", the model opened with
+# "Let me list my skills: ...", `_PROMISE_INTENT` read `let me` and nothing
+# cleared it, the nudge was spent, and the answer was replaced by
+# `_PROMISED_NOTHING_ANSWER`. The user got an apology for a promise never made.
+#
+# Measured before this existed: 7 of 33 honest replies were rewritten as
+# promises, and 25 of 36 plausible benign verbs after "let me" were misread.
+#
+# The multi-word forms are listed explicitly and that is the point: the
+# discourse sense lives in the PHRASE, not the verb. "run through" is talk,
+# "run that" is doing; "look at" is talk when it introduces an explanation.
+# A verb whitelist of ACTIONS cannot replace this - "Let me list my skills:
+# file editing" contains `edit`, and no verb list tells a skill being named
+# from an action being taken.
+_DISCOURSE_VETO = re.compile(
+    r"\b(?:let me|i'?ll|i will|i'?m going to)\s+(?:quickly\s+|just\s+)?"
+    r"(?:list|show|tell\s+you|share|enumerate|break\s+down|give\s+you|provide|"
+    r"cover|recap|run\s+through|spell\s+out|lay\s+out|start\s+with|begin\s+with|"
+    r"take\s+a\s+look\s+at|walk\s+you\s+through)\b", re.IGNORECASE)
+
+
+# The COMPLETED-action frames. The mirror of `_PROMISE_INTENT`, one tense on.
+#
+# Kept to first-person or tool-attributed completion, because that is what
+# separates a fabricated result from a true statement about the world. "The
+# file is gone" alone is a state, and a reply may honestly report one it was
+# told about; "I deleted it", "the delete succeeded", "confirmed deleted" claim
+# that THIS reply did the work. Only the latter can be a false completion.
+#
+# Every alternative names either the actor (`i've`, `i have`, `i deleted`) or
+# the instrument (`delete_file reported`, `the write succeeded`) or an explicit
+# confirmation token (`confirmed`, `successfully`, `done`). A bare "it's gone"
+# is NOT included on its own - it is too often a true report of prior state.
+_CLAIMED_DONE_PAT = re.compile(
+    r"(?:\b(?:i(?:'ve| have)\s+(?:now\s+)?(?:successfully\s+|already\s+)?"
+    r"(?:deleted|removed|created|written|wrote|updated|moved|renamed|saved|"
+    r"run|ran|executed|completed|finished)\b)"
+    r"|\b(?:successfully|already)\s+(?:deleted|removed|created|written|"
+    r"updated|moved|renamed|saved|executed|completed)\b"
+    r"|\b(?:delete_file|write_file|move_file|copy_file|create_dir|run_command|"
+    r"read_file|list_dir)\b[^.\n]{0,40}?\breported (?:success|clean success)\b"
+    r"|\bTOOLS?\b[^.\n]{0,20}?\br(?:an|eturned)\b"
+    r"|\b(?:deletion|write|creation|move|rename)\s+"
+    r"(?:succeeded|worked|went through|completed)\b"
+    r"|\b(?:created|deleted|removed|written|updated|renamed|moved|saved)"
+    r"\b\s*(?:,|—|-)?\s*and\s+confirmed\b"
+    r"|\bconfirmed\b[^.\n]{0,25}?\b(?:created|deleted|removed|written|gone)\b"
+    r"|\b(?:deleted|created|removed|written|updated|renamed)\s+successfully\b"
+    r"|\b(?:it'?s|it is|that'?s|that is)\s+(?:now\s+)?(?:gone|deleted|"
+    r"removed|created|written|updated|renamed|moved)\b"
+    r"|^(?:done|finished|all done|complete|completed)\s*(?:[.,!—–-]\s*|\s+)"
+    r"(?=\S))",
+    re.IGNORECASE)
+
+# The negative frames that make a completion-shaped sentence an honest answer
+# after all. Checked BEFORE `_CLAIMED_DONE_PAT`, and a match vetoes the whole
+# reply: a refusal is a real answer and rewriting it puts words in the model's
+# mouth. This is the same reason a refusal is documented as left untouched by
+# the promise path - see the `announced_nothing_ran` branch.
+#
+# "was blocked", "refused", "couldn't", "does not exist" - every one of these
+# was the HONEST turn's opening in the live run whose dishonest twin is the
+# bug above.
+_CANT_PAT = re.compile(
+    r"\b(?:can'?t|cannot|couldn'?t|won'?t|unable to|not able to|"
+    r"don'?t have|do not have|isn'?t available|not available|"
+    r"was blocked|is blocked|refused|rejected|failed|"
+    r"does not exist|doesn'?t exist|not found|no such|"
+    r"nothing to (?:delete|remove|do)|never (?:ran|called|executed)|"
+    r"i didn'?t|i did not|wasn'?t able|couldn'?t read|couldn'?t write)\b",
+    re.IGNORECASE)
+
+# What turns a claim of action into a claim of PRESENT action. The veto above
+# is scoped by this: a sentence that says what the reply is about to discuss is
+# dropped, unless the same sentence also says the action is happening now.
+_IMMEDIACY = re.compile(
+    r"\b(?:now|right now|as we speak|immediately|straight away|"
+    r"sekarang|langsung|bentar|sebentar)\b", re.IGNORECASE)
 
 # Offering to carry the action out, as a sentence of its own rather than a verb
 # phrase: "I'll carry it out and confirm it's gone".
@@ -774,6 +977,24 @@ _NON_VERIFYING = (
     "which ", "where ", "whoami", "date", "time",
 )
 
+def _promised_nothing_answer(user_text: str) -> str:
+    """The nothing-ran replacement, in the language the user wrote in.
+
+    Falls back to English when the language is unclear or has no translation,
+    which is the same direction `language.reply_directive` takes: English is
+    what the model falls back to, so it is the safe default rather than a guess.
+    """
+    try:
+        from backend import language as _language
+
+        code = _language.detect(user_text or "")
+    except Exception:  # noqa: BLE001 - a language guess must never break a turn
+        log.debug("language detection failed for the fallback answer",
+                  exc_info=True)
+        return _PROMISED_NOTHING_ANSWER
+    return _PROMISED_NOTHING_BY_LANG.get(code or "", _PROMISED_NOTHING_ANSWER)
+
+
 
 def _params_touched_a_file(params) -> bool:
     """Did this call name a file to write to?"""
@@ -823,6 +1044,28 @@ def _turn_verified(tool_results: list[dict]) -> bool:
                     return True
     return False
 
+def _without_discourse_clauses(text: str) -> str:
+    """Drop the sentences that only announce what the reply is about to say.
+
+    Clause-scoped on purpose, and the reason is the direction the other fix
+    failed in. A reply-wide veto - clear the whole reply when a discourse
+    phrase appears anywhere - is unsafe: "Let me list what I'll delete. Firing
+    the delete now." opens with a discourse phrase and ends with a real
+    promise, and the blunt version let the promise through. A false negative
+    here shows the user a lie, which is the bug this guard exists for.
+
+    So a sentence is removed only when it carries the discourse phrase AND no
+    immediacy marker. A discourse sentence that also says "now" is a promise
+    wearing a discourse frame, and it stays.
+    """
+    kept = []
+    for part in re.split(r"(?<=[.!?\n])", text):
+        if _DISCOURSE_VETO.search(part) and not _IMMEDIACY.search(part):
+            continue
+        kept.append(part)
+    return " ".join(kept)
+
+
 
 def _announced_work(text: str) -> bool:
     """Whether this reply claims the action is happening now.
@@ -830,6 +1073,10 @@ def _announced_work(text: str) -> bool:
     Only ever consulted in the one shape that makes it meaningful - see
     `MAX_PROMISE_NUDGES`. On its own the phrase means nothing; a reply that
     says "let me explain" and then explains is doing exactly what it said.
+
+    The discourse veto applies to `_PROMISE_INTENT` alone - see below. Every
+    other frame is precise enough to be tested on the whole reply, and a
+    promise that shares a reply with a discourse sentence must still be caught.
     """
     if not text:
         return False
@@ -864,11 +1111,90 @@ def _announced_work(text: str) -> bool:
     # other frames is to avoid enumerating what a promise CAN say; this only
     # removes what it demonstrably does not ("I'll explain how the parser
     # works").
-    if len(stripped) > 700:
+    #
+    # The discourse clauses are removed FIRST, and only here. `let me list`,
+    # `let me show`, `I'll tell you` are how a model opens an ANSWER - measured
+    # on the live install: asked "what skills do you have?", it replied "Let me
+    # list my skills: ...", which this frame read as a promise and the caller
+    # replaced with the canned nothing-ran line. 7 of 33 honest replies died
+    # this way. The other frames above are unaffected because they are precise
+    # and a promise sharing a reply with a discourse sentence must still fire.
+    said = _without_discourse_clauses(stripped)
+    if len(said) > 700:
         return False
-    if _EXPLAINS_PAT.search(stripped) or _SOCIAL_PAT.search(stripped):
+    if _EXPLAINS_PAT.search(said) or _SOCIAL_PAT.search(said):
         return False
-    return bool(_PROMISE_INTENT.search(stripped))
+    return bool(_PROMISE_INTENT.search(said))
+
+def _claimed_done(text: str) -> bool:
+    """Whether this reply claims the action ALREADY happened.
+
+    The other half of `_announced_work`, and the half that had no guard.
+    `_announced_work` catches "I'll do it" and "running it now"; this catches
+    "I did it". The distinction is tense, and `tool_loop` says so itself at the
+    `_PROMISE_INTENT` comment: a past-tense completion is "a different defect".
+    It was, and it reached the user.
+
+    Measured live 2026-10-14 through the app's own websocket, provider 9router:
+    with no tool executed that turn - `TOOLS SEEN: none` -
+
+      * "**Gone.** `delete_file` reported success on `gate_test.txt`, and the
+        file is no longer in `E:\\Kunoir\\Codeground`."   (file still on disk)
+      * "Folder created and confirmed ... Here I verified independently with
+        PowerShell reading the disk afterward."           (folder never existed)
+      * "Here's your hosts file - it's the stock Windows default" (the read was
+        refused; the text was the model's own memory of a stock file)
+
+    Each of those is a fabricated RESULT reported as fact. The honest turns in
+    the same run said "it doesn't exist" and "the read was blocked", which is
+    why this must key on the claim of a completed ACTION - not on the topic,
+    and not on a verb.
+
+    Deliberately conservative, for the reason bug 2 taught: a false positive
+    replaces an honest answer, which is worse than the defect. It demands a
+    completed-action frame ("I have deleted", "successfully written", "the
+    delete worked", "it's gone", "confirmed") AND an object the action could
+    have been performed on. A reply that merely reports a STATE it was told
+    ("your file is gone because you deleted it") does not match, because the
+    frame requires first-person or tool-attributed completion.
+
+    True here does not itself rewrite anything. It is consulted only in the
+    shape that makes it meaningful - no tool run this turn, tools were offered
+    - exactly as `_announced_work` is. See `MAX_CLAIM_NUDGES`.
+    """
+    if not text:
+        return False
+    stripped = str(text).strip()
+    if not stripped:
+        return False
+    # A refusal or a blocker report is a real answer. "I can't delete that" and
+    # "the read was blocked" both contain completion-adjacent words, and both
+    # are honest - so the negative frames are checked first and win.
+    if _CANT_PAT.search(stripped):
+        return False
+    # A reply still PROMISING the action is not claiming it is done, even when
+    # the promise names the finished state: "I'll carry it out and confirm it's
+    # gone" contains "it's gone" and means the opposite. Measured against the
+    # live promise fixture, this fired on that sentence and nudged a promise -
+    # the exact false positive that destroyed 7 of 33 honest replies when the
+    # promise guard first shipped. `_announced_work` is the test for it, and a
+    # reply that is both promising AND claiming completion is treated as the
+    # promise, because the promise guard's ladder already handles it and a
+    # double-nudge would cost two model calls for one turn.
+    if _announced_work(stripped):
+        return False
+    return bool(_CLAIMED_DONE_PAT.search(stripped))
+
+def _claimed_done_answer(user_text: str) -> str:
+    """The replacement for a completion claimed but never run."""
+    try:
+        from backend import language as _language
+        code = _language.detect(user_text or "")
+    except Exception:  # noqa: BLE001
+        log.debug("language detection failed for the false-completion answer",
+                  exc_info=True)
+        return _CLAIMED_NOTHING_ANSWER
+    return _CLAIMED_NOTHING_BY_LANG.get(code or "", _CLAIMED_NOTHING_ANSWER)
 
 
 def _tools_were_offered(only: set[str] | None) -> bool:
@@ -1103,6 +1429,7 @@ async def chat_with_tools(
     provider,
     messages: list[dict],
     system_prompt: str = "",
+    stable_prefix: str = "",
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
     model: str | None = None,
     tools: list[str] | None = None,
@@ -1177,7 +1504,12 @@ async def chat_with_tools(
     # because the alternative is every instruction and every memory block
     # being silently lost. Providers that keep it are untouched.
     from backend.providers import system_role
-    full_messages = system_role.prepare(provider, full_messages)
+    # `stable_prefix` lets the folding path put the turn-invariant text in its
+    # own leading message, which is what makes a provider's prefix cache
+    # reachable (measured 98% against 0%). It is ignored on providers that
+    # keep the system role, where the text is already where it should be.
+    full_messages = system_role.prepare(provider, full_messages,
+                                        stable_prefix=stable_prefix)
 
 
     async def _final_answer(tool_results):
@@ -1217,6 +1549,7 @@ async def chat_with_tools(
     rounds = 0
     verify_nudges = 0
     promise_nudges = 0
+    claim_nudges = 0
     # Every tool result from every round. The per-round list below is what the
     # failure and round-cap paths reason about; this accumulates so a normal
     # text reply still reports what was actually called.
@@ -1318,6 +1651,51 @@ async def chat_with_tools(
                     "tool_results": all_tool_results,
                     "unreadable": unreadable,
                 }
+            # A turn that reports a result it never obtained. The gap neither
+            # the `malformed` path nor the promise nudge can cover, because
+            # there is no syntax to catch and no future tense to spot: "Deleted
+            # it — the file is gone", "the write succeeded", "confirmed
+            # deleted", all with zero tool calls.
+            #
+            # Measured live 2026-10-14 through the app's own websocket: a turn
+            # answered "**Gone.** delete_file reported success", in 2.4s, with
+            # `TOOLS SEEN: none` - and the file was still on disk, 7 bytes, when
+            # the next turn checked. Three separate turns fabricated this way,
+            # including one that printed a stock Windows hosts file it had not
+            # read and concluded "nothing is being blocked at the hosts level".
+            #
+            # Gated on the whole shape, exactly as the promise guard is: tools
+            # offered, no call this round, nothing run yet this turn, and the
+            # text claiming a completed action. The nudge asks for the call; if
+            # the model claims completion AGAIN with still nothing run, the
+            # claim is replaced rather than shown, for the same reason an
+            # unbacked promise is - the user must not be left holding a result
+            # that does not exist.
+            if (claim_nudges < MAX_CLAIM_NUDGES
+                    and not all_tool_results
+                    and _tools_were_offered(only)
+                    and _claimed_done(result.get("response", ""))):
+                claim_nudges += 1
+                full_messages.append({
+                    "role": "assistant",
+                    "content": result.get("response", ""),
+                })
+                full_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You just reported that as done, but no tool ran this "
+                        "turn, so nothing actually happened and there is no "
+                        "result to report. Do not describe an outcome you do "
+                        "not have. Either call the tool now, in this shape and "
+                        "with no other text, and then report what it really "
+                        "returned:\n"
+                        + skill_registry.PROMPT_CALL_FORMAT
+                        + "\n\nOr, if the action is not possible, say plainly "
+                        "that it has not been done and why."),
+                })
+                log.info("Claim nudge: reported a result, nothing called")
+                continue
+
             # A turn that says it is acting and then emits nothing. The gap the
             # `malformed` path cannot cover, because there is no syntax to catch:
             # "On it - searching now" with no call, no fence and no tag.
@@ -1364,6 +1742,49 @@ async def chat_with_tools(
             # says so plainly. The user is told the truth instead of being
             # left to discover that "Firing the delete now" fired nothing.
             #
+            # The claim-nudge budget is spent and the model STILL reports a
+            # completed result with nothing run. This is the reply that must not
+            # reach the user: measured live, "**Gone.** `delete_file` reported
+            # success on `gate_test.txt`" was shown for a file that was still on
+            # disk, and the user only learned otherwise by asking again.
+            #
+            # Replaced rather than re-nudged, for the reason the promise path
+            # gives: the first retry already showed this model does not turn
+            # into a caller on the second ask, and a fabricated RESULT is worse
+            # than an unbacked promise - a promise is visibly unfinished, while
+            # a result reads as fact and the user acts on it.
+            #
+            # `_claimed_done` is what keeps this from eating honest answers: a
+            # refusal ("I can't delete that - it's protected") and an honest
+            # failure report ("the read was blocked") both return False there,
+            # and both are returned untouched below.
+            if (not all_tool_results
+                    and _tools_were_offered(only)
+                    and _claimed_done(result.get("response", ""))):
+                log.info("Claim nudge spent; replacing a reported-but-unrun "
+                         "result with the honest correction")
+                _said = _claimed_done_answer(_last_user_text(messages))
+                if result.get("streamed") and on_delta is not None:
+                    try:
+                        on_delta(_said)
+                    except Exception:
+                        log.debug("stream listener failed", exc_info=True)
+                if learn:
+                    _queue_review(messages, [], _said)
+                return {
+                    "response": _said,
+                    "tokens": result.get("tokens", 0),
+                    "tool_rounds": rounds,
+                    "tool_results": [],
+                    "claimed_nothing_ran": True,
+                }
+
+            # The promise-nudge budget is spent and the model STILL says it is
+            # acting without calling anything. This is the reply that must not
+            # reach the user: measured live on 2026-10-10, four consecutive
+            # turns said "Firing the delete now; it's destructive so expect an
+            # approval prompt" and produced no call and no card.
+            #
             # Only this shape is rewritten. An ordinary answer, and a refusal
             # ("I can't run that one - it's a recursive force-delete"), are
             # both honest and are returned untouched: a refusal is a real
@@ -1375,22 +1796,23 @@ async def chat_with_tools(
                     and _announced_work(result.get("response", ""))):
                 log.info("Promise nudge spent; replacing an unbacked promise "
                          "with the honest result")
+                _said = _promised_nothing_answer(_last_user_text(messages))
                 if result.get("streamed") and on_delta is not None:
                     # The promise was buffered for the nudge and never emitted
                     # (see the streamed round above), so there is nothing to
                     # retract on the wire - but the replacement still has to be
                     # sent, or the streaming surface shows nothing at all.
                     try:
-                        on_delta(_PROMISED_NOTHING_ANSWER)
+                        on_delta(_said)
                     except Exception:
                         log.debug("stream listener failed", exc_info=True)
                 if learn:
                     # Nothing ran, so there is no procedure worth learning -
                     # but the review queue still wants the turn, for the same
                     # reason a failed turn does.
-                    _queue_review(messages, [], _PROMISED_NOTHING_ANSWER)
+                    _queue_review(messages, [], _said)
                 return {
-                    "response": _PROMISED_NOTHING_ANSWER,
+                    "response": _said,
                     "tokens": result.get("tokens", 0),
                     "tool_rounds": rounds,
                     "tool_results": [],
@@ -1785,7 +2207,8 @@ STREAM_TOOL_CALL = "\x00\x00addled:tool_call\x00\x00"
 async def _streamed_answer(provider, messages: list[dict],
                            model: str | None = None,
                            max_tokens: int = 4096,
-                           on_delta=None) -> dict:
+                           on_delta=None,
+                           tools: list[dict] | None = None) -> dict:
     """Collect a streamed plain-text answer, emitting each chunk as it arrives.
 
     Only ever used for a call that is KNOWN to be final — ``_final_answer``'s
@@ -1814,8 +2237,23 @@ async def _streamed_answer(provider, messages: list[dict],
     # text as the answer - see `_stream_round`.
     saw_tool_call = False
     try:
-        async for piece in provider.chat_stream(
-                messages, model=model, max_tokens=max_tokens, temperature=0.7):
+        # The catalogue goes with the stream. Without it the streamed round is
+        # the one path where the model is asked a tool-shaped question and
+        # handed no tools - measured live at 1-in-20 turns producing a
+        # text-only reply ("I don't have a `delete_file` tool available"),
+        # which `_stream_round` cannot distinguish from a real answer because
+        # there is no call syntax in a refusal. Keyword-guarded because not
+        # every provider can carry tools through a stream yet: a TypeError
+        # means "this one cannot", and the call is retried without them so an
+        # un-updated provider keeps working exactly as it did.
+        try:
+            _stream = provider.chat_stream(
+                messages, model=model, max_tokens=max_tokens,
+                temperature=0.7, tools=tools)
+        except TypeError:
+            _stream = provider.chat_stream(
+                messages, model=model, max_tokens=max_tokens, temperature=0.7)
+        async for piece in _stream:
             if not piece:
                 continue
             if piece == STREAM_TOOL_CALL:
@@ -1881,7 +2319,8 @@ async def _stream_round(provider, messages: list[dict], model, only,
     """
     try:
         streamed = await _streamed_answer(provider, messages, model,
-                                          on_delta=None)
+                                          on_delta=None,
+                                          tools=skill_registry.to_openai_tools(only))
     except Exception as e:  # noqa: BLE001
         log.debug("stream round failed, falling back: %s", e)
         return None
@@ -2093,7 +2532,10 @@ async def _call_prompt_tools(provider, messages: list[dict],
     # The local model's context is 8192, so an unbudgeted request is rejected
     # outright — which is what made tool use fail there and nowhere else.
     provider_id = getattr(provider, "provider_id", "") or ""
-    limit = budget.context_limit(provider_id)
+    # The model matters: one gateway here serves windows from 200k to 1.05M,
+    # so a single per-provider number is wrong for all but one of them.
+    limit = budget.context_limit(
+        provider_id, str(getattr(provider, "model", "") or "") or None)
     wanted = int(provider_id == "local" and 1536 or 4096)
     prompt_tokens = budget.message_tokens(modified_messages)
     trimmed = 0

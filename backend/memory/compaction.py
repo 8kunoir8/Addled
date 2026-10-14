@@ -37,6 +37,30 @@ QUIET_WAIT_MAX_S = 600.0
 # on a CPU model; folding it in smaller pieces keeps each job short.
 MAX_CHUNK = 20
 
+# How much of the conversation is kept word-for-word behind the summary.
+#
+# Compaction rewrites the live list, so this is the one number that decides how
+# much the model can still quote exactly after a rewrite. A summary is lossy,
+# and the turns a user is most likely to refer back to are the recent ones.
+KEEP_TAIL = 12
+
+# A long message is worth keeping in full only while it is recent. Older ones are
+# truncated in place rather than dropped, which preserves the fact that the turn
+# happened without paying for the whole payload. This is Claude Code's "clear
+# older tool outputs first" step, adapted: Addled stores a tool result inside the
+# assistant's prose rather than as a separate `tool` message, so the unit here is
+# a long message rather than a tool-result block.
+TRUNCATE_AFTER_KEEP = 400
+
+# Thrashing guard. Rewriting is what makes the prompt smaller, but rewriting on
+# every turn would summarize a conversation to death — each pass loses detail the
+# next cannot recover, and the visible history never settles.
+#
+# The signal is recurrence (how many turns were added since the last rewrite),
+# not wall-clock: a conversation that has added two turns since the last
+# compaction has nothing new to fold, however long the user sat there thinking.
+MIN_TURNS_BETWEEN_COMPACTIONS = 8
+
 _locked = False           # single-flight guard
 _last_provider_error = 0.0
 _last_activity = 0.0
@@ -142,6 +166,46 @@ async def _summarize_chunk(messages: list[dict]) -> str:
         return ""
     return "Earlier exchanges: " + " | ".join(bullets)
 
+def _rewritten(all_msgs: list[dict], keep_from: int) -> list[dict]:
+    """The message list to store after folding everything before `keep_from`.
+
+    Two reductions, in the order Claude Code applies them:
+
+      1. **Truncate** long messages older than the verbatim tail. The message
+         stays — a user reading the history still sees that the turn happened
+         and how it opened — but the payload stops being re-sent every turn.
+      2. **Drop** what remains before `keep_from`, because it has just been
+         summarized and is the part the rolling summary will speak for.
+
+    Returns a new list of new dicts. The caller's list came from
+    `get_context()`, which returns slices of the live store's own dicts, so
+    editing in place would rewrite the store before the summary is saved.
+    """
+    out: list[dict] = []
+    for i, m in enumerate(all_msgs):
+        if i < keep_from:
+            continue
+        msg = dict(m)
+        if i < len(all_msgs) - KEEP_TAIL:
+            content = str(msg.get("content") or "")
+            if len(content) > TRUNCATE_AFTER_KEEP:
+                msg["content"] = (content[:TRUNCATE_AFTER_KEEP].rstrip()
+                                  + "\n[...truncated]")
+                msg["truncated"] = True
+        out.append(msg)
+    return out
+
+
+def _turns_since(state: dict, total: int) -> int:
+    """Messages added since the last rewrite, or a large number if unknown."""
+    since = state.get("rewritten_at")
+    if not isinstance(since, int):
+        # No rewrite has happened yet. A summary-only bookmark may exist from an
+        # older build, and those conversations are exactly the oversized ones,
+        # so an unknown count must not block the first rewrite.
+        return total
+    return total - since
+
 
 async def maybe_compact() -> bool:
     """Summarize the oldest third of the conversation once it outgrows the
@@ -167,10 +231,22 @@ async def maybe_compact() -> bool:
         if total < threshold:
             return False
 
-        summarized = int(state.get("summarized", 0))
-        pending = all_msgs[summarized:]
-        if len(pending) < threshold:
-            return False  # only the fresh tail remains — nothing stale to fold
+        # The thrashing guard runs BEFORE the quiet wait, so a conversation
+        # that has barely moved is rejected without spending fifteen seconds
+        # waiting for a gap it was never going to use.
+        if _turns_since(state, total) < MIN_TURNS_BETWEEN_COMPACTIONS:
+            log.debug("compaction skipped: fewer than %d messages since the "
+                      "last rewrite", MIN_TURNS_BETWEEN_COMPACTIONS)
+            return False
+
+        # What is left to fold is everything in the live list EXCEPT the
+        # verbatim tail. It is no longer a positional bookmark into the
+        # original list: a rewrite removes the summarized turns, so a bookmark
+        # would drift past the shortened list and the conversation would stop
+        # compacting while it was still growing.
+        foldable = max(0, total - KEEP_TAIL)
+        if foldable < threshold:
+            return False  # the tail alone is all that remains — nothing stale
 
         # Everything above is cheap. Only now is it worth spending the model,
         # so wait for a gap in the conversation first.
@@ -180,12 +256,14 @@ async def maybe_compact() -> bool:
 
         # The user may have chatted while we waited — re-read and re-check.
         all_msgs = chat_history.get_context(max_messages=100000)
-        summarized = int(state.get("summarized", 0))
-        pending = all_msgs[summarized:]
-        if len(pending) < threshold:
+        total = len(all_msgs)
+        foldable = max(0, total - KEEP_TAIL)
+        if foldable < threshold:
             return False
 
-        chunk = pending[: min(MAX_CHUNK, max(1, len(pending) // 3))]
+        # A third of the foldable region, capped: the older half of a long
+        # conversation, not the part the user just said.
+        chunk = all_msgs[: min(MAX_CHUNK, max(1, foldable // 3))]
         summary = await _summarize_chunk(chunk)
         if not summary:
             return False
@@ -193,11 +271,45 @@ async def maybe_compact() -> bool:
         entries = list(state.get("entries", []))
         entries.append({"ts": time.time(), "summary": summary})
         state["entries"] = entries[-MAX_ENTRIES:]
-        state["summarized"] = summarized + len(chunk)
         state["conversation_id"] = conv_id
+
+        # The summarized chunk leaves the live list; the tail stays
+        # word-for-word. `keep_from` advances by the chunk that was actually
+        # summarized rather than jumping to `total - KEEP_TAIL` in one pass: the
+        # head-jump reaches the steady state immediately and drops far more, but
+        # on the 12-message default threshold it discarded most of a short
+        # conversation before the summary had been shown to be any good.
+        #
+        # Bounded by the tail, which is never summarized, so a pass can never
+        # remove messages a later pass would then have to describe without ever
+        # having read them.
+        keep_from = min(len(chunk), max(0, total - KEEP_TAIL))
+        rewritten = _rewritten(all_msgs, keep_from)
+        stored = chat_history.replace_context(rewritten, conv_id)
+        if stored != len(rewritten):
+            # The store refused the rewrite (unknown conversation, or a write
+            # error). Recording progress now would mark turns as summarized
+            # while they were still sitting in the list, and the next pass would
+            # skip them. Leave the state alone.
+            log.warning("compaction: rewrite not applied (%d of %d stored); "
+                        "leaving the summary state unchanged",
+                        stored, len(rewritten))
+            return False
+
+        # `summarized` is a running total of turns folded so far, not a
+        # bookmark: the rewrite removes them, so a bookmark would point past the
+        # end of the shortened list and the conversation would stop compacting
+        # while still growing — measured, on a 240-message conversation, as
+        # compacting once and then never again.
+        state["summarized"] = int(state.get("summarized", 0)) + len(chunk)
+        # `rewritten_at` is what the thrashing guard compares against: the size
+        # of the list as this pass left it.
+        state["rewritten_at"] = stored
         _save(state)
-        log.info("Compacted %d messages (%d summarized total)",
-                 len(chunk), state["summarized"])
+        log.info("Compacted %d messages into a summary; %d kept (%d before, "
+                 "%d truncated)",
+                 len(chunk), stored, total,
+                 sum(1 for m in rewritten if m.get("truncated")))
         return True
     except Exception as e:
         log.debug("compaction failed: %s", e)

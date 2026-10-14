@@ -118,6 +118,143 @@ async def select(query: str, items: list[str]) -> list[str]:
             kept.append(item)
     return kept
 
+# -- conversation history ------------------------------------------------------
+# The blocks above are memories about *other* moments. The conversation window
+# is the one part of the prompt that describes *this* one, and it was the only
+# part not passed through a gate — so a 54-character question about a brand new
+# subject went out with 4270 characters of the previous subject attached, and
+# the model answered that instead.
+#
+# The signal that separates the two cases is not length and not similarity. It
+# is whether the new message carries any content word of its own:
+#
+#   * no content words ("continue", "why?", "kenapa?", "lanjutkan", "and then")
+#     -> the turn has no topic to stand on, so it is *about* the previous one.
+#        Keeping history is mandatory: this is the ellipsis the answer lives in.
+#   * any content word ("bro one off admin management itu maksudnya yg gimana ?")
+#     -> the turn can stand alone, so it is a candidate new topic.
+#
+# This is what Arguello & Rose call "Content Contribution" ("Binary-valued, is
+# there a non-stopword term in the current contribution?") -- introduced exactly
+# because a term-overlap method "wrongly classifies all of these as starts of
+# new topics" -- and Kumar & Callan's Cat1 ("self-contained query ... demarcates
+# a contextual shift") versus Cat2-imp split. The hardcoded list of follow-up
+# words it replaces could only ever be an incomplete guess at this.
+
+
+def content_words(text: str) -> set[str]:
+    """The tokens that carry a topic: the shared tokenizer, minus the stopwords."""
+    return _tokens(text)
+
+
+# Bare continuations that are *shaped* like content words: "continue",
+# "explain", "lanjutkan" and "jelaskan" all survive the stopword filter, because
+# they are ordinary verbs with no topic attached — the tokenizer cannot tell
+# "explain" from "explain how DNS works". The content-word test covers the
+# open-ended half of this (function words, bare pronouns, "and then") and this
+# covers the closed half. It is the list ws_server already held, widened to the
+# same idea: a word that asks for more of the previous turn rather than naming a
+# subject. It only ever *keeps* history, so the cost of a word being wrong here
+# is one stale window, never a lost question.
+_FOLLOWUP_WORDS = frozenset("""
+    continue continue? go on keep going more again same next and then
+    why why? explain jelaskan how so how come what about
+    kenapa kenapa? mengapa bagaimana lanjutkan lalu terus lanjut
+    kok kok bisa gimana gimana? apa apa? caranya
+    yes yeah yep ok okay oke sip lanjutkan
+""".split())
+
+
+def is_bare_followup(text: str) -> bool:
+    """True when the turn has no topic of its own and so inherits the last one.
+
+    A message with no content words cannot be answered in isolation; whatever it
+    means is in what came before. A message that is *only* a continuation word
+    ("continue", "explain", "lanjutkan") is the same case, and has to be caught
+    by name because those words look like content to the tokenizer.
+
+    Both tests err toward keeping history, which is the safe direction: the
+    expensive mistake is depriving a follow-up of the turn it depends on.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    if not content_words(stripped):
+        return True
+    # A short message made of nothing but continuation words.
+    words = [w for w in _WORD.findall(stripped.lower()) if len(w) > 1]
+    if words and all(w in _FOLLOWUP_WORDS for w in words):
+        return True
+    return stripped.lower() in _FOLLOWUP_WORDS
+
+# The assistant's own last turn can be why the user's says almost nothing: it
+# is blocked on an approval, it asked a question, or it offered to do
+# something. In those cases part of the meaning lives in the window rather than
+# in the new message, so no property of the message alone can find it.
+#
+# The two are not equal, and the distinction is the reported bug: the prior
+# turn there ended by OFFERING ("Want me to go ahead and read ...?") while the
+# user asked about admin management at a cosine of 0.12. A pending approval
+# genuinely gates the next turn; an offer does not.
+_AWAITING = re.compile(
+    r"\b(needs your approval|waiting on your approval|waiting for your "
+    r"approval|pending approval|awaiting (?:your )?approval|"
+    r"approve it in the dashboard|perlu persetujuan|setujui|izin)\b", re.I)
+# "Did it end by asking something?" -- deliberately cheap, and only ever a
+# tie-breaker, because a long reply can end in a question while the user moves
+# to a different subject.
+_ASKED = re.compile(r"(\?\s*$|\?\s*[\"']?\s*$)", re.M)
+
+
+def _prior_turn(window: list[dict]) -> str:
+    """The assistant's most recent message in the window, or ''."""
+    for m in reversed(window or []):
+        if (m.get("role") or "") == "assistant":
+            content = m.get("content")
+            return content if isinstance(content, str) else ""
+    return ""
+
+
+async def continues_topic(message: str, window: list[dict]) -> bool:
+    """Should this turn keep the raw conversation window as context?
+
+    Deliberately one-sided: every test here can only *keep* history, and only a
+    turn that carries its own subject, shares nothing with the window, and is
+    not answering the assistant's last turn is treated as a new topic. The
+    expensive mistake is the other direction -- an ACL'22 error analysis puts
+    coreference at 44% of the damage done by changing history.
+
+    The semantic half may only *confirm* a continuation, never manufacture one:
+    the default embedder is English-centric and scores Indonesian and code-mixed
+    turns at 0.23-0.33, so a low cosine is noise here, not a signal.
+    """
+    if is_bare_followup(message):
+        return True
+    recent = " ".join(str(m.get("content") or "") for m in (window or [])[-4:])
+    if not recent.strip():
+        return True
+    if lexical(message, recent) >= LEXICAL_MIN:
+        return True
+    prior = _prior_turn(window)
+    # Blocked on an approval: whatever comes next is about that, and the user
+    # cannot move on until it clears. This one overrides.
+    if prior and _AWAITING.search(prior):
+        return True
+    score = await semantic(message, recent)
+    # The assistant asked something. That is real but much weaker than the two
+    # signals above: a long reply can end in a question while the user answers
+    # something else entirely. The reported bug is exactly that — the prior turn
+    # asked about `skill_read` and the user asked about admin management, at a
+    # cosine of 0.12. So this only decides when the two texts are otherwise
+    # close; a near-zero cosine beats it.
+    if prior and _ASKED.search(prior) and score >= SEMANTIC_MIN:
+        return True
+    # No shared words and it has its own content: a new topic. The bar is high
+    # because the default embedder mis-scores Indonesian and code-mixed turns
+    # at 0.23-0.33, so an unremarkable cosine must not pull a new question back
+    # into the old subject.
+    return score >= SEMANTIC_MIN * 1.5
+
 
 # -- gated blocks --------------------------------------------------------------
 # Each mirrors the corresponding build_*_context() but drops the unrelated

@@ -134,6 +134,43 @@ class ChatHistory:
             self._save()
         return previous
 
+    def replace_context(self, messages: list[dict],
+                        conversation_id: str | None = None) -> int:
+        """Rewrite a conversation's message list. Returns the new length.
+
+        The only operation here that can REMOVE turns. Everything else in this
+        class appends, which is why compaction could summarize forever without
+        the prompt getting smaller: the rolling summary was added while the raw
+        turns it summarized stayed in the list, so a long conversation grew
+        both ways at once.
+
+        Callers pass the message list they want stored, and are responsible for
+        what it contains. This method does not decide what is safe to drop — it
+        only makes the rewrite possible. Refuses a non-list so a bad call cannot
+        silently empty a conversation.
+
+        The conversation is NOT re-created when it is missing: rewriting a
+        conversation that does not exist is a caller bug, and creating one would
+        hide it behind a plausible-looking empty result.
+        """
+        self._load()
+        if not isinstance(messages, list):
+            raise TypeError(
+                f"replace_context needs a list of messages, got {type(messages).__name__}")
+        conv_id = conversation_id or self._data.get("current_conversation")
+        conv = self._data["conversations"].get(conv_id) if conv_id else None
+        if not conv:
+            log.warning("replace_context: no conversation %r to rewrite", conv_id)
+            return 0
+
+        # Copied, not aliased: the caller's list is often the one it read from
+        # here, and storing that reference would let a later `append` on either
+        # side mutate the other.
+        conv["messages"] = [dict(m) for m in messages]
+        conv["updated"] = time.time()
+        self._save()
+        return len(conv["messages"])
+
     def clear(self, conversation_id: str | None = None):
         """Clear a conversation or all conversations."""
         self._load()

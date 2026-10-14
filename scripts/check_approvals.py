@@ -19,6 +19,7 @@ to put back what it found.
 
 import json
 import os
+import re
 import sys
 
 ROOT = os.environ.get("ADDLED_ROOT") or os.path.dirname(
@@ -499,8 +500,13 @@ def run():
         # guard that is defined and never consulted.
         _ws_src = open(os.path.join(ROOT, "backend", "ws_server.py"),
                        encoding="utf-8", errors="replace").read()
+        # Matched on the call, not on the concatenation it used to be: the
+        # prompt is now built by PromptBuild, where `add(..., newline=False)`
+        # appends the note byte-for-byte as the old `+` did. What matters is
+        # that the note reaches the prompt, not the syntax that carries it.
         check("the approval state is wired into the turn's prompt",
-              "sys_prompt = sys_prompt + _approval_state_note(params)" in _ws_src,
+              re.search(r"sys_prompt\.add\(\"approval_state\", "
+                        r"_approval_state_note\(params\)", _ws_src) is not None,
               "the note is built but never added to the prompt - it would "
               "change nothing the model sees")
 

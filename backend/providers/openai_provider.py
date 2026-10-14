@@ -303,17 +303,32 @@ class OpenAIProvider(BaseProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        tools: list[dict] | None = None,
     ) -> AsyncIterator[str]:
         model = model or self._config.get("default_model", "gpt-4o")
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        # The tool catalogue rides the stream when the caller has one. Without
+        # this the model is asked, on every streamed round, to answer a
+        # tool-shaped question while being shown no tools at all - so it either
+        # refuses ("I don't have a delete_file tool"), answers from parametric
+        # memory, or narrates a completion that never happened. Measured live:
+        # `deepseek-v4.1-flash` via 9router called the tool 24/24 on the batch
+        # path and produced text-only replies on the streamed one. Absent key,
+        # not `null`: a provider that does not understand `tools` must keep the
+        # request byte-for-byte what it was.
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         try:
             async with self._get_client() as client:
-                async with client.stream("POST", "/chat/completions", json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "stream": True,
-                }) as resp:
+                async with client.stream("POST", "/chat/completions",
+                                         json=payload) as resp:
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
                         if line.startswith("data: "):

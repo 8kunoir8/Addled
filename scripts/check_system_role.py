@@ -20,6 +20,7 @@ Run from the project root:
 
 import os
 import sys
+import re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -329,8 +330,11 @@ print("\nWiring — the fallback is actually used")
 
 _tl = open(os.path.join(ROOT, "backend", "skills", "tool_loop.py"),
            encoding="utf-8").read()
+# The call is matched by its arguments, not its layout: it gained a
+# `stable_prefix=` argument and now spans two lines, and a check that pins the
+# exact whitespace would fail on a reformat rather than on a real regression.
 check("the tool loop applies the fold",
-      "system_role.prepare(provider, full_messages)" in _tl,
+      re.search(r"system_role\.prepare\(provider, full_messages", _tl) is not None,
       "the module exists but nothing calls it")
 check("the NATIVE path learns from the token count",
       "system_role.record(provider, result.tokens_in, messages)" in _tl,

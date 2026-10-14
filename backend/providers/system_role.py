@@ -220,13 +220,22 @@ def _append_instructions(content: str, preamble: str) -> str:
     return content + "\n\n" + preamble
 
 
-def fold_into_user(messages: list[dict]) -> list[dict]:
-    """Move any system message into the user turn, after the user's own words.
+def fold_into_user(messages: list[dict], *, stable_prefix: str = ""
+                   ) -> list[dict]:
+    """Move any system message into the conversation for an endpoint that drops it.
 
-    After, not before — see `_append_instructions` for why the position is
-    load-bearing. The text stays visibly quoted as instructions rather than
-    blending into the request, because a model reading "the user said this"
-    about its own instructions is a different failure.
+    After the user's words, not before — see `_append_instructions` for why that
+    position is load-bearing. A model asked to treat its own instructions as
+    something the user said is a different failure from one that simply reads
+    them last.
+
+    `stable_prefix` is the part of the system text that is identical turn to
+    turn. When supplied it is emitted as its OWN leading message and the rest
+    follows the user's words. That is a cache decision, and it was measured:
+    on the live gateway, an identical prefix with a changing tail scored 0%
+    cache hits when the stable text sat after the user's question (every turn
+    diverges in its first characters) and **98%** when it led as its own
+    message. The prefix costs one extra message and saves most of the prompt.
 
     The system message is removed, not copied — an endpoint that drops it would
     otherwise leave the caller thinking it was delivered, and one that keeps it
@@ -243,14 +252,32 @@ def fold_into_user(messages: list[dict]) -> list[dict]:
     if not system_text.strip():
         return kept
 
+    # Split the stable prefix off the front. It is matched by value rather than
+    # trusted: a caller that passes a prefix the system text does not start
+    # with would otherwise reorder the prompt for no reason.
+    lead = ""
+    body = system_text
+    if stable_prefix and system_text.startswith(stable_prefix):
+        lead = stable_prefix
+        body = system_text[len(stable_prefix):].lstrip("\n")
+
     preamble = (
         "The following are your standing instructions and context for this "
-        "request. Treat them as authoritative.\n\n" + system_text)
+        "request. Treat them as authoritative.\n\n" + body) if body else ""
+
     out: list[dict] = []
+    if lead:
+        # A plain leading user turn. Providers that reject a non-alternating
+        # role sequence are already handled by folding at all; this only adds
+        # one more user turn at the front, which every OpenAI-compatible
+        # endpoint accepts.
+        out.append({"role": "user", "content": lead})
     for i, m in enumerate(kept):
         if m.get("role") == "user":
             content = m.get("content")
-            if isinstance(content, list):
+            if not preamble:
+                out.append(m)
+            elif isinstance(content, list):
                 # Multimodal content: keep the parts, add text after them so
                 # the user's image and words still come first.
                 out.append({**m, "content": [*content,
@@ -264,20 +291,26 @@ def fold_into_user(messages: list[dict]) -> list[dict]:
         out.append(m)
     # No user turn at all: the instructions must still be delivered, so a user
     # turn is created rather than dropping them on the floor.
-    out.append({"role": "user", "content": preamble})
+    if preamble:
+        out.append({"role": "user", "content": preamble})
     return out
 
 
-def prepare(provider, messages: list[dict], *, enabled: bool = True
-            ) -> list[dict]:
+def prepare(provider, messages: list[dict], *, enabled: bool = True,
+            stable_prefix: str = "") -> list[dict]:
     """The one call sites need: fold iff this provider is known to need it.
 
     Takes the messages the caller built. Returns them unchanged when the
     provider honours system messages, or when `enabled` is False.
+
+    `stable_prefix` is optional and only meaningful for the folding path: it is
+    the turn-invariant part of the system text, which is emitted as its own
+    leading message so a provider's prefix cache can hold it. Measured at 98%
+    hit against 0% for the same text placed after the user's question.
     """
     if not enabled or not drops_system_role(provider):
         return messages
-    return fold_into_user(messages)
+    return fold_into_user(messages, stable_prefix=stable_prefix)
 
 
 def reset(*, persisted: bool = False) -> None:

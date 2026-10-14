@@ -609,6 +609,45 @@ def main() -> int:
           "a placeholder holding streamed text was not matched, so the reply "
           "would be appended as a second bubble")
 
+    # -----------------------------------------------------------------------
+    # The stream must be given the SAME tool catalogue the batch call gets.
+    #
+    # This is the root cause of the fabricated-completion incident, measured
+    # live 2026-10-14: `chat_stream` built its payload without a `tools` key
+    # and its signature had no `tools` parameter, so every streamed round - and
+    # the live app streams EVERY round, because `ws_server` always passes
+    # `on_delta` - asked the model a tool-shaped question while showing it no
+    # tools. Asked to delete a file, the model replied "I don't have a
+    # `delete_file` tool available. The tools I have for filesystem work are
+    # `run_command`, `read_file`, `write_file`..." - which was TRUE, and is why
+    # the turn stopped with nothing done.
+    #
+    # The assertion is on the SIGNATURE and on the call, not on behaviour: a
+    # behavioural test needs a live model to answer differently with and
+    # without the catalogue, which is not reproducible in a check. What is
+    # reproducible is that the catalogue is passed at all.
+    # -----------------------------------------------------------------------
+    import backend.providers.openai_provider as _op
+    _sig = inspect.signature(_op.OpenAIProvider.chat_stream)
+    check("chat_stream accepts a tools parameter",
+          "tools" in _sig.parameters,
+          "without it the streaming path cannot pass the catalogue at all")
+    check("chat_stream's tools parameter is optional",
+          _sig.parameters["tools"].default is None,
+          "a required keyword would break every existing provider")
+    check("the base provider contract declares tools",
+          "tools" in inspect.signature(
+              __import__("backend.providers.base", fromlist=["x"])
+              .BaseProvider.chat_stream).parameters,
+          "the interface must match, or a provider subclass drifts")
+    check("the streaming round passes the catalogue",
+          "tools=skill_registry.to_openai_tools(only)" in
+          inspect.getsource(tool_loop._stream_round),
+          "the round has the set; it must be handed to the stream")
+    check("the streamed call forwards the tools it was given",
+          "tools=tools" in inspect.getsource(tool_loop._streamed_answer),
+          "the helper received the catalogue and dropped it")
+
     print()
     if fails:
         print(f"FAILED ({len(fails)}): " + "; ".join(fails))

@@ -1547,21 +1547,29 @@ async def _run_chat_pipeline_inner(
             "payload_chars": len(message),
         })
         agent_name = config.agent_name
+        # The prompt is assembled block by block so each block's cost is known
+        # and the cacheable prefix can be identified. `str(sys_prompt)` is what
+        # every caller below already expected; the wrapper only adds the
+        # accounting. See backend/providers/budget.PromptBuild.
+        from backend.providers.budget import PromptBuild
         if persona:
             # A caller with its own identity: a swarm agent's role, or the code
             # editor's output contract.
-            sys_prompt = persona
+            base = persona
         else:
-            sys_prompt = config.get("chat", "system_prompt", default="") or ""
-            sys_prompt = sys_prompt.replace("{agent_name}", agent_name)
+            base = config.get("chat", "system_prompt", default="") or ""
+            base = base.replace("{agent_name}", agent_name)
             if agent_name != "Addled":
                 # also fix persisted prompts that hardcode the old name
-                sys_prompt = sys_prompt.replace("Addled", agent_name)
-            if not sys_prompt.strip():
-                sys_prompt = (f"You are {agent_name}, a helpful AI desktop "
-                              "companion with access to system tools.")
+                base = base.replace("Addled", agent_name)
+            if not base.strip():
+                base = (f"You are {agent_name}, a helpful AI desktop "
+                        "companion with access to system tools.")
+        # Everything to here is identical turn to turn and identical across
+        # sessions: it is the part a provider's prefix cache can hold.
+        sys_prompt = PromptBuild(base, "persona")
         # What this turn can actually do, appended on BOTH paths. It used to sit
-        # inside the `else`, so assigning `sys_prompt = persona` above threw it
+        # inside the `else`, so assigning the persona above threw it
         # away — and every persona caller (swarm agents, the code planner,
         # search) then held a tool schema with no prose that the tools exist,
         # answered "those tools aren't accessible here", and refused work it
@@ -1571,8 +1579,10 @@ async def _run_chat_pipeline_inner(
         try:
             from backend.tool_brief import capabilities_block
             caps = capabilities_block(tools)
-            if caps:
-                sys_prompt = sys_prompt + "\n\n" + caps
+            # Stable: generated from the tool *set*, not from the turn, so it
+            # varies per caller identity rather than per message. A narrowed set
+            # describes itself accurately rather than promising everything.
+            sys_prompt.add("capabilities", caps, stable=True)
         except Exception as e:  # noqa: BLE001
             log.debug("could not build the capabilities block: %s", e)
         # The character's face, offered to the model as vocabulary. This is how
@@ -1589,8 +1599,8 @@ async def _run_chat_pipeline_inner(
                 from backend.character.trigger import emotion_menu
                 menu = emotion_menu()
                 if menu:
-                    sys_prompt = sys_prompt + (
-                        "\n\nHow you feel is shown on the character's face. "
+                    sys_prompt.add("emotion_menu", (
+                        "How you feel is shown on the character's face. "
                         "Begin your reply with exactly one tag from this list, "
                         "then your message:\n"
                         + menu +
@@ -1598,7 +1608,7 @@ async def _run_chat_pipeline_inner(
                         "[neutral] for ordinary, functional replies — most "
                         "turns are neutral, and a face that reacts to "
                         "everything reads as insincere."
-                    )
+                    ), stable=True)
             except Exception as e:  # noqa: BLE001
                 log.debug("could not build the emotion menu: %s", e)
         # Context window sizing: local models get a lean 6-message (3-turn) window
@@ -1623,27 +1633,53 @@ async def _run_chat_pipeline_inner(
             if prev_user_text:
                 recall_query = f"{prev_user_text}\n{message}"
 
+        from backend.memory import relevance
+
+        # The conversation window is the last thing in this prompt that was not
+        # relevance-gated, and it is the largest: a short question about a new
+        # subject used to go out carrying the whole previous subject verbatim,
+        # and the model answered that instead. A turn with no content words of
+        # its own ("continue", "lanjutkan", "kenapa?") depends on the previous
+        # one and keeps the window; a turn that has its own subject and shares
+        # nothing with the window is a new topic and does not inherit it.
+        #
+        # History is withheld from *this request only* — nothing is deleted, so
+        # recall above and the summaries can still reach an earlier topic the
+        # user comes back to. See backend/memory/relevance.py.
+        if not await relevance.continues_topic(message, context):
+            # Keep the most recent exchange rather than nothing: it is what the
+            # model just said, and a reply like "ga perlu bro, cukup" answers
+            # it. CHIQ's topic-switch rule keeps exactly the last turn for the
+            # same reason. The rest is withheld from this request only — it is
+            # not deleted, so recall above and the summaries can still reach an
+            # earlier topic the user comes back to.
+            kept = 1 if context else 0
+            log.info("new topic: carrying the last %d of %d window message(s) "
+                     "for this request; earlier history kept and reachable "
+                     "through recall", kept, len(context))
+            context = context[-1:] if context else []
+
         # Core memory: durable facts the agent saved about the user. Only the
         # ones that relate to what was just said — an unrelated fact is not
         # context, it is something the model can end up answering instead of the
         # question (see backend/memory/relevance.py).
-        from backend.memory import relevance
+        # From here on every block is per-turn and gated by relevance, so it is
+        # volatile: it changes between turns by design and cannot be part of a
+        # cached prefix. Each is recorded even when empty, because "this block
+        # was gated out this turn" is itself the diagnostic.
         facts_ctx = await relevance.facts_block(message)
-        if facts_ctx:
-            sys_prompt = sys_prompt + "\n\n" + facts_ctx
+        sys_prompt.add("facts", facts_ctx)
 
         # User model: learned profile (preferences, rituals, hours, tone)
         from backend.memory.user_profile import build_profile_context
         profile_ctx = build_profile_context()
-        if profile_ctx:
-            sys_prompt = sys_prompt + "\n\n" + profile_ctx
+        sys_prompt.add("user_profile", profile_ctx)
 
         # Episodic timeline: recent day summaries (persistent identity), gated
         # like the facts — "yesterday we..." is worth its tokens only when the
         # day is about this.
         timeline_ctx = await relevance.timeline_block(message)
-        if timeline_ctx:
-            sys_prompt = sys_prompt + "\n\n" + timeline_ctx
+        sys_prompt.add("timeline", timeline_ctx)
 
         # Wiki: the maintained factual layer. Pages are already distilled from
         # the user's own sources, so they outrank guesswork.
@@ -1652,10 +1688,9 @@ async def _run_chat_pipeline_inner(
             try:
                 from backend.wiki.query import build_wiki_context
                 wiki_ctx = build_wiki_context(message)
-                if wiki_ctx:
-                    sys_prompt = sys_prompt + "\n\n" + wiki_ctx
             except Exception as e:
                 log.debug("wiki context failed: %s", e)
+        sys_prompt.add("wiki", wiki_ctx)
 
         # Procedures: how this kind of task was done successfully before. Only
         # offered when it is genuinely close to the task in hand — a recipe for
@@ -1664,33 +1699,30 @@ async def _run_chat_pipeline_inner(
         try:
             from backend.sop.match import build_sop_context
             sop_ctx = build_sop_context(message)
-            if sop_ctx:
-                sys_prompt = sys_prompt + "\n\n" + sop_ctx
         except Exception as e:
             log.debug("procedure context failed: %s", e)
+        sys_prompt.add("procedures", sop_ctx)
 
         # Session continuity: recent session summaries (long-run memory), gated
         # the same way
         session_ctx = await relevance.summaries_block(message)
-        if session_ctx:
-            sys_prompt = sys_prompt + "\n\n" + session_ctx
+        sys_prompt.add("sessions", session_ctx)
 
         # Meeting notes: what was decided in meetings the user recorded.
         # Gated like the session summaries — a meeting is long, specific and
         # other people's words, so it earns its tokens only when the turn is
         # about it.
+        meeting_ctx = None
         try:
             meeting_ctx = await relevance.meetings_block(message)
-            if meeting_ctx:
-                sys_prompt = sys_prompt + "\n\n" + meeting_ctx
         except Exception as e:
             log.debug("meeting context failed: %s", e)
+        sys_prompt.add("meetings", meeting_ctx)
 
         # Rolling conversation continuity (long chats — compaction summaries)
         from backend.memory.compaction import build_rolling_context
         rolling_ctx = build_rolling_context()
-        if rolling_ctx:
-            sys_prompt = sys_prompt + "\n\n" + rolling_ctx
+        sys_prompt.add("rolling_summary", rolling_ctx)
 
         # Long-term recall: inject relevant past conversation turns
         # (semantic + hybrid when enabled; legacy hash path otherwise)
@@ -1700,8 +1732,7 @@ async def _run_chat_pipeline_inner(
             memory_ctx = await build_memory_context_hybrid(recall_query)
         else:
             memory_ctx = build_memory_context(recall_query)
-        if memory_ctx:
-            sys_prompt = sys_prompt + "\n\n" + memory_ctx
+        sys_prompt.add("long_term_recall", memory_ctx)
 
         # Memory anchors for the chat UI: which memories were injected
         try:
@@ -1749,8 +1780,10 @@ async def _run_chat_pipeline_inner(
                     lines = "\n".join(
                         f"- {t['subject']} {t['relation']} {t['object']}"
                         for t in triples)
-                    sys_prompt += ("\n\n[Saved facts] Things on record about the user:\n" +
-                                   lines + "\nUse them when relevant.")
+                    sys_prompt.add("saved_facts",
+                                   "[Saved facts] Things on record about the user:\n"
+                                   + lines + "\nUse them when relevant.",
+                                   newline=False)
             except Exception as e:
                 log.debug("triple lookup failed: %s", e)
 
@@ -1783,14 +1816,17 @@ async def _run_chat_pipeline_inner(
                     if len(related_lines) >= cap:
                         break
                 if related_lines:
-                    sys_prompt += ("\n\n[Related] Connected in the user's memory graph:\n" +
-                                   "\n".join(related_lines) +
-                                   "\nMention these only when they help the answer.")
+                    sys_prompt.add("related",
+                                   "[Related] Connected in the user's memory graph:\n"
+                                   + "\n".join(related_lines) +
+                                   "\nMention these only when they help the answer.",
+                                   newline=False)
         except Exception as e:
             log.debug("related lookup failed: %s", e)
 
         # Memory-grounded conversation: volunteer relevant past organically
-        sys_prompt += ("\n\nIf a saved fact, a previous conversation, or a "
+        sys_prompt.add("grounding_directive",
+                       "If a saved fact, a previous conversation, or a "
                        "recent day's summary is clearly relevant to this "
                        "conversation, mention it naturally (e.g. 'last time "
                        "we...', 'you mentioned before that...'). Do not force "
@@ -1800,7 +1836,8 @@ async def _run_chat_pipeline_inner(
         # is `reply_directive` below, which lands *after* the tool catalogue in
         # the turn being answered. Kept because a cloud model honours it and it
         # costs a line.
-        sys_prompt += ("\n\nAlways reply in the same language the user "
+        sys_prompt.add("language_directive",
+                       "Always reply in the same language the user "
                        "writes or speaks in.")
 
         # Where a file goes. Nothing used to say, so asked for a file "in the
@@ -1812,7 +1849,8 @@ async def _run_chat_pipeline_inner(
             from backend.workspace import root as _workspace_root
             folder = _workspace_root()
             if folder:
-                sys_prompt += (f"\n\nFiles: the workspace root is {folder}. "
+                sys_prompt.add("workspace_hint",
+                               f"Files: the workspace root is {folder}. "
                                "Give file paths relative to it — "
                                "'notes.txt', not 'workspace/notes.txt'.")
         except Exception as e:  # noqa: BLE001
@@ -1999,7 +2037,7 @@ async def _run_chat_pipeline_inner(
             from backend.guidelines import inject as guidelines
             gblock = guidelines.system_block(code_task=code_hint)
             if gblock:
-                sys_prompt = f"{sys_prompt}\n\n{gblock}"
+                sys_prompt.add("guidelines", gblock)
                 log.debug("Injected %d chars of working guidelines",
                           len(gblock))
         except Exception as e:
@@ -2091,7 +2129,8 @@ async def _run_chat_pipeline_inner(
             except Exception as e:  # noqa: BLE001
                 log.debug("chat.delta broadcast failed: %s", e)
 
-        sys_prompt = sys_prompt + _approval_state_note(params)
+        sys_prompt.add("approval_state", _approval_state_note(params),
+                       newline=False)
 
 
         # A caller with no UI (a check, a bot, the Code page's own planner) gets
@@ -2109,11 +2148,28 @@ async def _run_chat_pipeline_inner(
 
         _on_activity = _emit_activity if params.get("stream") else None
 
+        # The prompt is complete. Record what it cost before it leaves: this is
+        # the only place the size of each block is known, and the wiki block
+        # being the largest single contributor was previously invisible.
+        try:
+            _summary = sys_prompt.summary()
+            log.info("prompt: %d chars (~%d tokens), %d blocks; prefix %d "
+                     "chars (%.0f%% cacheable)\n%s",
+                     _summary["chars"], _summary["tokens"],
+                     _summary["blocks"], _summary["prefix_chars"],
+                     100.0 * _summary["prefix_chars"] / max(1, _summary["chars"]),
+                     sys_prompt.report(threshold_chars=200))
+        except Exception as e:  # noqa: BLE001
+            log.debug("prompt accounting failed: %s", e)
+
         # Use the provider-agnostic tool-use loop
         result = await chat_with_tools(
             provider=provider,
             messages=user_messages,
-            system_prompt=sys_prompt,
+            system_prompt=str(sys_prompt),
+            # The turn-invariant head, so a folding provider can put it in its
+            # own leading message and actually hit its prefix cache.
+            stable_prefix=sys_prompt.prefix(),
             max_tool_rounds=(max_tool_rounds
                              or params.get("maxToolRounds", 5)),
             model=route_model,

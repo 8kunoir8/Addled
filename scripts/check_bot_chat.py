@@ -79,6 +79,19 @@ class _FakeHistory:
     def get_context(self, max_messages: int = 20) -> list[dict]:
         return self._messages[:max_messages]
 
+    def replace_context(self, messages: list[dict],
+                        conversation_id: str | None = None) -> int:
+        """The rewrite `maybe_compact` now performs.
+
+        Added when compaction stopped being append-only: without it the fake
+        raised AttributeError, `maybe_compact` swallowed it and returned False,
+        and these checks failed for a reason that had nothing to do with what
+        they are testing. Mirrors the real store — replace, return the new
+        length — so `stored == len(rewritten)` holds as it does in production.
+        """
+        self._messages = [dict(m) for m in messages]
+        return len(self._messages)
+
 
 class _FakeConfig:
     def __init__(self, threshold: int) -> None:

@@ -59,3 +59,14 @@ backend/voice/models/
 # an empty skill cache, but `git status` otherwise reads them as new work.
 .check_tmp_*/
 .livetest/
+
+# ── scratch artifacts from live-test debugging ───────────────────────────────
+# Console dumps and one-off driver scripts written while driving the running
+# app by hand. They are evidence while a bug is open and noise afterwards, and
+# none of them is imported by anything in the package. Kept on disk, not in git.
+bl.txt
+bp.txt
+chatdump.txt
+stop.txt
+live_behavior.py
+live_e2e.py
