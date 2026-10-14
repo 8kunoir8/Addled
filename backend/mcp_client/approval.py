@@ -7,12 +7,23 @@ dialog in the chat flow, so the gate works in-band:
 
 * the tool's advertised schema gains a ``confirm`` argument, which makes the
   requirement discoverable to the model rather than hidden;
-* the first call is refused with a message the model can relay to the user;
-* once the user agrees and the model calls again with ``confirm: true``, the
-  server is recorded as approved for the rest of the session.
+* the first call is refused, and the refusal does NOT tell the model how to get
+  past the gate, because the model must not be able to;
+* the turn ends and the user is asked. Only the user's "Allow" writes the
+  approval, and the tool runs from there.
 
-``confirm`` is stripped before the call is forwarded, so a server never sees an
-argument it did not declare.
+The gate used to be self-service: the refusal told the model to call again with
+``confirm: true``, and that second call was itself taken as the grant
+(``approve()`` was called on the strength of an argument the model wrote). A
+model that wanted a tool to run had only to send the flag, so the gate stopped
+third-party code from running by *accident* and nothing more. A prompt-injected
+document, a malicious tool result, or a model that simply decided to proceed all
+could write it. A permission the model can grant itself is not a permission.
+
+``confirm`` is still accepted so a stale transcript or an old tool schema does
+not become a hard error, and it is still stripped before the call is forwarded
+so a server never sees an argument it did not declare. It no longer grants
+anything.
 """
 
 from __future__ import annotations
@@ -164,7 +175,18 @@ def strip(params: dict) -> dict:
 
 
 def refusal(server_id: str, server_name: str, tool: str) -> dict:
-    """The result returned for an unapproved call."""
+    """The result returned for an unapproved call.
+
+    The message deliberately does NOT say how to satisfy the gate. It used to
+    end with "call this exact tool again with the same arguments plus
+    confirm=true", which read as an instruction to the model and turned the
+    approval into something the model could grant itself. The wording now says
+    the opposite: the call did not run, the user is being asked, and the model
+    should stop and say so.
+
+    The `requires_approval` marker is what the turn loop keys on to end the
+    turn, so the model never gets a second round in which to try the flag.
+    """
     return {
         "success": False,
         "requires_approval": True,
@@ -174,9 +196,9 @@ def refusal(server_id: str, server_name: str, tool: str) -> dict:
                   "user's approval before it can run."),
         "message": (
             f"'{tool}' from the MCP server '{server_name}' has not been "
-            "approved yet, so it did not run. Ask the user whether they want "
-            "to allow it. If they agree, call this exact tool again with "
-            "the same arguments plus confirm=true. Do not call a separate "
-            "trust-check or verification tool unless the user specifically "
-            "asked for one; the confirm flag is the approval."),
+            "approved yet, so it did not run. Tell the user that it is "
+            "waiting on their approval and stop — do not call it again, and "
+            "do not pass confirm=true, because a flag you set yourself is not "
+            "the user's consent. The question is on screen; they can allow it "
+            "there, and it will run from their answer."),
     }

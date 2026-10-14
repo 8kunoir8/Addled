@@ -2041,27 +2041,41 @@ async def chat_with_tools(
                 _tool_result_message(tc["name"], exec_result, call_id))
         all_tool_results.extend(tool_results)
 
-        # An MCP approval gate is built for one retry: the model asks, the user
-        # agrees, and the same tool is called again with confirm=true. This
-        # nudges exactly that, and only for MCP tools — `confirm` is an MCP
-        # argument, so sending a shell command round again would just repeat a
-        # call that cannot succeed. A gated command needs no nudge at all: the
-        # turn ended when it asked, the request is queued, and approving it runs
-        # the action and pushes the outcome into the conversation. Telling the
-        # model to wait would only make it narrate a wait nobody is holding.
-        if (rounds < max_tool_rounds
-                and any(str(tr.get("tool") or "").startswith("mcp__")
-                        and (tr.get("result") or {}).get("requires_approval")
-                        for tr in tool_results)):
-            full_messages.append({
-                "role": "user",
-                "content": ("If the user has already agreed to run the refused "
-                            "MCP tool, call that same tool again with the same "
-                            "arguments plus confirm=true. Do not call a separate "
-                            "trust-check or verification tool unless the user "
-                            "asked for one."),
-            })
-            continue
+        # An MCP approval refusal is the end of the turn.
+        #
+        # It used to be a step in one: the loop appended a note telling the
+        # model to call the same tool again with confirm=true, and the second
+        # call was taken as the approval. That made the gate self-service —
+        # the model could satisfy it by writing an argument — so a
+        # prompt-injected page or a model that simply decided to proceed could
+        # run third-party code with no user involvement. The note is gone. The
+        # refusal now ends the turn and the user is asked, so the prompt
+        # reaches the card and the answer arrives as the next turn.
+        #
+        # Checked BEFORE the `requires_answer` branch below, because a refusal
+        # carries `requires_approval` rather than `requires_answer` and would
+        # otherwise fall through to the generic failure path, which hands the
+        # model a bare error to narrate.
+        refused = [tr for tr in tool_results
+                   if (tr.get("result") or {}).get("requires_approval")
+                   and not (tr.get("result") or {}).get("denied")]
+        if refused:
+            first = (refused[0].get("result") or {})
+            tool = str(first.get("tool") or "the tool")
+            server = str(first.get("server") or "the MCP server")
+            return {
+                "response": (
+                    f"I stopped before running '{tool}' on {server} — it "
+                    f"needs your approval, and I can't approve it myself. "
+                    f"The request is waiting for you; allow it and it will "
+                    f"run."),
+                "tokens": 0,
+                "tool_rounds": rounds,
+                "tool_results": tool_results,
+                "awaiting_answer": True,
+                "requires_approval": True,
+                "question_id": first.get("approval_id"),
+            }
 
         # A question is the end of the turn, not a step in it.
         #

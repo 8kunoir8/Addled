@@ -167,6 +167,25 @@ class ActionExecutor:
         if request is None:
             return ActionResult(False, error=f"No pending approval: {approval_id}")
         self._forget_origin(approval_id)
+        # An MCP tool is approved by name, and its own gate reads a different
+        # store from the executor's. Clearing `self._gate` below lets the
+        # skill run, but the MCP handler then checks `approval.is_approved`
+        # and refuses — so the user pressed Allow, the executor reported a
+        # run, and the tool never ran. (`execute()` even reaches the skill
+        # through its no-handler fallback and calls the handler directly,
+        # which is exactly the path that then refuses.) Recording the grant
+        # HERE is what makes it the user's: this method is only ever reached
+        # from an affirmative answer to a queued question.
+        if request.action_type.startswith("mcp__"):
+            try:
+                from backend.mcp_client.manager import mcp_manager
+                from backend.mcp_client import approval as mcp_approval
+                pair = mcp_manager.tool_for_skill(request.action_type)
+                if pair:
+                    mcp_approval.approve(pair[0], pair[1])
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not record the MCP approval for %s: %s",
+                            request.action_type, e)
         # Clearing the gate for this one call is the WHOLE of what approval
         # does. There used to be a `_approved_run` flag passed into the
         # terminal's `allow_dangerous` parameter, which the terminal accepted

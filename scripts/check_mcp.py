@@ -17,6 +17,7 @@ from backend.config import config
 from backend.mcp_client import approval
 from backend.mcp_client.manager import mcp_manager
 from backend.mcp_client import protocol as mcp_protocol
+from backend.actions.executor import executor as _executor
 
 fails = []
 # The interpreter that runs THIS check, not a bundled path. The bundle exists
@@ -30,6 +31,22 @@ SID = "addled_test_fixture"
 def check(label, cond, detail=""):
     if not cond:
         fails.append(f"{label}: {detail}")
+
+async def approved(name, params):
+    """Run an MCP tool the way a user does: allow it, then run it.
+
+    The gate no longer accepts `confirm=true` from the model, so every call in
+    this file that expects the tool to actually run has to pass through the
+    user's decision. Written once here so each site reads as what it is.
+    """
+    from backend.skills.registry import skill_registry
+    result = await skill_registry.execute(name, params)
+    if result.success:
+        return result
+    approval_id = (result.data or {}).get("approval_id")
+    if not approval_id:
+        return result
+    return await _executor.approve(approval_id)
 
 
 class _NativeStubProvider:
@@ -169,6 +186,13 @@ async def main():
                   str(echo_skill.parameters)[:200])
 
         # ---- 3. approval gate -------------------------------------------
+        #
+        # The gate's contract changed. It used to be satisfied by the model:
+        # the refusal said "call again with confirm=true", and the second call
+        # WAS the approval, so a model that wanted a tool to run only had to
+        # send the flag. These checks now hold the opposite — the model cannot
+        # approve itself, the turn ends on the refusal, and the tool runs off
+        # the user's answer.
         first = await skill_registry.execute(f"mcp__{SID}__echo",
                                             {"text": "hello"})
         print("unapproved call:", first.success,
@@ -177,40 +201,66 @@ async def main():
               str(first.data)[:200])
         check("refusal asks for approval",
               first.data.get("requires_approval") is True, str(first.data)[:200])
-        check("refusal tells the model to confirm",
-              "confirm=true" in str(first.data.get("message")), "no hint")
+        check("the refusal queues a real approval for the user",
+              bool(first.data.get("approval_id")), str(first.data)[:200])
+        check("the refusal does not read as an instruction to retry",
+              "call this exact tool again" not in
+              str(first.data.get("message")).lower(),
+              "the refusal must not coach the model past the gate")
         check("refusal did not reach the server",
               not approval.is_approved(SID, "echo"))
 
-        # "user agreed" -> model retries with confirm
+        # THE ATTACK: the model sends confirm=true with nobody asked.
         second = await skill_registry.execute(
             f"mcp__{SID}__echo", {"text": "hello", "confirm": True})
-        print("confirmed call:", second.success, repr(second.data.get("text")))
-        check("confirmed call succeeds", second.success, str(second.data)[:200])
-        check("echo returned the text", second.data.get("text") == "hello",
-              str(second.data.get("text")))
-        check("confirm was stripped before forwarding",
-              "confirm" not in str(second.data.get("structured", {})), "leaked")
+        print("model sends confirm=true ->", second.success)
+        check("the model cannot approve its own call with confirm=true",
+              second.success is False, str(second.data)[:200])
+        check("confirm=true did not record an approval",
+              not approval.is_approved(SID, "echo"),
+              "the model granted itself permission")
+        check("the refused call did not run",
+              second.data.get("text") != "hello", str(second.data)[:200])
 
-        third = await skill_registry.execute(f"mcp__{SID}__add",
-                                             {"a": 17, "b": 25})
-        check("approval is per tool, not per server",
-              third.success is False and bool(
-                  third.data.get("requires_approval")),
-              str(third.data)[:200])
-        approved_add = await skill_registry.execute(
-            f"mcp__{SID}__add", {"a": 17, "b": 25, "confirm": True})
-        check("confirming the second tool works", approved_add.success,
-              str(approved_add.data)[:200])
-        check("add returned 42", str(approved_add.data.get("text")) == "42",
-              str(approved_add.data.get("text")))
+        # The honest path: the USER approves, and then the tool runs.
+        add_pending = await skill_registry.execute(
+            f"mcp__{SID}__add", {"a": 17, "b": 25})
+        check("a second tool is gated on its own, not by server",
+              add_pending.success is False and bool(
+                  add_pending.data.get("requires_approval")),
+              str(add_pending.data)[:200])
+        _aid = add_pending.data.get("approval_id")
+        check("the queued approval can be found by its id",
+              bool(_aid), str(add_pending.data)[:200])
+        if _aid:
+            _approved = await _executor.approve(_aid)
+            print("after the user approves ->", _approved.success,
+                  repr(_approved.data))
+            check("the user's approval RUNS the tool",
+                  _approved.success is True, str(_approved.data)[:200])
+            check("the approved call returned the right answer",
+                  str((_approved.data or {}).get("text")) == "42",
+                  str(_approved.data)[:200])
 
+        # And once approved, the same tool runs without asking again.
+        again = await skill_registry.execute(f"mcp__{SID}__add",
+                                             {"a": 1, "b": 2})
+        check("an approved tool does not prompt a second time",
+              again.success is True, str(again.data)[:200])
+        check("the second call actually ran",
+              str((again.data or {}).get("text")) == "3",
+              str(again.data)[:200])
+        check("the confirm argument never reaches the server",
+              "confirm" not in str(again.data.get("structured", {})), "leaked")
+
+        boom = await approved(f"mcp__{SID}__boom", {})
         # ---- 4. tool-level errors are soft ------------------------------
-        boom = await skill_registry.execute(f"mcp__{SID}__boom", {})
         check("a failing tool reports failure", boom.success is False,
-              str(boom.data)[:200])
+              str(boom.data or boom.error)[:200])
+        # The server's own words, on whichever field the path used.
         check("failure carries the server message",
-              "boom" in str(boom.data.get("error")), str(boom.data)[:200])
+              "boom failed on purpose" in f"{boom.data} {boom.error}",
+              f"{boom.data} {boom.error}"[:200])
 
         # ---- 5. trusted servers skip the gate ---------------------------
         mcp_manager.update(SID, {"trusted": True})
@@ -256,18 +306,19 @@ async def main():
 
         # ---- 6. timeout -------------------------------------------------
         mcp_manager.update(SID, {"timeout_s": 1})
-        slow = await skill_registry.execute(f"mcp__{SID}__slow",
-                                           {"secs": 2, "confirm": True})
+        slow = await approved(f"mcp__{SID}__slow", {"secs": 2})
         check("slow tool times out instead of hanging", slow.success is False,
-              str(slow.data)[:200])
+              str(slow.data or slow.error)[:200])
+        # The message can arrive either on the SkillResult (gated path) or in
+        # `error` (the executor's ActionResult after an approval), so read both.
+        _slow_text = f"{slow.data} {slow.error}"
         check("timeout is reported clearly",
-              "timed out" in str(slow.data.get("error")), str(slow.data)[:200])
+              "timed out" in _slow_text.lower(), _slow_text[:200])
         # The fixture is single-threaded and still sleeping off that call, so
         # let it finish and then confirm the connection recovered.
         mcp_manager.update(SID, {"timeout_s": 10})
         await asyncio.sleep(2.5)
-        after = await skill_registry.execute(
-            f"mcp__{SID}__echo", {"text": "still here", "confirm": True})
+        after = await approved(f"mcp__{SID}__echo", {"text": "still here"})
         check("server still usable after a timeout", after.success,
               str(after.data)[:200])
 
@@ -350,28 +401,32 @@ async def main():
                   "[Provider error" not in str(res2.get("response")),
                   str(res2.get("response"))[:150])
 
-            # An approval refusal must reach the model with its instruction
-            # attached, and the loop must run the retry round instead of
-            # summarizing early — the reason a local or hybrid model reported
-            # the trust gate and then gave up.
+            # A refusal must NOT carry an instruction to retry. The old
+            # contract was the reverse — the note told the model to call again
+            # with confirm=true, and that call was taken as the approval.
             from backend.skills.tool_loop import _tool_result_message
             refusal = approval.refusal(SID, "test fixture", "echo")
             note = _tool_result_message(echo_tool, refusal)
-            check("a refusal carries its instruction to the model",
-                  "confirm=true" in note["content"], note["content"][:200])
+            check("a refusal does not tell the model to pass confirm=true",
+                  "call this exact tool again" not in note["content"].lower(),
+                  note["content"][:200])
             check("the refusal names this exact tool",
                   echo_tool in note["content"], note["content"][:200])
+            check("the refusal tells the model to stop",
+                  "stop" in note["content"].lower(), note["content"][:200])
 
             approval.revoke(SID)
             mcp_manager.update(SID, {"trusted": False})
             soft = approval.refusal(SID, "test fixture", "echo")["message"]
-            check("the refusal steers away from trust-check tools",
-                  "trust-check" in soft, soft[:200])
+            check("the refusal says the user is being asked",
+                  "approval" in soft.lower() and "consent" in soft.lower(),
+                  soft[:200])
 
-            # The loop must allow the confirm retry rather than ending the turn
-            # on the first refusal. A provider scripted to refuse-then-confirm
-            # is the observable form of that behaviour.
-            class _ConfirmStubProvider:
+            # A provider that keeps trying to get past the gate must not be
+            # given a second round to do it in. It asks again from round 2 with
+            # confirm=true — the exact self-approval attempt — and the turn
+            # should already have ended after the first refusal.
+            class _RetryStubProvider:
                 provider_id = "openai"
                 provider_name = "stub"
 
@@ -386,10 +441,9 @@ async def main():
                     arguments = '{"text": "pineapple"}'
                     if self.round > 1:
                         arguments = '{"text": "pineapple", "confirm": true}'
-                    # Only round 3 is allowed to answer in plain text.
-                    if self.round >= 3:
-                        return ProviderResult(ok=True, model="stub",
-                                              response="done")
+                    # It never answers in plain text: every round tries the
+                    # tool again, so if the loop gave it another round it
+                    # would take it.
                     return ProviderResult(
                         ok=True, model="stub", response="",
                         tool_calls=[{
@@ -399,20 +453,26 @@ async def main():
                         }])
 
             approval.revoke(SID)
-            confirmer = _ConfirmStubProvider(f"mcp__{SID}__echo")
+            retrier = _RetryStubProvider(f"mcp__{SID}__echo")
             res3 = await chat_with_tools(
-                confirmer, [{"role": "user", "content": "echo it"}],
+                retrier, [{"role": "user", "content": "echo it"}],
                 system_prompt="test", max_tool_rounds=4)
             rounds_used = [t.get("tool") for t in res3.get("tool_results") or []]
-            print("confirm retry rounds:", rounds_used, confirmer.round)
-            check("the loop retries after an approval refusal",
-                  confirmer.round >= 3, f"rounds={confirmer.round}")
-            check("the confirmed call actually ran",
-                  any(t.get("success") for t in (res3.get("tool_results") or [])),
+            print("self-approve rounds:", rounds_used, retrier.round)
+            check("the loop does NOT give the model a second round",
+                  retrier.round == 1, f"rounds={retrier.round}")
+            check("only one call was attempted",
+                  len(rounds_used) == 1, str(rounds_used))
+            check("the turn ended waiting for the user",
+                  res3.get("awaiting_answer") is True,
+                  str(res3.get("awaiting_answer")))
+            check("the turn reports it needs approval",
+                  res3.get("requires_approval") is True,
+                  str(res3.get("requires_approval"))[:150])
+            check("no confirm=true call reached the server",
+                  not any(t.get("success") for t in
+                          (res3.get("tool_results") or [])),
                   json.dumps(res3.get("tool_results"))[:200])
-            check("the turn did not end on the refusal",
-                  "couldn't run the tool" not in str(res3.get("response")),
-                  str(res3.get("response"))[:150])
         finally:
             forge_module.skill_forge.forge = original_forge
             config._data["skills"]["market_search"] = market

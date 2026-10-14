@@ -113,6 +113,21 @@ class McpManager:
         self._servers: dict[str, McpServerState] = {}
         self._lock = asyncio.Lock()
         self._started = False
+        # Registered skill name -> (server_id, tool_name). Written when a
+        # server's tools are registered and read when the user approves one,
+        # so the grant is recorded against the server and tool that were
+        # actually asked about.
+        self._skill_tools: dict[str, tuple[str, str]] = {}
+
+    def tool_for_skill(self, name: str) -> tuple[str, str] | None:
+        """Which (server_id, tool_name) a registered MCP skill name is.
+
+        None for anything not registered as an MCP tool. Used by the approval
+        path, where resolving the name back by parsing would be a guess —
+        `_sanitise` replaces punctuation and truncates, so two different tools
+        can share one registered name.
+        """
+        return self._skill_tools.get(str(name or ""))
 
     # -- config -----------------------------------------------------------
 
@@ -377,7 +392,23 @@ class McpManager:
                 schema,
                 self._make_handler(state.id, tool_name),
                 category="mcp",
+                # This is what makes the approval a real one. `requires_approval`
+                # routes the call through `SkillRegistry._execute_gated`, which
+                # has the user answer a card and ends the turn until they do —
+                # the same path `run_command` and `write_file` use. The gate
+                # previously lived entirely inside the MCP handler, where the
+                # `confirm` argument satisfied it, so the model could approve
+                # its own call. A trusted server skips it, which is what
+                # "trusted" is for.
+                requires_approval=not trusted,
             ))
+            # Remember which server tool each registered name belongs to.
+            # `skill_name` sanitises, so `mcp__srv__do-it` and
+            # `mcp__srv__do_it` collide — parsing the name back apart would
+            # guess, and a wrong guess here means approving one tool grants
+            # another. The map is written beside the registration and read by
+            # `tool_for_skill` when the user's Allow has to be recorded.
+            self._skill_tools[name] = (state.id, tool_name)
             state.registered.append(name)
 
     def _make_handler(self, server_id: str, tool_name: str):
@@ -403,12 +434,26 @@ class McpManager:
             call_params = dict(params or {})
             trusted = bool(state.spec.get("trusted"))
             if not trusted and not approval.is_approved(server_id, tool_name):
-                if not bool(call_params.get(approval.CONFIRM_PARAM)):
-                    return approval.refusal(
-                        server_id,
-                        str(state.spec.get("name") or server_id),
-                        tool_name)
-                approval.approve(server_id, tool_name)
+                # Still refused. The approval is not granted here and cannot
+                # be: a skill marked `requires_approval` is stopped by
+                # `SkillRegistry._execute_gated` BEFORE it reaches this
+                # handler, and that path queues the question and ends the
+                # turn. The user's "Allow" re-runs this handler with the
+                # approval recorded, so a call arriving here unapproved came
+                # in by a route that does not gate — `executor.execute` over
+                # the API, a bot, a direct call — and the only safe reading is
+                # to refuse.
+                #
+                # `confirm` no longer grants anything. It used to: the model
+                # sending `confirm=true` caused `approve()` to be called on
+                # the strength of an argument the model had written, so the
+                # gate stopped third-party code from running by accident and
+                # nothing more. The flag is still stripped below so a server
+                # never sees an argument it did not declare.
+                return approval.refusal(
+                    server_id,
+                    str(state.spec.get("name") or server_id),
+                    tool_name)
             call_params = approval.strip(call_params)
 
             try:

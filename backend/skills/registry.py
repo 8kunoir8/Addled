@@ -846,6 +846,21 @@ class SkillRegistry:
         The session check comes first for the same reason it does in the
         executor: it is the only one some names can carry.
         """
+        # An MCP tool keeps its grant in the MCP approval store, keyed by
+        # `server::tool`, not under the skill name in the policy store. Asking
+        # only the policy meant a tool the user had already allowed was gated
+        # again: `approve()` recorded the MCP grant, the handler honoured it,
+        # and this gate — which runs FIRST — had not been told, so it raised a
+        # second card for a question already answered.
+        if str(name).startswith("mcp__"):
+            try:
+                from backend.mcp_client.manager import mcp_manager
+                from backend.mcp_client import approval as mcp_approval
+                pair = mcp_manager.tool_for_skill(name)
+                if pair and mcp_approval.is_approved(pair[0], pair[1]):
+                    return True
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not read the MCP grant for %s: %s", name, e)
         try:
             from backend.approvals import policy
         except Exception as e:  # noqa: BLE001
@@ -1378,10 +1393,22 @@ class SkillRegistry:
         that is not content-classified, an unreadable gate, or a call whose
         arguments the classifier reads as destructive.
 
+        An MCP tool asks unconditionally. The DestructionGate classifies by
+        NAME against `DESTRUCTIVE_ACTIONS`, and MCP tool names are dynamic —
+        `mcp__<server>__<tool>` for whatever a third-party server advertises —
+        so the gate has never heard of them and answers "safe" for all of
+        them. That made `requires_approval` on the MCP skill inert on its own:
+        the flag was set, the gate said the call was fine, and the call went
+        straight through to the handler. What a server's tool does is not
+        knowable from its name, so the question is not "is this dangerous" but
+        "is this server trusted", and that is decided per server.
+
         Never raises, and an error means ASK rather than proceed -- a gate that
-        cannot be consulted must not be treated as permission, which is the same
-        direction `_is_granted` already takes.
+        cannot be consulted must not be treated as permission, which is the
+        same direction `_is_granted` already takes.
         """
+        if str(name).startswith("mcp__"):
+            return True
         try:
             from backend.actions.executor import executor
             executor._lazy_init()
