@@ -677,6 +677,267 @@ def test_google_ws_actions():
         config.set("integrations", "google_tokens", value=saved_tokens)
 
 
+class _StubOAuthServer:
+    """An MCP server that requires OAuth and publishes the documents for it.
+
+    Serves the three things the flow has to find: the Protected Resource
+    Metadata (RFC 9728), the Authorization Server Metadata (RFC 8414), and a
+    registration endpoint (RFC 7591). Also serves `/mcp` so the 401 that
+    starts the flow can be produced for real.
+    """
+
+    def __init__(self, *, publish_registration=True):
+        self.publish_registration = publish_registration
+        self.record = {"registered": None, "exchanged": None,
+                       "refreshed": None, "authorize_url": ""}
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _json(self, code, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                base = f"http://127.0.0.1:{outer.port}"
+                if self.path.startswith("/.well-known/oauth-protected-resource"):
+                    return self._json(200, {
+                        "resource": f"{base}/mcp",
+                        "authorization_servers": [base],
+                        "scopes_supported": ["mcp:read", "mcp:write"]})
+                if self.path.startswith("/.well-known/oauth-authorization-server"):
+                    doc = {
+                        "issuer": base,
+                        "authorization_endpoint": f"{base}/authorize",
+                        "token_endpoint": f"{base}/token",
+                    }
+                    if outer.publish_registration:
+                        doc["registration_endpoint"] = f"{base}/register"
+                    return self._json(200, doc)
+                if self.path == "/mcp":
+                    # The 401 that begins everything, naming where to look.
+                    self.send_response(401)
+                    self.send_header(
+                        "WWW-Authenticate",
+                        f'Bearer resource_metadata="{base}/.well-known/'
+                        f'oauth-protected-resource/mcp"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(n)
+                if self.path == "/register":
+                    outer.record["registered"] = json.loads(raw or b"{}")
+                    return self._json(201, {"client_id": "cid-abc",
+                                            "client_secret": "csec-xyz"})
+                if self.path == "/token":
+                    form = {k: v[0] for k, v in
+                            urllib.parse.parse_qs(raw.decode()).items()}
+                    if form.get("grant_type") == "refresh_token":
+                        outer.record["refreshed"] = form
+                        return self._json(200, {
+                            "access_token": "refreshed-access",
+                            "token_type": "Bearer", "expires_in": 3600})
+                    outer.record["exchanged"] = form
+                    return self._json(200, {
+                        "access_token": "the-access-token",
+                        "refresh_token": "the-refresh-token",
+                        "token_type": "Bearer", "expires_in": 3600})
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._httpd.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}/mcp"
+        self._thread = threading.Thread(target=self._httpd.serve_forever,
+                                        daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+def test_mcp_oauth_flow():
+    """Discovery, registration, PKCE and the exchange, against a stub server."""
+    from backend.mcp_client.oauth import (
+        OAuthClient, OAuthError, TokenStore, _metadata_url_from_challenge)
+    from backend.config import config
+
+    # The well-known segment goes between origin and path (RFC 8414/9728).
+    # Appending it to the end is the obvious-looking mistake and asks the
+    # wrong URL.
+    check("the well-known path precedes the resource path",
+          OAuthClient._well_known("https://h/a/b", "oauth-protected-resource")
+          == "https://h/.well-known/oauth-protected-resource/a/b",
+          OAuthClient._well_known("https://h/a/b", "oauth-protected-resource"))
+    check("a bare origin produces no trailing slash artefact",
+          OAuthClient._well_known("https://h", "oauth-authorization-server")
+          == "https://h/.well-known/oauth-authorization-server")
+    check("a quoted resource_metadata is read from the challenge",
+          _metadata_url_from_challenge(
+              'Bearer realm="x", resource_metadata="https://h/.wk/r"')
+          == "https://h/.wk/r")
+    check("a challenge without one yields nothing",
+          _metadata_url_from_challenge('Bearer realm="x"') == "")
+
+    stub = _StubOAuthServer()
+    store = TokenStore()
+    saved = store._all()
+    store.clear()
+    try:
+        client = OAuthClient("mcp-stub", stub.url, store=store)
+
+        async def drive():
+            metadata = await client.discover()
+            check("the token endpoint is discovered",
+                  bool(metadata.get("token_endpoint")),
+                  str(metadata)[:160])
+            check("the scopes come from the resource document",
+                  client.scope == "mcp:read mcp:write", client.scope)
+
+            url = await client.authorize_url()
+            stub.record["authorize_url"] = url
+            check("the authorize URL carries PKCE",
+                  "code_challenge=" in url
+                  and "code_challenge_method=S256" in url, url[:160])
+            check("the authorize URL carries state", "state=" in url,
+                  url[:160])
+            # RFC 8707: without `resource`, a token minted for one server can
+            # be presented to another that trusts the same issuer.
+            check("the authorize URL names the resource",
+                  "resource=" in url
+                  and urllib.parse.quote(stub.url, safe="") in url,
+                  url[:200])
+            check("registration used the loopback redirect",
+                  stub.record["registered"]["redirect_uris"][0]
+                  .startswith("http://127.0.0.1:"),
+                  str(stub.record["registered"].get("redirect_uris")))
+            check("registration asks for the refresh grant",
+                  "refresh_token" in
+                  stub.record["registered"].get("grant_types", []),
+                  str(stub.record["registered"].get("grant_types")))
+
+            # Deliver a code to the loopback listener as a browser would.
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            state = (query.get("state") or [""])[0]
+            callback = (f"{client._flow.redirect_uri}?code=stub-code"
+                        f"&state={urllib.parse.quote(state)}")
+
+            def hit():
+                try:
+                    urllib.request.urlopen(callback, timeout=4).read()
+                except Exception:  # noqa: BLE001 — the flow records the result
+                    pass
+
+            threading.Thread(target=hit, daemon=True).start()
+            result = await client.wait_for_code(timeout=8)
+            check("the callback delivers the code",
+                  result.get("code") == "stub-code", str(result))
+            check("the verifier travels with the code",
+                  bool(result.get("verifier")), str(result)[:120])
+            check("the redirect URI travels with the code",
+                  bool(result.get("redirect_uri")), str(result)[:120])
+
+            await client.complete(result)
+            sent = stub.record["exchanged"] or {}
+            check("the exchange sends the PKCE verifier",
+                  bool(sent.get("code_verifier")), str(sent)[:160])
+            check("the exchange sends the same redirect URI it authorized with",
+                  sent.get("redirect_uri") == result.get("redirect_uri"),
+                  f"{sent.get('redirect_uri')} vs {result.get('redirect_uri')}")
+            check("the exchange sends the client id",
+                  sent.get("client_id") == "cid-abc", str(sent)[:120])
+            check("the tokens are held",
+                  client.has_tokens and client.bearer()
+                  == "Bearer the-access-token", client.bearer())
+
+            # At rest: a token is a secret like any other, and the credential
+            # store encrypts what it holds.
+            raw = str(store._all())
+            check("the token is not stored in the clear",
+                  "the-access-token" not in raw
+                  and "the-refresh-token" not in raw,
+                  "a token is readable in the config")
+
+            await client.refresh()
+            check("a refresh uses the stored refresh token",
+                  (stub.record["refreshed"] or {}).get("refresh_token")
+                  == "the-refresh-token",
+                  str(stub.record["refreshed"])[:160])
+            check("the refreshed token replaced the old one",
+                  client.bearer() == "Bearer refreshed-access",
+                  client.bearer())
+            check("a refresh returning no new refresh token keeps the old",
+                  client.tokens.get("refresh_token") == "the-refresh-token",
+                  str(client.tokens.get("refresh_token"))[:60])
+
+            # A server with nothing published must read as a sentence, not a
+            # traceback in a log.
+            lonely = OAuthClient("nobody", "http://127.0.0.1:1/mcp",
+                                 store=store)
+            try:
+                await lonely.discover('Bearer realm="x"')
+                check("a server publishing no metadata is refused", False,
+                      "discovery appeared to succeed")
+            except OAuthError as e:
+                check("a server publishing no metadata is refused with words",
+                      "sign-in" in str(e) or "reach" in str(e), str(e))
+            lonely.close()
+            # `close` joins the flow's server thread, so it is not something to
+            # await — but doing it inside the coroutine is fine because it
+            # returns immediately once the socket is shut.
+            client.close()
+
+        asyncio.run(drive())
+    finally:
+        store.clear()
+        config.set("mcp", "oauth_tokens", value=saved)
+        stub.close()
+
+
+def test_mcp_oauth_needs_no_registration():
+    """A server with no registration endpoint says so, in words."""
+    from backend.mcp_client.oauth import OAuthClient, OAuthError, TokenStore
+    from backend.config import config
+
+    stub = _StubOAuthServer(publish_registration=False)
+    store = TokenStore()
+    saved = store._all()
+    store.clear()
+    try:
+        client = OAuthClient("mcp-noreg", stub.url, store=store)
+
+        async def drive():
+            await client.discover()
+            try:
+                await client.authorize_url()
+                check("a server without DCR is refused", False,
+                      "authorize_url appeared to succeed")
+            except OAuthError as e:
+                check("a server without DCR asks for a client id by hand",
+                      "client id" in str(e), str(e))
+            client.close()
+
+        asyncio.run(drive())
+    finally:
+        store.clear()
+        config.set("mcp", "oauth_tokens", value=saved)
+        stub.close()
+
+
 def main():
     for name, fn in [
         ("pkce", test_pkce),
@@ -696,6 +957,9 @@ def main():
         ("calendar wiring", test_calendar_wiring),
         ("calendar round trip", test_calendar_round_trip),
         ("google ws actions", test_google_ws_actions),
+        ("mcp oauth flow", test_mcp_oauth_flow),
+        ("mcp oauth without registration",
+         test_mcp_oauth_needs_no_registration),
     ]:
         try:
             fn()
