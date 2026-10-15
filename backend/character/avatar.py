@@ -344,7 +344,15 @@ class CharacterWidget(QWidget):
         except Exception:
             pass
 
-        # 2) bring the Addled window to the front
+        # 2) bring the Addled window to the front, and only stop here if one
+        #    was actually found. `WindowManager.focus()` reports failure by
+        #    *returning* `{"success": False, ...}` — it catches its own errors —
+        #    so a bare `return` after the call was reached every time and the
+        #    browser fallback below became dead code. The visible effect was
+        #    that Settings did nothing at all when no window existed, rather
+        #    than opening the dashboard: the one path that could have worked
+        #    was the one that could never run.
+        focused = False
         try:
             import asyncio
             from backend.actions.window_manager import WindowManager
@@ -352,10 +360,15 @@ class CharacterWidget(QWidget):
             async def _focus():
                 return await WindowManager().focus("Addled")
 
-            asyncio.run(_focus())
-            return
+            focused = bool((asyncio.run(_focus()) or {}).get("success"))
         except Exception:
-            pass
+            # Includes `asyncio.run` refusing to nest inside a running loop,
+            # which is a failure to focus like any other and must not stop the
+            # fallback.
+            focused = False
+
+        if focused:
+            return
 
         # 3) fallback: open in the default browser
         try:

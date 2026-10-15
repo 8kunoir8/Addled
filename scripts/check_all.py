@@ -130,6 +130,7 @@ SUITES = [
     "check_motion.py",
     "check_shapes.py",
     "check_hands.py",
+    "check_startup_settings.py",
     "check_streaming.py",
     "check_system_controls.py",
     "check_wait_notice.py",
