@@ -155,9 +155,25 @@ def run():
           "def _spawn(" in ws and "_background_tasks" in ws,
           "the strong-reference helper is gone; tasks can be collected "
           "mid-run")
-    check("the auto-speak path goes through it",
-          "_spawn(_speak_reply(reply))" in ws,
+    # The reply must not be collectible while it is being spoken. The original
+    # check asserted one literal call, `_spawn(_speak_reply(reply))`, which
+    # held because that was the only call site. It is not any more: auto-speak
+    # goes through `_auto_speak(reply, len(reply))`, which reports the real
+    # outcome instead of logging success before trying.
+    #
+    # So this asserts the property rather than the old spelling — the spawned
+    # coroutine must take the reply as an argument (holding a reference for its
+    # lifetime) and hand it to _speak_reply, rather than reading a variable it
+    # does not own. Verified by dropping the caller's reference and forcing a
+    # gc pass mid-coroutine: the text survives intact.
+    check("the auto-speak path goes through _spawn",
+          "_spawn(_auto_speak(reply, len(reply)))" in ws,
           "the spoken reply can be garbage-collected before it plays")
+    check("and _auto_speak holds the reply it was given",
+          "async def _auto_speak(text: str, length: int)" in ws
+          and "await _speak_reply(text)" in ws,
+          "auto-speak no longer holds the reply it is speaking; it could be "
+          "collected mid-flight")
     sched = Path(ROOT, "backend", "tasks", "scheduler.py").read_text(
         encoding="utf-8", errors="replace")
     check("the scheduler keeps its tasks alive",
