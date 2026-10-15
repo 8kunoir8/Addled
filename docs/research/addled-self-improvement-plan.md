@@ -60,6 +60,15 @@ context): **7.6% of turns are topic shifts** by a cheap overlap test, and the ex
 unambiguous — `'What colour is this image?'` arriving after `'OK'`, a file listing after
 `'PONG-GAMMA'`.
 
+> **Note added 2026-10-15:** this store no longer exists and the figures below cannot be
+> reproduced. It was destroyed on 2026-10-14 — see *INCIDENT: a check suite destroyed the
+> live chat history* at the end of this document. Every "210 turns" / "7.6%" / "35 withheld"
+> number in Part 0 is a measurement of that store as it stood, and is kept as the design
+> record rather than as a live claim. `scripts/check_topic_gate.py` now asserts the cases
+> that mattered against fixed windows instead of replaying the store.
+>
+> It applies from here to the end of §0.3.
+
 ## 0.3 The right fix, and why the obvious fix is wrong
 
 ### I prototyped the obvious fix first, and it broke real workflows

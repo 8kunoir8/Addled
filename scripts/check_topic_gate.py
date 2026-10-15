@@ -17,7 +17,7 @@ The third line asks about admin management. The fourth answers about
 
 ## What was measured
 
-Against the live store (`%LOCALAPPDATA%\\Addled\\chat_history.json`):
+Against the live store at the time (`%LOCALAPPDATA%\\Addled\\chat_history.json`):
 
     history window: 8 msgs, 4270 chars total
     new user message: 54 chars
@@ -25,7 +25,16 @@ Against the live store (`%LOCALAPPDATA%\\Addled\\chat_history.json`):
 
 Every *memory* block in the prompt is relevance-gated. The conversation window
 was the one block that was not - and it was the largest. 7.6% of the 210 real
-user turns in the store are topic shifts by a plain overlap test.
+user turns in the store at the time are topic shifts by a plain overlap test.
+
+That store no longer exists, so the figure cannot be reproduced. It was
+destroyed on 2026-10-14, when `check_compaction_rewrite.py` was run with
+`ADDLED_DATA_DIR` pointing at the real data directory and wrote a blank store
+over it -- 83 conversations became 1 (see the INCIDENT section of
+docs/research/addled-self-improvement-plan.md). The file kept as
+`chat_history.DAMAGED-20261014.json` is that aftermath, not a copy. So
+`covered_continuations()` below asserts the cases that mattered against fixed
+windows, and this suite reads no live data at all.
 
 ## The signal
 
@@ -44,8 +53,8 @@ contextual shift") vs Cat2-imp split.
 
 ## Why a plain overlap rule was rejected
 
-`drop history when lexical overlap < 0.34` was tried first. It dropped 42 of
-210 turns, including:
+`drop history when lexical overlap < 0.34` was tried first. Against the store as
+it stood then, it dropped 42 of 210 turns, including:
 
     'The delete_file you asked for was APPROVED and ran successfully...'
     'Teach Scout10807 a standing rule: keep every review under three sentences'
@@ -58,14 +67,22 @@ before it. Two further checks were needed:
   2. a dependency held in the ASSISTANT's last turn -- it asked a question or is
      waiting on approval, so a terse reply answers it whatever words it uses.
 
-With both, the same store drops 21 turns and loses no must-keep turn.
+With both, the same store dropped 21 turns and lost no must-keep turn.
 
 ## What is asserted here
 
 The primitives, the four cases the design must get right, the two
-false-positive classes above, and the wiring in `ws_server.run_chat_pipeline`:
+false-positive classes above, the continuations the design was actually built
+for (against fixed windows), and the wiring in `ws_server.run_chat_pipeline`:
 that the gate is called, that it runs AFTER the recall-query expansion (which
 reads the window), and that a shift keeps the last turn rather than nothing.
+
+This suite used to replay the live store as well. That went, because the store
+is the user's own file: the app rewrites it, and the verification harnesses
+write their turns into it too, so an assertion reading it says as much about
+what was run last as about the rule. It was the only suite here that tested
+against live data -- `check_compaction_rewrite.py` sandboxes the store and
+asserts it is *not* read -- and the data it depended on was destroyed.
 """
 
 import asyncio
@@ -205,55 +222,65 @@ def the_false_positives() -> None:
           asyncio.run(R.continues_topic(REPORTED, blocked)) is True)
 
 
-def the_real_store() -> None:
-    """Replay every stored turn. Skipped when the live store is absent."""
-    import json
-    from pathlib import Path
+def covered_continuations() -> None:
+    """The continuations the rule was built for, against fixed windows.
 
-    store_path = (Path(os.environ.get("LOCALAPPDATA", ""))
-                  / "Addled" / "chat_history.json")
-    if not store_path.exists():
-        print("  skip  live store not present")
-        return
-    try:
-        store = json.loads(store_path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError) as e:
-        print(f"  skip  store unreadable: {e}")
-        return
+    The two must-keep messages are verbatim from the store the research
+    measured; it named them as continuations a plain overlap rule would drop,
+    and recorded their overlaps there as 0.33 and 0.27. The original store is
+    gone (see the module docstring), so the *windows* below are reconstructed
+    to hold the dependency each turn answers -- an approval block. They are
+    therefore faithful to those two turns, not to the store: this asserts the
+    rule on the cases the design was built for, and does not claim to reproduce
+    the store's own numbers.
 
+    The window matters as much as the message. The swarm turn is kept by the
+    approval branch, not by overlap -- its overlap against this window is 0.22,
+    under the 0.34 lexical gate -- so pairing it with a bare "agent is ready"
+    reply would assert the wrong thing and lose the case the research found.
+    """
     from backend.memory import relevance as R
 
-    must_keep = [
-        "The delete_file you asked for was APPROVED and ran successfully",
-        "Teach Scout10807 a standing rule",
-        "well, i have approved it, check again",
+    approved_agent = [
+        {"role": "user", "content": "Create a Scout10807 agent for code review."},
+        {"role": "assistant", "content": (
+            "This needs your approval before it can run: create_agent. Approve "
+            "it in the dashboard and I will continue.")},
     ]
-    total = shifts = 0
+    approved_delete = [
+        {"role": "user", "content": "run delete_file on notes.txt"},
+        {"role": "assistant", "content": (
+            "This needs your approval before it can run: run_delete.")},
+    ]
+
+    cases = [
+        # The permission-approval continuation: meaningless without the turn
+        # before it, and the plain overlap rule dropped it.
+        ("The delete_file you asked for was APPROVED and ran successfully",
+         approved_delete, True),
+        # Part of an ongoing swarm task. Its window is a blocked approval, which
+        # is what keeps it; the overlap alone is under the lexical gate.
+        ("Teach Scout10807 a standing rule: keep every review under three "
+         "sentences", approved_agent, True),
+        # And the other direction, so a rule that kept everything could not pass
+        # this by returning a constant.
+        ("List the files in the etc directory",
+         [{"role": "assistant", "content": "PONG-GAMMA"}], False),
+    ]
+
+    kept = sum(1 for _, _, want in cases if want)
+    check("the corpus covers both outcomes",
+          0 < kept < len(cases),
+          f"{kept} keep / {len(cases) - kept} withhold - a corpus of one kind "
+          f"cannot tell a rule from a constant")
+
     wrong: list[str] = []
-
-    async def replay() -> None:
-        nonlocal total, shifts
-        for conv in (store.get("conversations") or {}).values():
-            msgs = conv.get("messages") or []
-            for i, m in enumerate(msgs):
-                if m.get("role") != "user" or not msgs[:i]:
-                    continue
-                total += 1
-                text = m.get("content") or ""
-                if not await R.continues_topic(text, msgs[:i][-20:]):
-                    shifts += 1
-                    for frag in must_keep:
-                        if frag.lower() in text.lower():
-                            wrong.append(frag)
-
-    asyncio.run(replay())
-    check("the store was large enough to be evidence", total >= 100, total)
-    check("shifts are found but are a minority",
-          0 < shifts < total * 0.3,
-          f"{shifts}/{total} withheld - a rule that drops half the store is "
-          f"not detecting shifts, it is just dropping history")
-    check("no must-keep continuation is withheld",
-          not wrong, wrong)
+    for text, window, want in cases:
+        got = asyncio.run(R.continues_topic(text, window))
+        if got != want:
+            wrong.append(f"{'kept' if got else 'withheld'} "
+                         f"{text.splitlines()[0][:48]!r}")
+    check("every named must-keep continuation is kept", not wrong, wrong)
 
 
 def the_wiring() -> None:
@@ -300,8 +327,8 @@ def main() -> int:
     print("the false positives a plain overlap rule produced:")
     the_false_positives()
     print()
-    print("replayed against the live store:")
-    the_real_store()
+    print("the continuations the design was built for:")
+    covered_continuations()
     print()
     print("the wiring in run_chat_pipeline:")
     the_wiring()
