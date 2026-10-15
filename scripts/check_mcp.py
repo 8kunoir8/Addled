@@ -606,6 +606,67 @@ async def main():
             _approval.revoke("f4-http")
             _approval.revoke("f4-stdio")
 
+        # ---- 9e. colliding tool names all stay reachable -----------------
+        # `_sanitise` maps every punctuation character to `_` and cuts at 48,
+        # so `my.tool`, `my/tool`, `my-tool` and `my_tool` all reduce to the
+        # same string. Registering them under one name left one reachable and
+        # no hint that the others existed — the model called a tool and a
+        # different one ran, or none did, depending on registration order.
+        # These hold the second tool in place, and hold it to the *right*
+        # tool, since a distinct name that maps to the wrong handler is no
+        # better than a collision.
+        from backend.mcp_client.manager import (
+            McpManager, McpServerState, skill_name, disambiguated_name)
+
+        _taken: set = set()
+        _first = disambiguated_name("s", "my.tool", _taken)
+        _taken.add(_first)
+        _second = disambiguated_name("s", "my/tool", _taken)
+        check("a colliding tool gets a different name",
+              _first != _second,
+              f"both sanitised to {_first!r}")
+        check("the first claimant keeps the plain name",
+              _first == skill_name("s", "my.tool"), _first)
+        check("the suffixed name is stable across calls",
+              disambiguated_name("s", "my/tool", {_first}) == _second,
+              "the name would change between reconnects")
+
+        _mgr = McpManager()
+        _state = McpServerState({"id": "f3", "name": "F3", "transport": "stdio",
+                                 "command": "x", "trusted": True})
+        _state.tools = [
+            {"name": "my.tool", "description": "dotted"},
+            {"name": "my/tool", "description": "slashed"},
+            {"name": "my-tool", "description": "dashed"},
+            {"name": "my_tool", "description": "plain"},
+        ]
+        try:
+            _mgr._register_tools(_state)
+            check("every colliding tool is registered",
+                  len(_state.registered) == 4,
+                  f"got {len(_state.registered)}: {_state.registered}")
+            check("the registered names are distinct",
+                  len(set(_state.registered)) == 4,
+                  f"got {_state.registered}")
+            _live = [s.name for s in skill_registry.list_all()
+                     if s.category == "mcp" and s.name.startswith("mcp__f3__")]
+            check("every colliding tool is reachable",
+                  len(_live) == 4,
+                  f"{len(_live)} of 4 reachable: {sorted(_live)}")
+            # The name the model sees must dispatch to the tool it was given
+            # for, not to whichever tool happened to win the collision.
+            _back = {}
+            for _n in _state.registered:
+                _srv, _tool = _mgr._skill_tools[_n]
+                _back[_tool] = _n
+            check("each exposed name maps back to its own tool",
+                  len(set(_back.values())) == 4 and len(_back) == 4,
+                  f"map: {_back}")
+        finally:
+            for _n in _state.registered:
+                skill_registry.unregister(_n)
+
+
         for _name in ("TEMP", "TMP"):
             if _name in os.environ:
                 check(f"{_name} still reaches the child", _name in _child,
@@ -616,6 +677,48 @@ async def main():
         check("the allowlist is much smaller than the parent environment",
               len(_child) < len(os.environ),
               f"child={len(_child)} parent={len(os.environ)}")
+
+        # ---- 9f. colliding tools, end to end through a real server --------
+        # 9e proved the naming in isolation. This proves it against a server
+        # that really advertises colliding names, through `connect()` — the
+        # path the app takes. The isolation test could pass while the connect
+        # path still dropped them.
+        _saved = config.get("mcp", "servers", default=[])
+        try:
+            _spec = {
+                "id": "f3e2e", "name": "Collision fixture",
+                "transport": "stdio",
+                "command": [PY, "-s", SERVER], "enabled": True,
+                "trusted": True, "timeout_s": 10,
+                "env": {"MCP_FIXTURE_COLLIDE": "1"},
+            }
+            config.set("mcp", "servers", value=[_spec])
+            _conn = await mcp_manager.connect("f3e2e")
+            check("the colliding server connects", _conn.get("success"),
+                  str(_conn.get("error")))
+            _names = [s.name for s in skill_registry.list_all()
+                      if s.category == "mcp"
+                      and s.name.startswith("mcp__f3e2e__collide")]
+            check("all three colliding tools are reachable end to end",
+                  len(_names) == 3,
+                  f"got {len(_names)}: {sorted(_names)}")
+            # And each one dispatches to the tool whose name it carries.
+            _replies = {}
+            for _n in sorted(_names):
+                _res = await skill_registry.execute(_n, {})
+                _text = str((_res.data or {}).get("text")
+                            or _res.summary or "")
+                _replies[_n] = _text
+                check(f"{_n} succeeded",
+                      bool(_res.success),
+                      f"{_res.error} — the name did not reach a tool")
+            check("each exposed name reaches its own tool",
+                  all("collide:" in t for t in _replies.values())
+                  and len(set(_replies.values())) == 3,
+                  f"{_replies}")
+        finally:
+            await mcp_manager.disconnect("f3e2e")
+            config.set("mcp", "servers", value=_saved)
 
         # The escape hatch: a server needing something unanticipated can still
         # be given it, from Settings, without editing code.

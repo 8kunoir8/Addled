@@ -17,6 +17,7 @@ Tools it exposes:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 
@@ -63,6 +64,29 @@ TOOLS = [
     },
 ]
 
+# Tools whose names only differ by punctuation, and so reduce to the same
+# string once the client sanitises them. Off by default: they exist so a test
+# can prove the client keeps all of them reachable rather than letting the
+# last registration win, and no other suite should see them as live tools.
+if os.environ.get("MCP_FIXTURE_COLLIDE") == "1":
+    TOOLS += [
+        {
+            "name": "collide.one",
+            "description": "First of the colliding names.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "collide/two",
+            "description": "Second of the colliding names.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "collide-three",
+            "description": "Third of the colliding names.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+    ]
+
 
 def write(message: dict) -> None:
     sys.stdout.write(json.dumps(message) + "\n")
@@ -101,6 +125,10 @@ def call_tool(name: str, arguments: dict) -> dict:
     if name == "slow":
         time.sleep(float(arguments.get("secs", 1)))
         return text_result("slept")
+    if name in ("collide.one", "collide/two", "collide-three"):
+        # Each answers with its own name, so a test can tell which tool the
+        # client actually dispatched to rather than just that something ran.
+        return text_result(f"collide:{name}")
     return text_result(f"unknown tool '{name}'", is_error=True)
 
 

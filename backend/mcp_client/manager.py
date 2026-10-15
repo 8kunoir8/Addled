@@ -15,6 +15,7 @@ may hang the tool loop.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -36,6 +37,46 @@ def _sanitise(value: object) -> str:
 
 def skill_name(server_id: str, tool_name: str) -> str:
     return f"mcp__{_sanitise(server_id)}__{_sanitise(tool_name)}"
+
+
+def _collision_suffix(tool_name: str) -> str:
+    """Four hex characters that survive the kind of collision this fixes.
+
+    Derived from the *original* tool name, not the sanitised one, because the
+    sanitised one is exactly what had already lost the information. Stable
+    across restarts, so a name the user saw and approved is the same name
+    after a reconnect.
+    """
+    digest = hashlib.sha256(str(tool_name or "").encode("utf-8")).hexdigest()
+    return digest[:4]
+
+
+
+def disambiguated_name(server_id: str, tool_name: str, taken: set) -> str:
+    """A name for this tool that is not already spoken for.
+
+    `_sanitise` maps every punctuation character to `_` and truncates at 48,
+    so `my.tool`, `my/tool`, `my-tool` and two long names sharing a 48-char
+    prefix all land on the same string. Registering them under one name left
+    exactly one reachable and no hint that the others existed — the tool the
+    model called was whichever happened to be registered last.
+
+    A tool that exists under an uglier name is worth more than a tool that
+    silently does not exist, so a collision keeps both: the first claimant
+    keeps the plain name and later ones take a short hash of their original
+    name. Deterministic, so the same server produces the same names every
+    time.
+    """
+    base = skill_name(server_id, tool_name)
+    if base not in taken:
+        return base
+    candidate = f"{base[:48]}_{_collision_suffix(tool_name)}"
+    # Two originals that differ only beyond the 48th character could still
+    # agree here; extend rather than drop the tool.
+    if candidate in taken:
+        candidate = (f"{base[:40]}_"
+                    f"{hashlib.sha256(str(tool_name).encode()).hexdigest()[:12]}")
+    return candidate
 
 
 def _transport_of(spec: dict) -> str:
@@ -365,6 +406,15 @@ class McpManager:
             skill_registry.unregister(name)
         state.registered = []
 
+        # Names already handed out on this server, so a collision can be given
+        # a distinguishable one instead of overwriting the earlier tool. Also
+        # clear the server's entries from the skill→tool map: the stale ones
+        # would otherwise point at tools the server no longer exposes.
+        taken: set[str] = set()
+        for _name, _owner in list(self._skill_tools.items()):
+            if _owner[0] == state.id:
+                self._skill_tools.pop(_name, None)
+
         server_name = str(state.spec.get("name") or state.id)
         trusted = bool(state.spec.get("trusted"))
         for tool in state.tools:
@@ -385,7 +435,17 @@ class McpManager:
                 f"Call the '{tool_name}' tool on the MCP server '{server_name}'."
             text += suffix
 
-            name = skill_name(state.id, tool_name)
+            # A name that is not already spoken for on this server. When two
+            # tools sanitise to the same string the second one takes a short
+            # hash rather than overwriting the first, so no tool becomes
+            # unreachable and no tool masquerades as another.
+            name = disambiguated_name(state.id, tool_name, taken)
+            if name != skill_name(state.id, tool_name):
+                log.info("MCP tool %r on %s collides after sanitising; "
+                         "exposed as %s", tool_name, state.id, name)
+                text = (f"{text} (exposed as '{name}' because another tool on "
+                        f"this server sanitises to the same name)")
+            taken.add(name)
             skill_registry.register(SkillDefinition(
                 name,
                 text[:900],
