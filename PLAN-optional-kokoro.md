@@ -152,6 +152,11 @@ required, not optional.
 `page.tsx` `VoiceSection` (~1581); the Kokoro row is ~1668 and today only says
 `Not installed` with nothing to act on.
 
+The **in-app button** is the primary path. The installer also offers a
+**checkbox, default off** (Decision B), so an offline-bound user can take the
+download at install time instead; both use the same module, hashes and
+verification.
+
 Mirror `page.tsx:2100-2195` (the rtk block, already written for this exact
 situation):
 
@@ -290,11 +295,14 @@ the installer is `perMachine: false` (`electron-builder.yml:205`), so an upgrade
 user keeps their `resources/backend/voice/models/*.onnx` in place and the
 resolution order deliberately uses them.
 
-This is the one genuine **decision** in this plan, and it has a clean precedent:
-the installer already runs privileged work after extraction (`customInstall` in
-`electron/installer-precompile.nsh`), for the same reason — `Program Files` is
-read-only to the app but writable to the installer. That hook could delete the
-now-unused models. Options are at the end, under **Decisions**.
+This was the one genuine **decision**, and it is settled: the installer
+deletes them **only when a hash-verified copy already exists in the data
+directory**, so it can never take away the user's only working voice. It has a
+clean precedent — the installer already runs privileged work after extraction
+(`customInstall` in `electron/installer-precompile.nsh`), for the same reason:
+`Program Files` is read-only to the app but writable to the installer. See
+**Decisions** for the elevated-context hazard that makes a naive implementation
+of this wrong.
 
 ### A download that dies at 90% restarts
 
@@ -336,40 +344,60 @@ also needs `fetch_voice_models.py` (or a small sibling) shipped into
 more installer surface; the alternative is the in-app button alone. See
 **Decisions**.
 
-## Decisions for you
+## Decisions taken
 
-Three real choices, each with the tradeoff as I see it. Everything else in the
-plan I can decide on the evidence and have.
+### A. Upgrade cleanup: delete the old models only if a data-dir copy exists
 
-### A. Should an upgrade delete the old bundled models?
+Chosen. The installer removes `resources/backend/voice/models/*.onnx` **only
+when a complete model is already present in the data directory**, so it can
+never take away the user's only working copy.
 
-| option | effect |
+**Implementation hazard, found while checking this is safe.** The installer runs
+**elevated**, and `app_paths._resolve_data_dir()` decides by probing whether
+`<install>/memory` is writable — which under elevation it *is*, so a naive call
+would resolve the data dir to `<install>/memory`, not `%LOCALAPPDATA%\Addled`,
+and the guard would look in the wrong place. The app, unelevated, resolves to
+`%LOCALAPPDATA%\Addled`. **The installer must therefore not call `app_paths`**
+and must not resolve; it must test both candidates directly:
+
+| candidate | how it is reached |
 |---|---|
-| **Leave them** (current plan) | Safest; nothing can break. Costs the user ~356 MB of dead disk until they notice or reinstall. Saving applies to fresh installs only. |
-| **Delete them in the installer** | Delivers the saving to upgrading users too, and uses an existing hook. Risk: deleting files under `Program Files` on upgrade is the kind of thing that is fine until it is not — a mis-scoped path deletes user data. Would need the guard to be narrow and reversible. |
-| **Delete only if a data-dir copy already exists** | Middle ground: only reclaims when the user has a working replacement, so nothing can go missing. More logic, and the case is rare. |
+| `<INSTDIR>\resources\backend\memory\voice\models` | a portable/per-user install that writes beside itself |
+| `$LOCALAPPDATA\Addled\voice\models` | a per-machine install |
 
-My recommendation: **leave them**, and let the size win come from fresh installs.
-The disk is the user's and 356 MB is not scarce; a wrong delete is worse. Worth
-revisiting if upgrade size becomes a real complaint.
+and delete the first only if the second holds a **complete, hash-verified**
+model. The check for "complete" is the provenance file being present and valid,
+not the file merely existing — a half-written download must not license a
+delete.
 
-### B. Should the installer offer to download the voice?
+`ADDLED_DATA_DIR` is a third possible location when a user has set it. It is an
+env var the installer cannot see, so the guard covers the two real cases and
+declines to delete when neither matches. **Declining is always safe here**: the
+cost of a missed cleanup is 356 MB of disk, and the cost of a wrong delete is
+the user's working voice.
 
-| option | effect |
-|---|---|
-| **In-app button only** (current plan) | Smallest change, one code path, no new installer surface. A user who wants a local voice clicks once. |
-| **Installer checkbox, default on** | The user most likely to want it is the one installing, and it is precedented. More NSIS surface, a second download path to keep correct, and an offline install must not fail. |
-| **Installer checkbox, default off, plus the button** | Best of both, most code. |
+### B. Installer checkbox (default off) + the in-app button
 
-My recommendation: **in-app button only for now.** It is one path, it is
-testable, and the installer hook can be added later without moving anything —
-the download module and the hashes are the parts that matter, and both are
-shared.
+Chosen. Both paths, with the installer offering rather than assuming.
 
-### C. Anything else to raise?
+- The checkbox is **off by default**, so the installer stays small for everyone
+  and the offline case is opt-in.
+- `electron/installer-precompile.nsh` is the shape to copy: `IfFileExists`
+  guards, a fallback path, and **best-effort failure that does not fail the
+  install** — an offline install must complete with voice un-downloaded, and the
+  in-app button remains the remedy.
+- It needs the fetcher shipped to `resources/scripts/`, exactly as
+  `precompile_bundle.py` is shipped today. Reuse the same hashes and the same
+  verification; two paths, one set of pinned digests.
+- The download lands in the **data directory**, not `<INSTDIR>` — and the
+  installer runs elevated, so if a user chose a per-machine install the app
+  itself still cannot write there. Writing to the data dir is what makes the
+  download usable afterwards regardless of install location.
 
-If you would rather I do not decide B or A, tell me and I will take the
-conservative option in each case (leave files alone; in-app button only).
+Note this makes the "two model copies" case more likely, not less: an installed-
+with-models user has them in the data dir, an upgrading user has them in the
+install dir. `status()` reporting which one is in use is now load-bearing for
+the UI, not a nicety.
 
 ## Follow-ups (explicitly out of scope)
 
