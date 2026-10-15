@@ -844,10 +844,27 @@ def main():
 
     async def _handle_prompt(text: str):
         get_server().broadcast_nowait("chat.push", {"role": "user", "content": text})
-        result = await run_chat_pipeline(text)
+        # A turn that raises used to end here in silence. The bubble had been
+        # put into "Thinking…" by the caller and nothing replaced it, so the
+        # text sat on the character until the thinking deadline gave up — or,
+        # before that deadline existed, for the rest of the session. Report the
+        # failure instead, so what is on screen is true rather than optimistic.
+        #
+        # `run_coroutine_threadsafe` captures whatever this raises into the
+        # returned future, so an escaping exception reaches the log and nothing
+        # else: catching it here is the only way the bubble can learn about it.
+        try:
+            result = await run_chat_pipeline(text)
+        except Exception as e:  # noqa: BLE001
+            log.exception("prompt turn failed: %s", e)
+            bridge.reply.emit(f"[Turn failed: {type(e).__name__}] "
+                              f"{e}"[:300])
+            return
         reply = result.get("response", "")
         get_server().broadcast_nowait("chat.push", {"role": "assistant", "content": reply})
         bridge.reply.emit(reply)
+        # The bracket-prefixed strings are the pipeline's own failure reports,
+        # and reading one aloud would be worse than saying nothing.
         if reply and not reply.startswith("[Not connected:") and not reply.startswith("[Provider"):
             # Spoken replies follow the same Auto TTS toggle as the dashboard
             if config.get("voice", "auto_tts", default=True):

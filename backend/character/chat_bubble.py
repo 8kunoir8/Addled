@@ -142,7 +142,7 @@ class ChatBubble(QWidget):
         self._label.setText("Thinking…")
         self._label.setStyleSheet(
             "color:#8b949e; font-style:italic; font-size:13px; background:transparent;")
-        self._show(anchor, duration_s=None)
+        self._show(anchor, duration_s=self.THINKING_TIMEOUT_S)
 
     def show_message(self, text: str, anchor: QPoint):
         """Show the final reply as a chat bubble.
@@ -214,6 +214,21 @@ class ChatBubble(QWidget):
     # answerable from the dashboard afterwards, because the backend's own TTL is
     # what actually owns the question.
     DECISION_TIMEOUT_S = 120
+
+    # How long "Thinking…" may stay up before it gives up.
+    #
+    # It used to pass `duration_s=None`, which arms no timer at all, so the
+    # bubble waited for a reply that a failed turn never sends. The text then
+    # sat on the character for the rest of the session — the same defect the
+    # decision deadline above was added to fix, left in the one place it was
+    # not applied. A click does clear it, but the only clue to that is a
+    # bubble telling the user to wait.
+    #
+    # Much longer than a message's: a slow local model genuinely takes minutes,
+    # and cutting a working turn off at 30s would hide real work. Finite
+    # anyway, because a turn that has produced nothing in five minutes is not
+    # still working in any useful sense.
+    THINKING_TIMEOUT_S = 300
 
     # Bounds on what can pile up behind an unanswered decision. Small on
     # purpose: a bubble is a glance, and anything older than the last few is
@@ -430,6 +445,11 @@ class ChatBubble(QWidget):
             self._fade_timer.stop()
             self.hide()
             self._opacity = 1.0
+            # Clear it here, at the one point the bubble is fully gone.
+            # "Thinking…" that timed out would otherwise leave the flag set, so
+            # the next bubble would paint with the thinking colours and the
+            # italic grey label even though it is an ordinary message.
+            self._thinking = False
 
     def _show(self, anchor: QPoint, duration_s: int | None):
         self._anchor = anchor
