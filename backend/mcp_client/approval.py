@@ -40,6 +40,40 @@ CONFIRM_PARAM = "confirm"
 _approved: set[str] = set()
 
 
+
+def endpoint_of(spec: dict) -> str:
+    """What a grant is actually granted *to*, for a server spec.
+
+    The approval key is `server_id::tool`, and the id is a label the user
+    chose — it does not change when the thing behind it does. So approving
+    `send_email` on a server called `mail`, then repointing that server at a
+    different URL, left the grant standing for whatever now answers there.
+    Nothing about the name changed, so nothing asked again.
+
+    This is the value that must match for a grant to still mean what it meant:
+    the URL for an http server (including any query the transport needs), or
+    the resolved command line for a stdio one. Compared before and after an
+    update; a difference revokes.
+    """
+    spec = spec or {}
+    transport = str(spec.get("transport") or "").strip().lower()
+    if transport == "http" or (spec.get("url") and not spec.get("command")):
+        url = str(spec.get("url") or "").strip()
+        params = spec.get("params") or spec.get("query") or {}
+        if isinstance(params, dict) and params:
+            joined = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+            url = f"{url}?{joined}" if url else joined
+        return f"http:{url}"
+    command = spec.get("command")
+    if isinstance(command, (list, tuple)):
+        argv = [str(part) for part in command]
+    else:
+        argv = [str(command)] if command else []
+    argv += [str(a) for a in (spec.get("args") or [])]
+    cwd = str(spec.get("cwd") or "")
+    return "stdio:" + " ".join(argv) + (f" @{cwd}" if cwd else "")
+
+
 def _key(server_id: str, tool: str) -> str:
     return f"{server_id}::{tool}"
 

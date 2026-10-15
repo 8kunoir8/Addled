@@ -543,6 +543,69 @@ async def main():
         check("PATH still reaches the child",
               bool(_child.get("PATH") or _child.get("Path")),
               "a server cannot find its own runtime without PATH")
+
+        # ---- 9d. an approval must not survive a repoint -----------------
+        # The approval key is `server_id::tool`, and the id is a label the
+        # user picked. It does not change when the thing behind it does, so
+        # approving a tool on a trusted server and then repointing that server
+        # at somebody else's left the grant standing for whatever now answered
+        # there — and nothing asked again, because nothing about the name
+        # changed. These hold the revocation in place, and just as importantly
+        # hold it to *only* the endpoint: a rename or a timeout must not silently
+        # throw away a standing approval the user meant to keep.
+        from backend.mcp_client import approval as _approval
+
+        check("a repoint produces a different endpoint",
+              _approval.endpoint_of({"transport": "http",
+                                     "url": "https://good.example"}) !=
+              _approval.endpoint_of({"transport": "http",
+                                     "url": "https://other.example"}),
+              "the endpoint cannot tell two servers apart")
+        check("a rename does not change the endpoint",
+              _approval.endpoint_of({"transport": "http",
+                                     "url": "https://a.example", "name": "x"}) ==
+              _approval.endpoint_of({"transport": "http",
+                                     "url": "https://a.example", "name": "y"}),
+              "a rename would revoke a standing approval")
+        check("a changed stdio argument changes the endpoint",
+              _approval.endpoint_of({"transport": "stdio", "command": "node",
+                                     "args": ["safe.js"]}) !=
+              _approval.endpoint_of({"transport": "stdio", "command": "node",
+                                     "args": ["evil.js"]}),
+              "a swapped script keeps the approval")
+
+        _saved_servers = mcp_manager._config_servers()
+        try:
+            mcp_manager.save_servers([
+                {"id": "f4-http", "name": "F4", "transport": "http",
+                 "url": "https://good.example/mcp", "timeout_s": 30},
+                {"id": "f4-stdio", "name": "F4S", "transport": "stdio",
+                 "command": "node", "args": ["safe.js"], "timeout_s": 30},
+            ])
+            _approval.approve("f4-http", "send")
+            check("the tool starts approved",
+                  _approval.is_approved("f4-http", "send"))
+            mcp_manager.update("f4-http", {"url": "https://other.example/mcp"})
+            check("repointing the server revokes the approval",
+                  not _approval.is_approved("f4-http", "send"),
+                  "an approval outlived the server it was granted to")
+
+            _approval.approve("f4-http", "send")
+            mcp_manager.update("f4-http", {"name": "Renamed"})
+            check("a rename keeps the approval",
+                  _approval.is_approved("f4-http", "send"),
+                  "a cosmetic edit dropped a standing approval")
+
+            _approval.approve("f4-stdio", "run")
+            mcp_manager.update("f4-stdio", {"args": ["evil.js"]})
+            check("swapping a stdio script revokes the approval",
+                  not _approval.is_approved("f4-stdio", "run"),
+                  "the approval followed the name, not the program")
+        finally:
+            mcp_manager.save_servers(_saved_servers)
+            _approval.revoke("f4-http")
+            _approval.revoke("f4-stdio")
+
         for _name in ("TEMP", "TMP"):
             if _name in os.environ:
                 check(f"{_name} still reaches the child", _name in _child,

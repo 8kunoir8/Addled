@@ -615,6 +615,24 @@ class McpManager:
             clean, error = self.validate(merged, server_id=server_id)
             if error:
                 return {"success": False, "error": error}
+
+            # A grant is a statement about a *thing*, not about a name, and the
+            # id is only a name. Approving a tool on a server and then repointing
+            # that server at a different URL left the approval standing for
+            # whatever answers at the new one — the tool a person allowed is not
+            # the tool that would now run. So a change to what the server
+            # actually is revokes its approvals, and the tools are asked about
+            # again.
+            #
+            # Compared on the resolved endpoint rather than the raw patch: a
+            # save that touches only the name, timeout or trust must NOT drop
+            # approvals, or "Always allow" would be lost every time Settings was
+            # opened and closed.
+            if approval.endpoint_of(existing) != approval.endpoint_of(clean):
+                approval.revoke(server_id)
+                log.info("MCP server %s changed endpoint; approvals revoked",
+                         server_id)
+
             servers[index] = clean
             self.save_servers(servers)
             # Trust changes what the schema advertises; a rename changes labels;
