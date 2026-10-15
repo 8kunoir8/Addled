@@ -19,9 +19,11 @@ Branch `mcp-remediation`, based on `ea05fad`.
 | `a5ca11e` | plan: record Phase 6, and the failures that are not ours | done |
 | `07683cb` | **3.1** Approval does not survive a repoint (F4) | done, verified with teeth |
 | `f228fb6` | **Phase 2** colliding tool names all stay reachable (F3) | done, verified with teeth, end to end |
+| `e0fa82b` | plan: record Phase 2 (F3) done | done |
+| `6ff8581` | **Phase 4** HTTP transport conformance (F6/F8/F9/F10) | done, verified with teeth |
 
-Next per the revised order: Phase 4 (F6/F8/F9/F10), then 5.2 before 5.1a/b/c,
-then 5.3.
+Next per the revised order: 5.2 (DPAPI secret storage), then 5.1a/b/c (OAuth for
+remote MCP servers, reusing `oauth_loopback.py`), then 5.3.
 
 ### Known suite failures, and which are not ours
 
