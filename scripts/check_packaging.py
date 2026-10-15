@@ -320,6 +320,65 @@ def written_state_paths() -> set[str]:
     return found
 
 
+def _metadata_readers(python_filters: list[str]) -> None:
+    """Every package that reads its own metadata at import must keep it.
+
+    Read from the bundled interpreter's own source rather than a list by hand,
+    so a package that starts doing this is covered the moment it ships. Only
+    those that read their own metadata by name matter: `importlib.metadata` is
+    also used on other packages, and a missing entry there is a handled case,
+    not an import failure.
+    """
+    import re as _re
+
+    site = os.path.join(ROOT, "python-bundle", "Lib", "site-packages")
+    if not os.path.isdir(site):
+        print("   (no python-bundle to scan; skipped the metadata check)")
+        return
+    pattern = _re.compile(
+        r'metadata\.(?:version|metadata|distribution)\(\s*["\']([\w.-]+)["\']')
+    checked = 0
+    for name in sorted(os.listdir(site)):
+        package = os.path.join(site, name)
+        if not os.path.isdir(package) or "." in name or name.endswith(".py"):
+            continue
+        if name.endswith(".dist-info") or name.endswith("__pycache__"):
+            continue
+        # The dist-info directory this package would ship for its own name.
+        own = [d for d in os.listdir(site)
+               if d.endswith(".dist-info")
+               and d.split("-")[0].lower().replace("_", "-")
+               == name.lower().replace("_", "-")]
+        if not own:
+            continue
+        init = os.path.join(package, "__init__.py")
+        source = ""
+        for candidate in (init, os.path.join(package, name + ".py")):
+            try:
+                with open(candidate, encoding="utf-8", errors="replace") as fh:
+                    source += fh.read()
+            except OSError:
+                continue
+        if not source:
+            continue
+        # Only an UNGUARDED read at module level breaks the import; a try/except
+        # around it is the package saying it can cope.
+        found = False
+        for match in pattern.finditer(source):
+            if name.lower().replace("_", "-") in match.group(1).lower().replace("_", "-"):
+                found = True
+        if not found:
+            continue
+        checked += 1
+        metadata = sorted(own)[0]
+        check(f"{name} reads its own metadata, and {metadata} ships with it",
+              any(matches(f"{metadata}/METADATA", python_filters)
+                  for _ in (0,)),
+              f"{metadata} is excluded, so `import {name}` can raise "
+              "PackageNotFoundError on an installed copy")
+    if not checked:
+        print("   (no package reads its own metadata at import; skipped)")
+
 def extra_resource_filters(yaml_text: str, source: str) -> list[str]:
     """The filter patterns for one extraResources `from:` entry.
 
@@ -683,6 +742,32 @@ def main() -> int:
           in nsh and "*" not in "".join(
               l for l in nsh.splitlines() if l.strip().startswith("Delete")),
           "a wildcard in that folder would take the VAD model with them")
+
+    # The python bundle's filter must keep the package metadata that packages
+    # read at import. `rdflib`'s `__init__.py` calls
+    # `metadata.metadata("rdflib")` unguarded, and the offline voice reaches it
+    # through kokoro_onnx -> phonemizer -> segments -> csvw, so excluding
+    # dist-info made Kokoro fail on every installed copy while working in a
+    # checkout. This asserts the decision itself, since no test runs a built
+    # installer.
+    python_filters = extra_resource_filters(
+        read("electron-builder.yml"), "python-bundle")
+    for rel, why in (
+        ("rdflib-7.6.0.dist-info/METADATA",
+         "rdflib reads its own metadata at import and raises without it"),
+    ):
+        check(f"the python bundle keeps {rel}",
+              matches(rel, python_filters), why)
+    # And the exclusions that are still wanted have not been lost with it.
+    for rel in ("numpy/__pycache__/x.pyc", "pythonwin/x.py", "tests/test_x.py"):
+        check(f"the python bundle still excludes {rel}",
+              not matches(rel, python_filters),
+              "the dist-info fix must not have dropped the real exclusions")
+
+    # Every package that reads its own metadata at import must keep it, or the
+    # same failure returns through a different package. Read from the bundled
+    # interpreter's own source rather than a list, so a new one is covered.
+    _metadata_readers(python_filters)
 
     # And it must actually compile. makensis ships inside electron-builder, so
     # a machine that can build an installer can run this.

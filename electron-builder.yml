@@ -171,10 +171,25 @@ extraResources:
   # numpy and PyQt6 from source. That is the whole reason the pre-compile step
   # exists: pay the compile once, at install, where an elevated writer can.
   #
-  # `*.dist-info` is package metadata only (`pip show` reads it; the app does
-  # not), and `tests/` is never imported at runtime. `pythonwin` is the Tk IDE
-  # from pywin32 — pywin32 itself stays, because the app uses win32api and
-  # win32event.
+  # `*.dist-info` is NOT excluded, and that is a fix rather than an oversight.
+  #
+  # It was excluded on the reasoning that it is "package metadata only (pip
+  # show reads it; the app does not)". The second half was wrong. `rdflib`'s
+  # `__init__.py` calls `metadata.metadata("rdflib")` at import, unguarded, so
+  # without its dist-info the import raises PackageNotFoundError -- and rdflib
+  # is not imported for RDF here: the offline voice reaches it through
+  # kokoro_onnx, phonemizer, segments and csvw. So every installed copy failed
+  # Kokoro with "No package metadata was found for rdflib" and fell back to
+  # Edge, while a source checkout, which has the metadata, worked. Nothing
+  # caught it because nothing ran a built installer.
+  #
+  # Measured before deciding: all 116 dist-info directories are 4.5 MB
+  # together, on an installer that was 589 MB and is now about 258 MB. The
+  # exclusion saved nothing worth having and broke a feature, so it is gone
+  # rather than narrowed to rdflib -- nine other packages read their own
+  # metadata too, and re-including them one failure at a time is how the next
+  # one ships. `pythonwin` stays excluded: it is 20 MB of Tk IDE that nothing
+  # imports, which is a real saving rather than an assumed one.
   - from: python-bundle
     to: python
     filter:
@@ -182,7 +197,6 @@ extraResources:
       - '!**/__pycache__/**'
       - '!**/*.pyc'
       - '!**/*.pyo'
-      - '!**/*.dist-info/**'
       - '!**/tests/**'
       - '!**/test/**'
       - '!**/pythonwin/**'
