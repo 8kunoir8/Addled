@@ -105,9 +105,19 @@ extraResources:
       # shipping it meant an upgrade replaced it with an empty one. The calendar
       # treats an absent file as an empty list, so it does not need to ship.
       - '!memory/integrations/**'
-      # NOT excluded: `backend/voice/models/**`. Those 339 MB are fetched once
-      # by scripts/fetch_voice_models.py and bundled on purpose, because the
-      # offline voice needs them present.
+      # The Kokoro voice models: 354 MB, and most of why the installer was
+      # 589 MB. They are downloaded on request from Settings -> Voice
+      # (backend/voice/model_install.py) into the data directory, which is the
+      # only place they *can* go -- the install is read-only. The silero VAD
+      # model stays bundled: it is 2.3 MB and the speech listener needs it
+      # before any download could have happened, so an install with no
+      # download still has a working listener.
+      - '!voice/models/kokoro-v1.0.onnx'
+      - '!voice/models/voices-v1.0.bin'
+      # NOT excluded: `backend/voice/models/silero_vad.onnx`, for the reason
+      # above, and the SenseVoice STT model, which was already unbundled and
+      # is fetched by scripts/fetch_voice_models.py -- Kokoro was the odd one
+      # out in still being shipped.
   #
   # There was a `tools/rtk` entry here, copying 13 MB of rtk.exe and rg.exe.
   # `tools/` is ignored by git, so those binaries were never in the repository:

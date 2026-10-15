@@ -59,11 +59,13 @@ def git(*args: str) -> list[str]:
 # Paths that are ignored by git and still ship, with the reason. Each one is
 # also asserted to be *present* in the shipped set, because an entry here that
 # no longer matches anything is how a real exclusion gets mistaken for it.
-SHIPPED_DESPITE_IGNORED = {
-    "voice/models":
-        "the offline voice models, fetched once by "
-        "scripts/fetch_voice_models.py and bundled on purpose",
-}
+# Empty now, and kept so the mechanism stays visible: an entry here is a
+# promise that the path both is gitignored AND still ships. The voice models
+# were the only one, and they are downloaded rather than bundled, so naming
+# them here would be the thing this dict exists to prevent — an exception that
+# no longer matches, which is how a real exclusion gets mistaken for a
+# deliberate one.
+SHIPPED_DESPITE_IGNORED: dict[str, str] = {}
 
 # extraResources sources (relative to the repository) that git ignores and that
 # are still shipped, each with the reason it is allowed. A source not named here
@@ -120,9 +122,27 @@ def git_ignored(path: str) -> bool:
 # Content under `memory/` that is bundled ON PURPOSE rather than being user
 # state. Fetched or authored once and shipped so the app works offline; an
 # upgrade replacing these is the intent, not a fault.
+# `backend/voice/models` was here and is not any more: it is state the app
+# fetches, not seed content, so it must now be treated as user state and
+# excluded. `default_skins` is still authored once and shipped, which is the
+# distinction this set draws.
 BUNDLED_ON_PURPOSE = {
-    "backend/voice/models",
     "backend/character/default_skins",
+}
+
+# Paths the discovery finds that are READ, not written. A constant of the form
+# `Path(__file__).parent / "x"` reads as "writes x beside the code", which is
+# right for a store and wrong for somewhere the app only looks. Kept as an
+# explicit set rather than a regex tweak, so the exception is visible and each
+# entry has to say why.
+READ_ONLY_PATHS = {
+    "backend/voice/models":
+        "the bundled model directory voice.tts READS (BUNDLED_MODELS_DIR). A "
+        "download writes to the data directory instead, via "
+        "app_paths.VOICE_MODELS_DIR, and that is anchored on DATA_DIR so the "
+        "discovery does not see it. The bundled copy must ship — an install "
+        "with no download still needs the VAD model — so treating it as state "
+        "would demand the opposite of what is wanted.",
 }
 
 # Paths the discovery finds that hold CODE, not state. `backend/memory` is the
@@ -427,9 +447,17 @@ def main() -> int:
           "main.py" in shipped, "backend/main.py is not shipped")
     check("and a nested module",
           "memory/recall.py" in shipped, "backend/memory/recall.py is not shipped")
-    check("and its non-code assets",
-          "voice/models/kokoro-v1.0.onnx" in shipped,
-          "the voice models the offline voice needs are not shipped")
+    # The Kokoro models are downloaded now, not shipped: 354 MB of a 589 MB
+    # installer. Checked by name rather than by prefix, so the silero VAD model
+    # staying bundled is not silently read as one of them.
+    check("and its non-code assets (the VAD model, which stays)",
+          "voice/models/silero_vad.onnx" in shipped,
+          "the VAD model the listener needs before any download is not shipped")
+    for _excluded in ("kokoro-v1.0.onnx", "voices-v1.0.bin"):
+        check(f"the installer does NOT ship voice/models/{_excluded}",
+              f"voice/models/{_excluded}" not in shipped,
+              f"{_excluded} is excluded by electron-builder.yml but still "
+              "packaged — 354 MB would be back in every installer")
 
     ignored = git("ls-files", "--others", "--ignored", "--exclude-standard",
                   "--directory", "--", "backend")
@@ -591,6 +619,11 @@ def main() -> int:
     state_paths = written_state_paths()
     check("state paths were found in the code", len(state_paths) >= 10,
           f"only found {len(state_paths)} — has the pattern changed?")
+    for rel, why in sorted(READ_ONLY_PATHS.items()):
+        check(f"the read-only path '{rel}' is still discovered",
+              rel in state_paths,
+              f"named as read-only ({why[:60]}…) but the discovery no longer "
+              "finds it — the entry is stale and should go")
 
     # Every declared out-of-tree anchor must still exist in `app_paths.py`. An
     # entry here that names a constant which was renamed or removed is worse
@@ -613,6 +646,8 @@ def main() -> int:
         if any(rel == s or rel.startswith(s + "/")
                for s in BUNDLED_ON_PURPOSE):
             continue
+        if rel in READ_ONLY_PATHS:
+            continue
         # `backend/memory` is the folder the stores live IN, not a store: it
         # holds the memory modules, which are code and must ship. The module
         # that defines MEMORY_DIR means "the parent of settings.json", and
@@ -630,7 +665,7 @@ def main() -> int:
         if any(rel == s or rel.startswith(s + "/")
                for s in BUNDLED_ON_PURPOSE):
             continue
-        if rel in CODE_DIRECTORIES:
+        if rel in READ_ONLY_PATHS or rel in CODE_DIRECTORIES:
             continue
         if not rel.startswith("backend/"):
             continue
