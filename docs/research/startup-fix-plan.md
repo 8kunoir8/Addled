@@ -1,5 +1,15 @@
 # Plan: make "start with Windows" launch the whole app
 
+> **Superseded, in part.** This plan assumed the broken Startup entry was
+> hand-written and that the app had no autostart support, so it proposed adding
+> some. Both were wrong: the app writes that entry itself, and the feature
+> already exists end to end (`system.setAutostart`, `set_autostart()`,
+> `autostart_enabled()`, and a working dashboard toggle). Only the program the
+> entry names was wrong. Superseded by the correction in
+> `startup-dashboard-not-showing.md` and by commit `5c7073d`, which fixes the
+> writer instead of adding a mechanism. Steps 2 and 3 below were not built.
+> Fault B in step 1 was correct and shipped in `820006b`.
+
 Follows the research in `startup-dashboard-not-showing.md`. That document
 established the cause; this one decides what to change and in what order.
 

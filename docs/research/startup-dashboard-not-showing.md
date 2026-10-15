@@ -115,3 +115,35 @@ hand-made file.
   returns `{"ok": true}`.
 - Confirmed the deployed dashboard is intact (128 files, `index.html` matches
   the repo build), so the missing dashboard is not a broken build.
+
+## Correction: the startup entry is written by the app, not by hand
+
+This document first said the `Addled.bat` had been hand-written because the
+file is not in the repo. That was wrong, and the fix depended on knowing
+otherwise, so it is corrected here rather than quietly edited above.
+
+The app writes it. `backend/onboarding/wizard.py` has `_autostart_shortcut()`,
+resolving to exactly:
+
+```
+C:\Users\<user>\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Addled.bat
+```
+
+and `_apply_autostart()` wrote:
+
+```python
+exe = sys.executable                              # the bundled python.exe
+main_script = Path(__file__).parent.parent / "main.py"
+f.write(f'@echo off\n"{exe}" "{main_script}"\n')
+```
+
+Same path, same format, same `main.py` target as the file on disk. So Fault A
+is not a user mistake: **the app's own "Start with Windows" option creates the
+broken entry.** A user who ticks that box once gets, at every future sign-in,
+the character with no tray and no dashboard.
+
+That also removes the reason for a new mechanism. The feature already existed
+end to end — `system.setAutostart` over the WebSocket, `set_autostart()`,
+`autostart_enabled()`, surfaced in `system.status`, with a working toggle in
+the dashboard at `dashboard/src/app/settings/page.tsx` — and only the program
+it named was wrong. The fix is the writer, not the feature.
