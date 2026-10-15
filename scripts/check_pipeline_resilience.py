@@ -89,6 +89,19 @@ def run_disconnect_source():
     check("chat_send shields the pipeline",
           "asyncio.shield(run_chat_pipeline(" in src,
           "an unshielded await is cancelled by the disconnect handler")
+    # `chat.send` must forward `record` from its params, and must default it to
+    # True. Both halves matter and fail differently: drop the passthrough and a
+    # caller cannot opt out, so the verification harnesses write into the user's
+    # own chat history (they did, and it is how the topic-gate check's evidence
+    # was lost). Flip the default and every existing caller silently stops
+    # recording, which is the worse direction -- the user loses turns they never
+    # asked to lose. The default is the part a reader is most likely to "tidy".
+    check("chat_send forwards `record` from its params",
+          "record=params.get(\"record\"" in src,
+          "without it a caller cannot keep a turn out of the user's history")
+    check("the record default stays True",
+          "record=params.get(\"record\", True)" in src,
+          "flipping it would stop every existing caller recording, silently")
     check("_serve handles cancellation rather than leaking it",
           "except asyncio.CancelledError:" in src,
           "CancelledError is a BaseException, so `except Exception` misses it")

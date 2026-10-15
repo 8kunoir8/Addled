@@ -305,7 +305,14 @@ def run_guards():
          "without it the console stops updating after a reload"),
         ("the trajectory broadcast wiring", "_trajectory.set_broadcast(",
          "without it the trajectory stops updating after a reload"),
-        ("the pipeline call", "run_chat_pipeline(message, params)",
+        # Pinned by the shielded call, which is unique to the chat turn. A
+        # bare "run_chat_pipeline(" is NOT specific: it also matches the
+        # function's own definition and the approval-resume call, so renaming
+        # this call left the needle satisfied and the check toothless. Pinning
+        # the whole statement instead broke when `record` was added to the same
+        # call. The shield prefix is both specific and stable across the
+        # arguments.
+        ("the pipeline call", "asyncio.shield(run_chat_pipeline(",
          "the turn itself"),
         ("the trajectory RPC registration", 'register("trajectory.list"',
          "the dashboard reads this to replay on connect"),

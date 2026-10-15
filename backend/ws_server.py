@@ -2940,7 +2940,16 @@ def _register_default_handlers():
         # recover a reply the dashboard missed, and once the write happens there
         # is something for it to find. Sending into a dead socket still fails
         # harmlessly - `_serve` catches that below.
-        result = await asyncio.shield(run_chat_pipeline(message, params))
+        # `record` rides in the params so a caller can say "run this turn but do
+        # not put it in my chat". It defaults to True, which is what every
+        # existing caller gets, so nothing changes for them -- this only lets a
+        # caller opt OUT. The verification harnesses need it: they drive the
+        # live app over `chat.send`, and without it every probe writes a
+        # conversation into the user's own store (one did, and it is still
+        # there). `_record_scope` takes True/False or a set of names, so the
+        # value is passed through rather than coerced here.
+        result = await asyncio.shield(run_chat_pipeline(
+            message, params, record=params.get("record", True)))
         reply = result.get("response", "") if isinstance(result, dict) else ""
         # Guarantee the delegation acknowledgement, rather than trusting the
         # model to relay it. `swarm_delegate` starts the agent and returns a
