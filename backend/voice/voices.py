@@ -20,7 +20,7 @@ import logging
 import time
 
 from backend.voice.tts import (DEFAULT_EDGE_VOICE, KOKORO_LANG_CODES,
-                              KOKORO_VOICES, LANG_TO_EDGE)
+                              LANG_TO_EDGE, kokoro_voices_path)
 
 log = logging.getLogger("addled.voices")
 
@@ -69,11 +69,15 @@ def kokoro_voices(refresh: bool = False) -> list[dict]:
         return _KOKORO_CACHE
     try:
         import numpy as np
-        if not KOKORO_VOICES.exists():
-            log.debug("Kokoro voices file missing: %s", KOKORO_VOICES)
+        # Resolved per call, not captured at import: the file can arrive later
+        # (a download), and a cached path would keep looking at the wrong
+        # directory. `refresh=True` below is what re-reads after that.
+        voices_file = kokoro_voices_path()
+        if not voices_file.exists():
+            log.debug("Kokoro voices file missing: %s", voices_file)
             _KOKORO_CACHE = []
             return _KOKORO_CACHE
-        with np.load(str(KOKORO_VOICES)) as data:
+        with np.load(str(voices_file)) as data:
             names = list(data.keys())
     except Exception as e:
         log.debug("could not read the Kokoro voice pack: %s", e)

@@ -27,9 +27,51 @@ import numpy as np
 
 log = logging.getLogger("addled.tts")
 
-MODELS_DIR = Path(__file__).resolve().parent / "models"
-KOKORO_MODEL = MODELS_DIR / "kokoro-v1.0.onnx"
-KOKORO_VOICES = MODELS_DIR / "voices-v1.0.bin"
+# Where the models are *bundled* — beside this file, inside the install.
+BUNDLED_MODELS_DIR = Path(__file__).resolve().parent / "models"
+
+# The model filenames, in one place. Resolution is separate from the names
+# because the directory is now a search rather than a constant.
+KOKORO_MODEL_NAME = "kokoro-v1.0.onnx"
+KOKORO_VOICES_NAME = "voices-v1.0.bin"
+
+
+def _resolved(filename: str) -> Path:
+    """The model file to use, bundled copy first.
+
+    The models shipped inside the installer until they were moved to an
+    on-demand download to cut 356 MB off it. Both layouts have to keep working:
+
+      1. the bundled copy, when it is there — every source checkout, and every
+         install made before the change, so neither needs the download;
+      2. otherwise the data directory, where a download puts it.
+
+    Returning a path that may not exist is deliberate: callers already test
+    for that (`_get_kokoro` raises a FileNotFoundError naming the path, and
+    `voices.kokoro_voices` degrades to an empty list), and those messages are
+    more useful when they name the location actually tried.
+    """
+    bundled = BUNDLED_MODELS_DIR / filename
+    if bundled.exists():
+        return bundled
+    try:
+        from backend.app_paths import VOICE_MODELS_DIR
+        return VOICE_MODELS_DIR / filename
+    except Exception:  # noqa: BLE001
+        # app_paths resolves the data dir at import and can fail in a stripped
+        # environment; the bundled path is then the only candidate, and it is
+        # also the one this module would have used before the change.
+        return bundled
+
+
+def kokoro_model_path() -> Path:
+    """The Kokoro ONNX model this process would load."""
+    return _resolved(KOKORO_MODEL_NAME)
+
+
+def kokoro_voices_path() -> Path:
+    """The Kokoro voice pack this process would read."""
+    return _resolved(KOKORO_VOICES_NAME)
 DEFAULT_EDGE_VOICE = "en-US-JennyNeural"
 DEFAULT_KOKORO_VOICE = "af_heart"
 
@@ -224,10 +266,16 @@ def _get_kokoro():
     with _kokoro_lock:
         if _kokoro is None:
             from kokoro_onnx import Kokoro
-            if not KOKORO_MODEL.exists():
+            model = kokoro_model_path()
+            voices = kokoro_voices_path()
+            if not model.exists() or not voices.exists():
+                # Worth saying which layout was looked for: the models are
+                # either bundled or downloaded, and "missing" alone does not
+                # tell the user which half is absent.
                 raise FileNotFoundError(
-                    f"Kokoro model missing: {KOKORO_MODEL}")
-            _kokoro = Kokoro(str(KOKORO_MODEL), str(KOKORO_VOICES))
+                    f"Kokoro model missing: {model} (bundled dir "
+                    f"{BUNDLED_MODELS_DIR}, download into Settings → Voice)")
+            _kokoro = Kokoro(str(model), str(voices))
         return _kokoro
 
 

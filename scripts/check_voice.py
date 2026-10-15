@@ -35,10 +35,17 @@ EXPECTED_KOKORO_LANGUAGES = {"en", "en-gb", "es", "fr", "hi", "it", "ja", "pt",
 
 def run_kokoro_tests():
     from backend.voice import voices
-    from backend.voice.tts import KOKORO_VOICES
+    from backend.voice.tts import BUNDLED_MODELS_DIR, kokoro_voices_path
 
-    check("the Kokoro voice pack is installed", KOKORO_VOICES.exists(),
-          str(KOKORO_VOICES))
+    # The pack is either bundled in the install or downloaded to the data dir,
+    # and both are correct states. Asserting only the bundled path would fail
+    # on a fresh install, which is now the normal case rather than an error.
+    voices_file = kokoro_voices_path()
+    check("the Kokoro voice pack is present, bundled or downloaded",
+          voices_file.exists(), f"looked at {voices_file}")
+    print(f"   Kokoro voice pack: {voices_file}"
+          + (" (bundled)" if voices_file.parent == BUNDLED_MODELS_DIR
+             else " (downloaded)"))
     listed = voices.kokoro_voices()
     check("voices were listed at all", len(listed) > 40, f"{len(listed)} found")
     print(f"   Kokoro voices found: {len(listed)}")

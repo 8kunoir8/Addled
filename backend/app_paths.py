@@ -249,6 +249,21 @@ PLAYWRIGHT_BROWSERS_ENV = "PLAYWRIGHT_BROWSERS_PATH"
 # data dir wholesale on a normal install anyway.
 BROWSER_PROFILE_DIR = DATA_DIR / "browser_profile"
 
+# The Kokoro voice models, when they have been downloaded.
+#
+# They used to ship inside the installer, which cost 356 MB of a 589 MB
+# download for a feature not every user wants. They are now fetched on demand
+# and kept here rather than beside the code, for the reason this module exists
+# at all: the app installs to `C:\Program Files`, which it cannot write to, so
+# a model placed next to `backend/voice/` after install would be unwritable and
+# un-upgradable.
+#
+# A source checkout, and every install that predates this change, already has
+# the models beside the code. `voice.tts` prefers that copy when it is present,
+# so those keep working exactly as before and never need the download -- this
+# directory is the fallback location, not the only one.
+VOICE_MODELS_DIR = DATA_DIR / "voice" / "models"
+
 def _default_profile_dir() -> Path:
     """Where the profile goes when `BROWSER_PROFILE_DIR` cannot be used.
 
