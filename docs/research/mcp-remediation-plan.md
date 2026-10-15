@@ -150,6 +150,49 @@ server, because it has no such field.)
 This is the strongest evidence for Phase 5.1: the gap it closes is one real
 users hit, and the old message actively misdirects them.
 
+#### The install was updated, and the app re-tested against it
+
+Finding 3 was then closed the only way that proves anything: the branch was
+deployed into the installed app and the same servers were tried again.
+
+`scripts/deploy_to_install.ps1` (elevated) copied `backend/`, the bot scripts
+and the dashboard into `C:\Program Files\Addled\resources\`. Its settings
+guard reported `settings.json untouched: active provider = '9router'`, which is
+the check that matters — the script derives its exclusions from `.gitignore` so
+user data (settings, memory, conversations) is not overwritten, and this is the
+guard that failed the last time that went wrong.
+
+Verified by hashing the install before and after: **4 files added**
+(`mcp_client/oauth.py`, `mcp_client/secretstore.py`,
+`mcp_client/configimport.py`, `integrations/oauth_loopback.py`) and **14
+changed**, all of them in the branch's scope and nothing outside it. The
+backend was restarted (killed PID owning :9876; the Electron shell respawned
+it as a new PID in ~10s), and the live app then answered `mcp.scanConfigs` and
+`mcp.forgetAuth` — methods the old build did not have — against the real
+`~/.claude.json`.
+
+**Finding 3, re-tested on the updated app, against `propick.ae/mcp`:**
+
+| | installed build | after the update |
+|---|---|---|
+| message | "the server rejected the credential (HTTP 401) - replace it with Forget on the market card" | "this server needs a sign-in before it can be used. Connect it from its card in Settings." |
+| `auth_required` | `null` | `true` |
+| `auth_error` | — | the sign-in message above |
+
+The wrong advice is gone and the card has what it needs to offer the button.
+
+**Finding 2 (the silent listing), re-tested on the updated app:**
+`mcp.searchMarket` for a real query now returns
+`ac.inference.sh/mcp` as `oauth: true, runnable: false,
+blocked_kinds: ["oauth"], blocked_reason: "needs a sign-in"` — the exact entry
+whose registry data declares no auth and which the old market offered as
+`runnable`. Genuinely open servers in the same result stay `runnable: true`.
+
+Both were then confirmed green on the deployed tree: `check_mcp`,
+`check_mcp_market`, `check_oauth`, `check_mcp_import` and `check_tools` all
+pass. The app was left as found (`mcp.servers == []`, provider still
+`9router`).
+
 **Every finding is now closed.** F1–F11 are fixed and verified with teeth, and
 5.1 (OAuth a/b/c), 5.2 (DPAPI) and 5.3 (a/b/c) are done. Nothing in this plan
 is outstanding.
