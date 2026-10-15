@@ -191,3 +191,49 @@ offline model sits unused while the user hears nothing, silently.
    backend. Small, but they are the kind of drift that gets believed.
 5. **Add `en-gb` to the Language list** (or drop it from Kokoro's advertised
    set), so the picker and the voice pack agree.
+
+---
+
+## Addendum: the installer's `dist-info` strip broke Kokoro entirely
+
+Found while verifying the deploy, not while reading the code — which is why it
+is here rather than in the body above.
+
+`electron-builder.yml` excludes `!**/*.dist-info/**` from `python-bundle` on
+the reasoning that it is "package metadata only (`pip show` reads it; the app
+does not)". The second half is false, and it is false for a package the offline
+voice needs:
+
+    kokoro_onnx → phonemizer → segments → csvw → rdflib
+
+`rdflib/__init__.py` calls `metadata.metadata("rdflib")` at import, unguarded.
+Without its `dist-info` that raises `PackageNotFoundError`, so `import
+kokoro_onnx` fails — and `phonemizer-fork` does the same one layer down. The
+result on every installed copy:
+
+    TTS engine 'kokoro' failed: No package metadata was found for rdflib
+    TTS engine 'edge'   failed: 403, Invalid response status
+    {"success": false, "tried": ["kokoro", "edge"]}
+
+So on a real install **both engines were down** — Kokoro from this, Edge from
+the version pin — and the app said nothing. A source checkout worked, because
+it has the metadata, which is what hid it.
+
+Measured: all 116 `dist-info` directories total **4.5 MB**, on an installer
+that was 589 MB. The exclusion saved nothing and broke a feature. Removed
+outright rather than re-including `rdflib` alone, because nine other packages
+read their own metadata too, and the failure appears one package at a time.
+
+Two things follow that are worth keeping:
+
+* **The bundled interpreter a user gets is not the one the developer tests
+  against.** `python-bundle/` in a checkout has 235 directories under
+  `site-packages`; the installed copy had 118, and the entire difference was
+  the metadata. Nothing in `scripts/check_all.py` runs a built installer, so
+  no test could see it. `check_packaging.py` now asserts the filter keeps
+  `dist-info` for every package that reads its own, which is as close as a
+  static check gets.
+* **The two-way fallback is what surfaced this.** Before it, a Kokoro failure
+  fell through to Edge and the user saw nothing; the 403 was already being
+  logged one engine at a time. Making both failures visible is what turned a
+  silent outage into a diagnosis.
