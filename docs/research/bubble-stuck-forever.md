@@ -132,6 +132,12 @@ Implemented and deployed.
   what should have been on screen all along, rather than "Thinking…" waiting
   for a reply that was never coming.
 
+  It is **not** spoken. The `except` branch emits and returns, so the failure
+  string never reaches the TTS block below it. Worth stating plainly because
+  the obvious-looking reason is wrong: the TTS guard tests `[Not connected:`
+  and `[Provider`, and `[Turn failed:` matches neither — checking that guard
+  would say "speak". The guarantee comes from the early return, not the prefix.
+
 **`scripts/check_chat_bubble.py`** pins the rule down — every bubble that shows
 is either dismissed by its own deadline or has a path that replaces it — and
 also re-checks that messages and decisions keep theirs, so a future change
