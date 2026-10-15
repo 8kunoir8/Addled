@@ -827,6 +827,74 @@ async def main():
             await mcp_manager.disconnect("f3e2e")
             config.set("mcp", "servers", value=_saved)
 
+        # ---- 9h. a switched-off tool is absent, not refused ---------------
+        # The point of disabling a tool is that the model never sees it. A tool
+        # that is registered and then refused is one the model will keep
+        # calling, burning a turn each time to learn nothing — so this asserts
+        # the skill is gone, not that calling it fails.
+        _saved = config.get("mcp", "servers", default=[])
+        try:
+            _spec = {
+                "id": "f5h", "name": "Disable fixture",
+                "transport": "stdio",
+                "command": [PY, "-s", SERVER], "enabled": True,
+                "trusted": True, "timeout_s": 10,
+            }
+            config.set("mcp", "servers", value=[_spec])
+            await mcp_manager.connect("f5h")
+
+            def _names():
+                return sorted(s.name for s in skill_registry.list_all()
+                              if s.category == "mcp"
+                              and s.name.startswith("mcp__f5h__"))
+
+            _before = _names()
+            check("the fixture exposes its tools to begin with",
+                  any(n.endswith("__echo") for n in _before), f"{_before}")
+
+            mcp_manager.update("f5h", {"disabled_tools": ["echo"]})
+            await mcp_manager.disconnect("f5h")
+            await mcp_manager.connect("f5h")
+            _after = _names()
+            check("a switched-off tool is not registered at all",
+                  not any(n.endswith("__echo") for n in _after),
+                  f"still present: {_after}")
+            check("the other tools are untouched",
+                  any(n.endswith("__add") for n in _after), f"{_after}")
+
+            # The card needs the server's own names back, or it has nothing
+            # stable to drive the switch with.
+            _st = [s for s in mcp_manager.status()["servers"]
+                   if s["id"] == "f5h"][0]
+            check("the status reports which tools are off",
+                  _st["disabled_tools"] == ["echo"], f'{_st["disabled_tools"]}')
+            check("the status reports every tool name the server offers",
+                  set(_st["all_tools"]) == {"add", "boom", "echo", "slow"},
+                  f'{_st["all_tools"]}')
+
+            # Switching it back on restores it, so this is a switch and not a
+            # one-way door.
+            mcp_manager.update("f5h", {"disabled_tools": []})
+            await mcp_manager.disconnect("f5h")
+            await mcp_manager.connect("f5h")
+            check("switching a tool back on restores it",
+                  any(n.endswith("__echo") for n in _names()),
+                  f'{_names()}')
+
+            # The choice has to survive a save, or it looks like it worked and
+            # is silently gone on the next reload. `validate` whitelists every
+            # field, and a missing name here is dropped without complaint.
+            mcp_manager.update("f5h", {"disabled_tools": ["slow"]})
+            _persisted = [s for s in config.get("mcp", "servers", default=[])
+                          if str(s.get("id")) == "f5h"]
+            check("the choice is written to the config, not just held",
+                  _persisted
+                  and _persisted[0].get("disabled_tools") == ["slow"],
+                  f"{_persisted[0].get('disabled_tools') if _persisted else None}")
+        finally:
+            await mcp_manager.disconnect("f5h")
+            config.set("mcp", "servers", value=_saved)
+
         # ---- 9g. HTTP transport conformance (F6/F8/F9) -------------------
         # Each of these is a response a well-behaved server never sends, so
         # each needs a server that sends it on purpose. They are grouped

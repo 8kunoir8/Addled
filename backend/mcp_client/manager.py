@@ -488,9 +488,19 @@ class McpManager:
 
         server_name = str(state.spec.get("name") or state.id)
         trusted = bool(state.spec.get("trusted"))
+        # Tools the user switched off. They are not registered at all rather
+        # than registered and refused, so the model never learns they exist:
+        # a tool it can see but never call is a tool it will keep trying, and
+        # every attempt costs a turn and teaches it nothing.
+        disabled = {str(n).strip() for n in (state.spec.get("disabled_tools") or [])
+                    if str(n).strip()}
         for tool in state.tools:
             tool_name = str(tool.get("name") or "").strip()
             if not tool_name:
+                continue
+            if tool_name in disabled:
+                log.debug("MCP tool %r on %s is switched off; not registering",
+                          tool_name, state.id)
                 continue
             schema = tool.get("inputSchema")
             if not isinstance(schema, dict):
@@ -634,6 +644,15 @@ class McpManager:
                              if state and state.last_used else None),
             "state": state.state if state else "disconnected",
             "last_error": state.last_error if state else None,
+            # The names the user switched off, and the server's own names for
+            # every tool, so the switch can be driven by a name that does not
+            # change when another tool appears and takes the collision suffix.
+            "disabled_tools": sorted(
+                {str(n).strip() for n in (spec.get("disabled_tools") or [])
+                 if str(n).strip()}),
+            "all_tools": sorted(
+                {str(t.get("name") or "").strip() for t in tools
+                 if str(t.get("name") or "").strip()}),
             "server_info": state.server_info if state else {},
             "protocol_version": state.protocol_version if state else "",
             "tool_count": len(tools),
@@ -749,6 +768,14 @@ class McpManager:
             "auto": bool(spec.get("auto")),
             "market_name": str(spec.get("market_name") or ""),
             "timeout_s": float(spec.get("timeout_s") or 30.0),
+            # Tools hidden from the model. Kept as the server's own tool names,
+            # not the registered skill names, because the registered name can
+            # carry a collision suffix that changes as tools come and go — a
+            # switch that silently forgets itself the next time a name collides
+            # is worse than no switch.
+            "disabled_tools": sorted(
+                {str(n).strip() for n in (spec.get("disabled_tools") or [])
+                 if str(n).strip()}),
         }
         return clean, None
 

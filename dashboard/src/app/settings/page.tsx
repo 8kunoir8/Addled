@@ -562,11 +562,28 @@ function McpSection({settings,update,saving,status}: any){
           // A trusted server never asks, so there is nothing to allow per tool;
           // saying so beats an empty row of switches that would do nothing.
           const grantable = t.grantable !== false && !s.trusted;
+          // Off means gone from the model's list entirely, not refused when
+          // called — the switch is advertised as hiding the tool, so it does.
+          const off = (s.disabled_tools||[]).includes(t.name);
+          const setOff = (next:boolean):void=>{
+            const cur:string[]=s.disabled_tools||[];
+            const list=next?[...cur,t.name]:cur.filter((n:string)=>n!==t.name);
+            act('mcp.update',{id:s.id,patch:{disabled_tools:list}},'disable');
+          };
           return (
             <div key={t.name} className="flex items-center justify-between gap-2">
-              <span className="font-mono text-[10px] text-[#8b949e] truncate" title={t.description||t.name}>
+              <span className={`font-mono text-[10px] truncate ${off?'text-[#484f58] line-through':'text-[#8b949e]'}`}
+                title={t.description||t.name}>
                 {t.name}
               </span>
+              <button onClick={()=>setOff(!off)}
+                disabled={!!busy||wsState!=='connected'}
+                title={off
+                  ? 'Hidden from the model — click to show it again'
+                  : 'Hide this tool from the model entirely'}
+                className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58]">
+                {off?'off':'on'}
+              </button>
               {s.trusted ? (
                 <span className="shrink-0 text-[10px] text-[#3fb950]"
                   title="The whole server is trusted, so this tool never asks">
