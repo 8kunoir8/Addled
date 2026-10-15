@@ -137,6 +137,12 @@ class McpServerState:
         self.registered: list[str] = []
         self.state = "disconnected"
         self._last_error: str | None = None
+        # Why the last sign-in was refused, and whether one is needed at all.
+        # Held here rather than read off the client, because a server that
+        # refuses the connection has its client discarded — so the object that
+        # learned "this needs a sign-in" is gone by the time a card asks.
+        self.auth_failed: str = ""
+        self.auth_needs: bool = False
         # When a tool on this server last ran, for the automatic switch-off.
         self.last_used: float = 0.0
 
@@ -294,6 +300,11 @@ class McpManager:
                                        timeout=CONNECT_GRACE)
                 state.state = "ready"
                 state.last_error = None
+                # A server that connects has answered the sign-in question, so
+                # a refusal remembered from an earlier attempt is stale and
+                # would leave "Authorize" on the card of a working server.
+                state.auth_failed = ""
+                state.auth_needs = False
             except asyncio.TimeoutError:
                 state.state = "error"
                 state.last_error = (f"handshake timed out after "
@@ -301,6 +312,15 @@ class McpManager:
             except Exception as e:
                 state.state = "error"
                 state.last_error = f"{type(e).__name__}: {str(e)[:200]}"
+
+            # Keep what the client learned about signing in before it is
+            # thrown away. Without this the answer survives only for a
+            # connected server, and the case that needs it most — one that
+            # could not connect *because* of the sign-in — loses it.
+            self._remember_auth(state)
+            state.auth_needs = bool(
+                getattr(state.client, "auth_required", False)
+                or state.auth_failed)
 
             if state.state != "ready":
                 if state.client is not None:
@@ -355,6 +375,25 @@ class McpManager:
 
     # -- oauth -------------------------------------------------------------
 
+    def _remember_auth(self, state: "McpServerState") -> None:
+        """Copy a client's sign-in verdict onto the state, if it has one.
+
+        The client is discarded when a connection fails, and that is exactly
+        the case where the verdict matters: a server that answered 401 is not
+        broken, and its card has to say so. Called while the client is still in
+        hand, and only ever to *add* a reason — a later successful connection
+        clears it, a failed one does not invent one.
+        """
+        client = state.client
+        if client is None:
+            return
+        try:
+            error = str(getattr(client, "auth_error", "") or "").strip()
+            if error:
+                state.auth_failed = error
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read the auth state of %s: %s", state.id, e)
+
     def _auth_client(self, server_id: str):
         """Whatever knows this server's sign-in state, connected or not.
 
@@ -376,10 +415,20 @@ class McpManager:
         return McpHttpClient(server_id, spec)
 
     def auth_required(self, server_id: str) -> bool:
+        """Whether this server has told us it wants a sign-in and has none."""
+        if self.authorized(server_id):
+            return False
+        state = self._servers.get(server_id)
+        if state is not None and (state.auth_needs or state.auth_failed):
+            return True
         client = self._auth_client(server_id)
         return bool(getattr(client, "auth_required", False))
 
     def auth_error(self, server_id: str) -> str:
+        """Why a sign-in is needed, in words for a card."""
+        state = self._servers.get(server_id)
+        if state is not None and state.auth_failed:
+            return state.auth_failed
         client = self._auth_client(server_id)
         return str(getattr(client, "auth_error", "") or "")
 

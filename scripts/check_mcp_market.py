@@ -1273,6 +1273,116 @@ def oauth_checks(market) -> None:
             token_store.set(k, v)
 
 
+def auth_probe_checks(market) -> None:
+    """The listing can be silent about a server that wants a sign-in.
+
+    Found against the real registry: `ac.inference.sh/mcp` publishes `remotes`
+    with no `auth` field at all and answers 401 with a proper Bearer challenge.
+    Classifying that as `runnable` is the same lie as ignoring a declared one,
+    arrived at from a listing that said nothing rather than the wrong thing.
+
+    Runs its own throwaway servers on 127.0.0.1 — never the internet.
+    """
+    import http.server as hs
+    import socketserver as ss
+    import threading as th
+
+    def serve(handler_cls):
+        srv = ss.TCPServer(("127.0.0.1", 0), handler_cls)
+        th.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, srv.server_address[1]
+
+    class NeedsOauth(hs.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate",
+                             'Bearer resource_metadata="https://x.example/'
+                             '.well-known/oauth-protected-resource/mcp"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    class OpenServer(hs.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            body = b'{"jsonrpc":"2.0","id":1,"result":{}}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class Bare401(hs.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    oauth_srv, oauth_port = serve(NeedsOauth)
+    open_srv, open_port = serve(OpenServer)
+    bare_srv, bare_port = serve(Bare401)
+    try:
+        check("a silent listing that answers a Bearer challenge is detected",
+              market._probe_auth(f"http://127.0.0.1:{oauth_port}/mcp") == "oauth",
+              "the probe did not see the OAuth challenge")
+        check("an open endpoint is not flagged",
+              market._probe_auth(f"http://127.0.0.1:{open_port}/mcp") == "",
+              "an open server was flagged as needing a sign-in")
+        check("a bare 401 is a refusal we cannot fix, not an OAuth flow",
+              market._probe_auth(f"http://127.0.0.1:{bare_port}/mcp") == "closed",
+              "a bare 401 was read as an OAuth server")
+        check("an unreachable host says nothing rather than guessing",
+              market._probe_auth("http://127.0.0.1:1/mcp") == "",
+              "an unreachable host produced a verdict")
+
+        # End to end: a candidate the listing left silent becomes blocked.
+        candidate = {
+            "name": "silent/thing", "source": "registry",
+            "transport": "http", "url": f"http://127.0.0.1:{oauth_port}/mcp",
+            "command": "", "args": [], "requires_env": [],
+            "requires_headers": [], "requires_params": [],
+            "header_hints": {}, "oauth": False, "runnable": True,
+            "blocked_reason": "", "blocked_kinds": [], "latest": True,
+        }
+        market._probe_auth_batch([candidate])
+        check("a probed OAuth server is blocked, not offered as ready",
+              candidate["oauth"] is True
+              and candidate["blocked_kinds"] == ["oauth"]
+              and candidate["runnable"] is False,
+              f'{candidate["blocked_kinds"]} runnable={candidate["runnable"]}')
+
+        # A server already blocked for a value the user can type is not worth
+        # a request — the probe only ever adds a reason, and one is there.
+        # Built fresh, not copied from `candidate`: that dict was mutated by
+        # the probe above, so `dict(candidate, ...)` would inherit its
+        # `auth_probe` and the check would pass or fail on the wrong thing.
+        keyed = {
+            "name": "keyed/thing", "source": "registry", "transport": "http",
+            "url": f"http://127.0.0.1:{open_port}/mcp",
+            "command": "", "args": [], "requires_env": ["SOME_KEY"],
+            "requires_headers": [], "requires_params": [], "header_hints": {},
+            "oauth": False, "runnable": False,
+            "blocked_kinds": ["headers"], "blocked_reason": "needs a key",
+            "latest": True,
+        }
+        market._probe_auth_batch([keyed])
+        check("a server already blocked for a key is not re-probed",
+              keyed["blocked_kinds"] == ["headers"]
+              and keyed.get("auth_probe") is None,
+              f'{keyed["blocked_kinds"]} probe={keyed.get("auth_probe")}')
+    finally:
+        for srv in (oauth_srv, open_srv, bare_srv):
+            srv.shutdown()
+            srv.server_close()
+
+
 def main() -> int:
     from backend.mcp_client import market
 
@@ -1283,7 +1393,9 @@ def main() -> int:
     # uptime.
     with mock.patch.object(market, "_fetch", lambda q, l: []), \
          mock.patch.object(market, "_fetch_smithery", lambda q, l: []), \
-         mock.patch.object(market, "_fetch_smithery_detail", lambda name: None):
+         mock.patch.object(market, "_fetch_smithery_detail", lambda name: None), \
+         mock.patch.object(market, "_probe_auth", lambda url, **kw: ""), \
+         mock.patch.object(market, "_auth_probe_disabled", lambda: True):
         normalise_checks(market)
         search_checks(market)
         suggest_checks(market)
@@ -1300,6 +1412,10 @@ def main() -> int:
     # Deliberately outside the stubs above: this check has to run the real
     # function to observe its cache, so it fakes the network itself instead.
     asyncio.run(detail_cache_checks(market))
+    # Also outside the stubs: `_probe_auth` is stubbed there on purpose, so a
+    # suite that means to test the probe has to be past that point. It starts
+    # its own servers on 127.0.0.1 and never reaches the internet.
+    auth_probe_checks(market)
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")

@@ -895,6 +895,87 @@ async def main():
             await mcp_manager.disconnect("f5h")
             config.set("mcp", "servers", value=_saved)
 
+        # ---- the auth verdict survives a failed connection -----------------
+        # Found against a real server (`propick.ae`) that answers a proper 401:
+        # the message was right but `auth_required` was False, because the
+        # client that learned the verdict is discarded when connect() fails
+        # and the throwaway built afterwards knows nothing. The card would
+        # have said "needs a sign-in" and simultaneously offered no button to
+        # do it — the exact pair this phase exists to prevent.
+        from backend.mcp_client.manager import mcp_manager as _mm
+        from backend.mcp_client.oauth import token_store as _ts
+        _saved_servers = config.get("mcp", "servers", default=[])
+        _saved_tokens = _ts._all()
+        _ts.clear()
+        try:
+            # A reachable address that answers 401 to everything.
+            import http.server
+            import socketserver
+            import threading as _th
+
+            class _Auth401(http.server.BaseHTTPRequestHandler):
+                def log_message(self, *a):
+                    pass
+
+                def do_POST(self):
+                    self.send_response(401)
+                    self.send_header(
+                        "WWW-Authenticate",
+                        'Bearer resource_metadata="https://x.example/.well-known/'
+                        'oauth-protected-resource/mcp"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+
+            _srv = socketserver.TCPServer(("127.0.0.1", 0), _Auth401)
+            _port = _srv.server_address[1]
+            _th.Thread(target=_srv.serve_forever, daemon=True).start()
+            try:
+                config.set("mcp", "servers", value=[{
+                    "id": "authfail", "name": "Needs auth",
+                    "transport": "http",
+                    "url": f"http://127.0.0.1:{_port}/mcp",
+                    "enabled": True, "timeout_s": 8}])
+                _out = await _mm.connect("authfail")
+                check("a server that answers 401 does not connect",
+                      not _out.get("success"), str(_out.get("error"))[:80])
+                # The whole point: the state must remember, not the client.
+                check("the refusal is remembered on the server's state",
+                      _mm.auth_required("authfail") is True,
+                      f"auth_required={_mm.auth_required('authfail')}")
+                check("and the reason is available for the card",
+                      "sign-in" in str(_mm.auth_error("authfail")).lower(),
+                      str(_mm.auth_error("authfail"))[:90])
+                _st = [s for s in _mm.status()["servers"]
+                       if s["id"] == "authfail"][0]
+                check("the card sees it too",
+                      _st["auth_required"] is True, str(_st["auth_required"]))
+
+                # A server that connects must not keep the stale refusal, or
+                # "Authorize" would sit on a working server's card.
+                config.set("mcp", "servers", value=[{
+                    "id": "authfail", "name": "Open now", "transport": "stdio",
+                    "command": [PY, "-s", SERVER], "enabled": True,
+                    "trusted": True, "timeout_s": 10}])
+                _st2 = _mm._servers.get("authfail")
+                if _st2 is not None:
+                    _st2.spec = config.get("mcp", "servers", default=[])[0]
+                await _mm.disconnect("authfail")
+                _ok = await _mm.connect("authfail")
+                check("a server that connects clears the remembered refusal",
+                      _ok.get("success")
+                      and _mm.auth_required("authfail") is False,
+                      f'success={_ok.get("success")} '
+                      f'auth_required={_mm.auth_required("authfail")}')
+                await _mm.disconnect("authfail")
+            finally:
+                _srv.shutdown()
+                _srv.server_close()
+        finally:
+            config.set("mcp", "servers", value=_saved_servers)
+            _ts.clear()
+            for _k, _v in _saved_tokens.items():
+                _ts.set(_k, _v)
+
         # ---- 9g. HTTP transport conformance (F6/F8/F9) -------------------
         # Each of these is a response a well-behaved server never sends, so
         # each needs a server that sends it on purpose. They are grouped

@@ -30,6 +30,84 @@ Branch `mcp-remediation`, based on `ea05fad`.
 | `e6e9f29` | **5.3b** `last_error` redaction | done, verified with teeth |
 | `696cbd3` | **5.3c** config import from other tools | done, verified with teeth |
 | `874703c` | **F7** per-server credential keying | done, verified with teeth |
+| `89f00a6` | plan: closure | done |
+| `pending` | **Two bugs found by live testing** (below) | done, verified with teeth |
+
+**Every finding is now closed.** F1–F11 are fixed and verified with teeth, and
+5.1 (OAuth a/b/c), 5.2 (DPAPI) and 5.3 (a/b/c) are done. Nothing in this plan
+is outstanding.
+
+### Live verification against real servers
+
+Unit tests with stubs prove a path works when the world behaves as the stub
+says. They cannot prove the world behaves that way. So the manager and market
+were driven against real remote MCP servers through the real protocol stack.
+
+**Ten real key-less HTTP endpoints were tried, nine connected** — all speaking
+`2025-06-18`: `tandem.ac/mcp` (13 tools), `mcp.getle.ad/mcp` (35),
+`prices.brainy.ae/mcp` (20), `plantguide.ae/mcp` (15), `mcp.projectory.ae/mcp`
+(5), `genosys.ae/mcp` (11), `easyvoice.ae/api/mcp` (7), `mcp.grovisor.ae/` (8),
+`mcp.datadubai.ae/mcp` (6). Tool names came back real (`search_docs`,
+`create_podcast`, `grotax_compute_ct`) and `auth_required` was correctly
+`False` for every one.
+
+A **real stdio server** (`@modelcontextprotocol/server-filesystem` via `npx`)
+completed a full round trip: `write_file` wrote to disk, `read_text_file` read
+it back, `list_directory` listed it, and a path outside the allowed roots was
+correctly refused.
+
+**Three real OAuth-protected endpoints** were tested:
+`api.inference.sh/mcp`, `mcp.snag.ac/mcp` and `propick.ae/mcp`. `discover()`
+fetched **real** authorization-server metadata from `api.inference.sh`,
+including `registration_endpoint` and real scopes (`agents:read`,
+`apps:read`, …) — the discovery chain works against production, not just a
+fixture.
+
+**Two bugs came out of this that the suite had not caught.** Both are now
+fixed and covered by tests that fail without the fix.
+
+#### Live finding 1: a refused sign-in was not remembered (`propick.ae`)
+
+`propick.ae/mcp` returned a genuine `401` with a proper
+`WWW-Authenticate: Bearer resource_metadata="…", scope="stock:read stock:write"`.
+The error *message* shown was correct, but `auth_required` reported **`False`**
+— so the card would say "this server needs a sign-in" and simultaneously offer
+no button to do it.
+
+Cause: `connect()` sets `state.client = None` when the connection fails, so
+`_auth_client()` built a fresh throwaway client with no memory of the 401. The
+verdict lived on the object that was thrown away, and the case that needs it
+most is exactly the one that discards it.
+
+Fix: the verdict is remembered on `McpServerState` (`auth_failed`,
+`auth_needs`) while the client is still in hand, and cleared by a subsequent
+successful connection so a working server does not keep a stale "Authorize".
+`auth_required()`/`auth_error()` read the state first, and report `False` for a
+server that is already authorised.
+
+#### Live finding 2: a silent listing is not an open one
+
+`ac.inference.sh/mcp` publishes `remotes` with **no `auth` field at all** — the
+raw registry entry is `{"type": "streamable-http", "url": …}` and nothing more
+— yet it answers 401. The market classified it (and `ac.snag/snag`) as keyless
+and `runnable`. Of 70 entries examined, the market classified **zero** as
+OAuth. The registry is simply silent about auth on most entries, so no amount
+of reading it can distinguish an open server from a closed one that did not
+say.
+
+Fix: `_probe_auth()` asks the endpoint itself — one unauthenticated
+`initialize` POST, since a 401 is the whole answer and costs the server
+nothing. It distinguishes `oauth` (401 *with* a Bearer challenge) from
+`closed` (a bare 401, a refusal no value can fix) from `""` (open, or
+unreachable — it never guesses). `_probe_auth_batch()` runs it over candidates
+whose auth is genuinely unknown, in the existing thread pool, and only ever
+*adds* a reason. Verified live on eight cases: the three OAuth servers above
+detected, four open servers left alone, an unreachable host silent.
+
+Controlled by `mcp.probe_remote_auth` (default `True`), forced off in the
+check suite so it never touches the network. A metered or offline user can turn
+it off; without it the market cannot tell an open server from a closed one that
+did not say.
 
 **Every finding is now closed.** F1–F11 are fixed and verified with teeth, and
 5.1 (OAuth a/b/c), 5.2 (DPAPI) and 5.3 (a/b/c) are done. Nothing in this plan

@@ -709,6 +709,82 @@ def _adopt_hosted(candidates: list[dict], official: dict[str, dict]) -> None:
         _finish(candidate)
 
 
+def _probe_auth(url: str, timeout: float = 6.0) -> str:
+    """Ask a remote endpoint whether it needs a sign-in, without a token.
+
+    The registry declares an `auth` field for some servers and nothing at all
+    for others, and the ones it says nothing about are not thereby open. A
+    server reached at `api.inference.sh/mcp` publishes `remotes` with no auth
+    of any kind and answers 401; offering it as `runnable` is the same lie this
+    was meant to remove, just arrived at from a listing that was silent rather
+    than wrong.
+
+    So ask. One unauthenticated POST with an `initialize` that will not be
+    accepted anyway — a 401 is the whole answer, and it costs the server
+    nothing. Returns "oauth", "closed" (401 without an OAuth challenge, e.g. a
+    key we cannot supply) or "" when the endpoint answers openly.
+    """
+    import urllib.request
+    import urllib.error
+
+    from backend.mcp_client.protocol import PROTOCOL_VERSION
+
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
+                   "clientInfo": {"name": "addled", "version": "1"}},
+    }).encode()
+    # `UA` is the market's dict of headers; this needs its own Accept, because
+    # the answer that matters here is an event-stream one from a server that
+    # opens without a token.
+    headers = dict(UA)
+    headers.update({"Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream"})
+    request = urllib.request.Request(url, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            # Anything but a 401 means the endpoint answers unauthenticated.
+            log.debug("MCP auth probe: %s answered %s", url, response.status)
+            return ""
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            return ""
+        challenge = (e.headers.get("WWW-Authenticate") if e.headers else "") or ""
+        # A bearer challenge naming where to get a token is OAuth; a bare 401
+        # is a server we have no way to sign in to, which is still a refusal
+        # and must not be offered as ready.
+        return "oauth" if "bearer" in challenge.lower() else "closed"
+    except Exception as e:  # noqa: BLE001
+        # Unreachable, refused, timed out: say nothing about auth. Guessing
+        # here would block servers that are merely slow to start.
+        log.debug("MCP auth probe could not reach %s: %s", url, e)
+        return ""
+
+
+def _probe_auth_batch(candidates: list[dict]) -> None:
+    """Probe remote candidates the listing said nothing about.
+
+    Only ones whose auth is genuinely unknown: a declared `auth` is believed,
+    and a candidate already blocked for a value the user can type is not worth
+    a request. Failures are silent — this only ever adds a reason, never
+    removes one, so a probe that does not answer costs nothing.
+    """
+    todo = [c for c in candidates
+            if c.get("transport") == "http" and c.get("url")
+            and not c.get("oauth")
+            and not (c.get("blocked_kinds") or [])]
+    if not todo:
+        return
+    with ThreadPoolExecutor(max_workers=_DETAIL_WORKERS) as pool:
+        verdicts = list(pool.map(lambda c: _probe_auth(c["url"]), todo))
+    for candidate, verdict in zip(todo, verdicts):
+        if not verdict:
+            continue
+        candidate["oauth"] = verdict == "oauth"
+        candidate["auth_probe"] = verdict
+        _finish(candidate)
+
+
 async def search(query: str, limit: int = 12,
                  sources: tuple[str, ...] = ("registry", "smithery")) -> list[dict]:
     """Candidate servers matching a query, from every source that has one."""
@@ -738,7 +814,29 @@ async def search(query: str, limit: int = 12,
                 if c.get("source") == "registry"}
     _adopt_hosted(list(merged.values()), official)
 
+    # The registry leaves `auth` off most entries, and a silent listing is not
+    # the same as an open one. Ask the endpoints themselves rather than
+    # presenting a server as ready and letting the click discover a 401.
+    if not _auth_probe_disabled():
+        await loop.run_in_executor(None, _probe_auth_batch,
+                                   list(merged.values()))
+
     return list(merged.values())
+
+
+def _auth_probe_disabled() -> bool:
+    """Whether to skip the live auth probe.
+
+    The check suite stubs the network and must never reach out, and a user on a
+    metered or offline connection should be able to turn this off. Default on:
+    without it the market cannot tell an open server from a closed one that
+    simply did not say.
+    """
+    try:
+        from backend.config import config
+        return not bool(config.get("mcp", "probe_remote_auth", default=True))
+    except Exception:  # noqa: BLE001
+        return True
 
 
 async def suggest(task: str, limit: int = 8) -> list[dict]:
