@@ -14,10 +14,26 @@ Branch `mcp-remediation`, based on `ea05fad`.
 | `9d21fdf` | **1.1** SSE framing (F1) | done, verified with teeth |
 | `c6a418a` | **1.2** Environment isolation (F2) | done, verified with teeth, opt-out in Settings |
 | `e86be6c` | **3.2** Model cannot self-approve (F5) | done, verified with teeth, 11 assertions rewritten |
+| `d975246` | Retargeted a stale `check_tools` assertion | done |
+| `337b755` | **Phase 6** loopback callback + PKCE + state | done, verified with teeth, shared with 5.1a |
 
-Next per the revised order: **Phase 6** (calendar callback — shares the
-`/oauth/callback` route and PKCE with 5.1a), then 3.1 (F4), Phase 2 (F3),
-Phase 4 (F6/F8/F9/F10), then 5.2 before 5.1a/b/c, then 5.3.
+Next per the revised order: 3.1 (F4), Phase 2 (F3), Phase 4 (F6/F8/F9/F10),
+then 5.2 before 5.1a/b/c, then 5.3.
+
+### Known suite failures, and which are not ours
+
+Two suites fail on this branch. Neither is caused by this work, and both are
+recorded here so a later run does not re-investigate them:
+
+- `check_topic_gate.py` — "the store was large enough to be evidence". A
+  data-size precondition; failed on `ea05fad` too.
+- `check_gaming_pause.py` — "the real desktop is not misread as gaming". This
+  reads the **live foreground window** and deliberately refuses to assert when
+  a frameless one is in front (its own comment explains why). The agent's
+  terminal is that window during an automated run, so it fails when run from
+  the tooling and passes in a normal shell. Measured: the foreground window
+  was this session's terminal at 1096x1888 with no caption. No file this
+  branch touches relates to gaming detection.
 
 **F5 note for whoever picks this up.** The fix is spread over five files on
 purpose, and each seam is load-bearing — reverting any one of them re-opens
