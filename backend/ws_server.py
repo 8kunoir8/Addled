@@ -2503,6 +2503,45 @@ def _register_default_handlers():
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    async def mcp_scan_configs(params: dict, ws) -> dict:
+        """Servers other tools have already been told about.
+
+        Reading only — nothing here is added. The user chooses, and what they
+        choose goes through the same `add` as a server typed by hand.
+        """
+        from backend.mcp_client import configimport
+        cwd = str(params.get("cwd") or "")
+        try:
+            return {"success": True, **configimport.scan(cwd)}
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": str(e)}
+
+    async def mcp_import_configs(params: dict, ws) -> dict:
+        """Add the chosen imports, and report anything that would not take."""
+        from backend.mcp_client import configimport
+        from backend.mcp_client.manager import mcp_manager
+        cwd = str(params.get("cwd") or "")
+        picked = params.get("servers") or {}
+        if isinstance(picked, list):
+            picked = {str(name): True for name in picked}
+        if not isinstance(picked, dict) or not picked:
+            return {"success": False, "error": "nothing chosen to import"}
+        try:
+            specs, errors = configimport.make_specs(picked, cwd=cwd)
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": str(e)}
+        added: list[str] = []
+        for spec in specs:
+            out = mcp_manager.add(spec)
+            if out.get("success"):
+                added.append(str(spec.get("id")))
+            else:
+                errors.append(f"{spec.get('name') or spec.get('id')}: "
+                              f"{out.get('error')}")
+        return {"success": bool(added) or not errors, "added": added,
+                "errors": errors, "imported": len(added),
+                "status": mcp_manager.status()}
+
     async def mcp_authorize(params: dict, ws) -> dict:
         """Start a sign-in for one server and return as soon as it is going.
 
@@ -6770,6 +6809,8 @@ def _register_default_handlers():
     _server.register("mcp.remove", mcp_remove)
     _server.register("mcp.connect", mcp_connect)
     _server.register("mcp.disconnect", mcp_disconnect)
+    _server.register("mcp.scanConfigs", mcp_scan_configs)
+    _server.register("mcp.importConfigs", mcp_import_configs)
     _server.register("mcp.authorize", mcp_authorize)
     _server.register("mcp.forgetAuth", mcp_forget_auth)
     _server.register("mcp.reload", mcp_reload)

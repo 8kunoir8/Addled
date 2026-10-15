@@ -64,6 +64,7 @@ SUITES = [
     "check_email_skills.py",
     "check_mcp_market.py",
     "check_oauth.py",
+    "check_mcp_import.py",
     "check_code_editor.py",
     "check_code_page.py",
     "check_code_learning.py",

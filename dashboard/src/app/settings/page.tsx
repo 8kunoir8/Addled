@@ -280,6 +280,10 @@ function McpSection({settings,update,saving,status}: any){
   const [authing,setAuthing]=useState<string|null>(null);
   const [form,setForm]=useState<any>({name:'',transport:'stdio',command:'',url:'',trusted:false,env:''});
   const [marketQuery,setMarketQuery]=useState('');
+  // Servers found in other tools' config files. Nothing here is added until
+  // the user ticks it: reading someone else's file is not an instruction.
+  const [found,setFound]=useState<any[]|null>(null);
+  const [chosen,setChosen]=useState<Record<string,boolean>>({});
   const [marketHits,setMarketHits]=useState<any[]|null>(null);
   const [marketBusy,setMarketBusy]=useState(false);
   const [extraArgs,setExtraArgs]=useState<Record<string,string>>({});
@@ -372,6 +376,33 @@ function McpSection({settings,update,saving,status}: any){
     }
     await act('mcp.add',{server},'add');
     setForm({name:'',transport:form.transport,command:'',url:'',trusted:false,env:''});
+  };
+
+  const scanConfigs=async()=>{
+    if(wsState!=='connected')return;
+    setBusy('scan'); setErr(null);
+    try{
+      const out=await send('mcp.scanConfigs',{});
+      if(out?.success===false){ setErr(out.error||'Could not read any config'); return; }
+      setFound(out.found||[]);
+      setChosen({});
+      if(!(out.found||[]).length)setErr('No MCP servers found in other tools\u2019 config files.');
+    }catch(e:any){ setErr(String(e?.message||e)); }
+    finally{ setBusy(null); }
+  };
+
+  const importConfigs=async()=>{
+    if(wsState!=='connected')return;
+    const picked=Object.keys(chosen).filter(k=>chosen[k]);
+    if(!picked.length){ setErr('Tick the servers to import.'); return; }
+    setBusy('import'); setErr(null);
+    try{
+      const out=await send('mcp.importConfigs',{servers:picked});
+      if(out?.status)setLive(out.status);
+      if(out?.errors?.length)setErr(out.errors.join('; '));
+      if(out?.added?.length)setFound(null);
+    }catch(e:any){ setErr(String(e?.message||e)); }
+    finally{ setBusy(null); }
   };
 
   const searchMarket=async()=>{
@@ -760,6 +791,55 @@ function McpSection({settings,update,saving,status}: any){
           To change a server's command or URL, remove it and add it again.
           Environment values are set here and stored in settings.json, never sent to the dashboard.
         </p>
+        <div className="border-t border-[#30363d] pt-3">
+          <div className="flex items-center gap-3">
+            <button onClick={scanConfigs} disabled={!!busy||wsState!=='connected'}
+              className="px-3 py-1.5 rounded text-xs border border-[#30363d] text-[#e8eaed] hover:border-[#484f58] disabled:opacity-40">
+              {busy==='scan'?'Looking…':'Import from other tools'}
+            </button>
+            <span className="text-[10px] text-[#8b949e]">
+              Reads Cursor, VS Code and Claude Code config files. Nothing is added until you tick it.
+            </span>
+          </div>
+          {found&&<div className="mt-2 space-y-1">
+            {found.length===0
+              ? <p className="text-[10px] text-[#8b949e]">No MCP servers found in other tools' config files.</p>
+              : found.map((f:any)=>(
+                <label key={`${f.source}:${f.name}`}
+                  className={`flex items-start gap-2 rounded border border-[#30363d] p-2 cursor-pointer ${f.duplicate_of||f.error?'opacity-60':''}`}
+                  title={f.error||f.duplicate_of?`Not importable: ${f.error||'a duplicate of '+f.duplicate_of}`:'Import this server'}>
+                  <input type="checkbox" className="mt-0.5"
+                    checked={!!chosen[f.id||f.name]}
+                    disabled={!!f.error||!!f.duplicate_of||!f.id}
+                    onChange={e=>setChosen({...chosen,[f.id||f.name]:e.target.checked})}/>
+                  <span className="min-w-0">
+                    <span className="block text-xs text-[#e8eaed] truncate">{f.name}
+                      <span className="ml-1 text-[10px] text-[#8b949e]">{f.source}{f.transport?` · ${f.transport}`:''}</span>
+                    </span>
+                    <span className="block truncate text-[10px] text-[#8b949e] font-mono">
+                      {f.command?`${f.command} ${(f.args||[]).join(' ')}`.trim():f.url||''}
+                    </span>
+                    {f.project&&<span className="block text-[10px] text-[#8b949e]">for {f.project}</span>}
+                    {f.error&&<span className="block text-[10px] text-[#d29922]">⚠ {f.error}</span>}
+                    {f.duplicate_of&&<span className="block text-[10px] text-[#8b949e]">also listed in another file</span>}
+                    {!!(f.missing||[]).length&&
+                      <span className="block text-[10px] text-[#d29922]">
+                        ⚠ needs {f.missing.join(', ')} in the environment — the import will leave it unset
+                      </span>}
+                    {!!(f.header_names||[]).length&&
+                      <span className="block text-[10px] text-[#8b949e]">
+                        carries {f.header_names.join(', ')} — stored as a credential, not shown
+                      </span>}
+                  </span>
+                </label>
+              ))}
+            {found.length>0&&
+              <button onClick={importConfigs} disabled={!!busy||wsState!=='connected'}
+                className="mt-1 px-3 py-1.5 rounded text-xs font-medium bg-[#3380FF] hover:bg-[#4d94ff] text-white disabled:opacity-40">
+                {busy==='import'?'Importing…':`Import ${Object.values(chosen).filter(Boolean).length||''} server(s)`}
+              </button>}
+          </div>}
+        </div>
       </div>
     </div>
   </div>;
