@@ -154,6 +154,15 @@ check("the turn still emits the reply on success",
       "bridge.reply.emit(reply)" in body)
 check("and it does not read a bracketed failure aloud",
       'startswith("[Not connected:")' in body, body[:0])
+# The failure string is not one the TTS guard would skip on its own --
+# "[Turn failed:" matches neither prefix the guard tests. What keeps it silent
+# is the early return, so pin that down rather than the prefix.
+check("the failure string is NOT one the TTS prefix guard would skip",
+      not "[Turn failed:".startswith("[Not connected:")
+      and not "[Turn failed:".startswith("[Provider"),
+      "so the early return is what keeps it silent, not the guard")
+check("and the except branch returns before the TTS block is reached",
+      bool(_handler) and "return" in _handler.group(0))
 
 print()
 if fails:
