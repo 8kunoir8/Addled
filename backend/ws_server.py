@@ -5670,6 +5670,70 @@ def _register_default_handlers():
         event = calendar.update_event(params.get("eventId", ""), fields)
         return {"event": event} if event else {"error": "not found"}
 
+    async def calendar_google_state(params: dict, ws) -> dict:
+        """Whether Google is configured and connected."""
+        from backend.config import config
+        from backend.integrations.calendar_integration import calendar
+        client_id = str(config.get("integrations", "google_client_id",
+                                  default="") or "")
+        tokens = config.get("integrations", "google_tokens", default={}) or {}
+        return {
+            "configured": bool(client_id),
+            "connected": bool(tokens.get("access_token")),
+            "pending": getattr(calendar, "_flow", None) is not None,
+        }
+
+    async def calendar_google_connect(params: dict, ws) -> dict:
+        """Start a Google authorization and open the browser.
+
+        The wait happens on a worker thread, not here. `google_wait_and_sync`
+        blocks for up to five minutes by design — that is how long a person
+        may take at a consent screen — and awaiting it on the event loop would
+        freeze every other socket in the app for the duration. So the flow is
+        started, the URL is opened, and the waiting is handed to a thread that
+        pushes the outcome when it arrives.
+        """
+        import threading
+        from backend.integrations.calendar_integration import calendar
+        url = calendar.google_auth_url()
+        if not url:
+            return {"error": ("No Google client id is set. Add one in "
+                              "Settings first.")}
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"Could not open the browser: {e}", "url": url}
+
+        def _wait_and_report():
+            try:
+                result = calendar.google_wait_and_sync(timeout=300.0)
+            except Exception as e:  # noqa: BLE001
+                result = {"events": 0, "error": f"{type(e).__name__}: {e}"}
+            # `broadcast_nowait` is the hop from a worker thread to this
+            # server's loop, and it is what every other background caller
+            # uses (`engine.py`, the approval notices, the bot manager). The
+            # tokens are dropped from the payload: the dashboard has no reason
+            # to receive a credential it cannot use.
+            try:
+                get_server().broadcast_nowait(
+                    "calendar.google",
+                    {k: v for k, v in result.items() if k != "google_tokens"})
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not report the Google result: %s", e)
+
+        threading.Thread(target=_wait_and_report, daemon=True,
+                         name="calendar-google-oauth").start()
+        return {"success": True, "url": url,
+                "message": "Finish connecting Google in the browser."}
+
+    async def calendar_google_disconnect(params: dict, ws) -> dict:
+        """Forget the stored Google tokens."""
+        from backend.config import config
+        config.set("integrations", "google_tokens", value={})
+        return {"success": True}
+
+
     # ---- Tasks scheduler -------------------------------------------------------
 
     async def tasks_schedule(params: dict, ws) -> dict:
@@ -6720,6 +6784,9 @@ def _register_default_handlers():
     _server.register("calendar.list", calendar_list)
     _server.register("calendar.delete", calendar_delete)
     _server.register("calendar.update", calendar_update)
+    _server.register("calendar.googleState", calendar_google_state)
+    _server.register("calendar.googleConnect", calendar_google_connect)
+    _server.register("calendar.googleDisconnect", calendar_google_disconnect)
     _server.register("email.fetch", email_fetch)
     _server.register("email.send", email_send)
     _server.register("email.search", email_search)

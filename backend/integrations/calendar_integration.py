@@ -223,58 +223,141 @@ class CalendarIntegration:
         self._events = [e for e in self._events if e.get("start", "") >= cutoff]
         self._save()
 
+    # Google's endpoints. Named here rather than inline so the flow, the
+    # exchange and the refresh all agree on them.
+    GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+    GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+    GOOGLE_EVENTS_ENDPOINT = ("https://www.googleapis.com/calendar/v3/"
+                              "calendars/primary/events")
+    GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+
     def google_auth_url(self) -> str | None:
-        """Get Google OAuth authorization URL (requires client ID in config)."""
+        """Start a Google authorization and return the URL to open.
+
+        The flow is kept on the instance (`self._flow`) because the callback
+        arrives on a later request and needs the same PKCE verifier and state.
+
+        Returns None when no client id is configured — the caller shows a
+        "not configured" state rather than opening a browser at a URL Google
+        will reject.
+        """
         try:
             from backend.config import config
-            client_id = config.get("integrations", "google_client_id", default="")
+            from backend.integrations import oauth_loopback
+            client_id = config.get("integrations", "google_client_id",
+                                   default="")
             if not client_id:
                 return None
-            scope = "https://www.googleapis.com/auth/calendar.events"
-            redirect = "http://localhost:9876/oauth/callback"
-            return (f"https://accounts.google.com/o/oauth2/v2/auth?"
-                    f"client_id={client_id}&redirect_uri={redirect}"
-                    f"&response_type=code&scope={scope}&access_type=offline")
-        except Exception:
+            # Supersede any previous attempt rather than leaving its port
+            # bound: connecting twice should not fail on a socket.
+            previous = getattr(self, "_flow", None)
+            if previous is not None:
+                previous.cancel("Superseded by a newer attempt.")
+            flow = oauth_loopback.LoopbackFlow()
+            self._flow = flow
+            return flow.authorize_url(
+                self.GOOGLE_AUTH_ENDPOINT,
+                client_id=client_id,
+                scope=self.GOOGLE_SCOPE,
+                # `offline` is what makes Google issue a refresh token, and
+                # `consent` is what makes it issue one AGAIN on a repeat
+                # grant — without it the second connect returns no refresh
+                # token and the connection silently stops renewing.
+                extra={"access_type": "offline", "prompt": "consent"},
+            )
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not build the Google auth URL: %s", e)
             return None
 
-    def sync_google(self, code: str) -> dict:
-        """Exchange auth code for tokens and pull Google Calendar events."""
+    def google_wait_and_sync(self, timeout: float = 300.0) -> dict:
+        """Wait for the browser callback, then exchange and pull events.
+
+        The half that was missing: nothing consumed the callback, so no code
+        ever reached `sync_google`. Call this on a worker thread after opening
+        the URL from `google_auth_url()`.
+        """
+        flow = getattr(self, "_flow", None)
+        if flow is None:
+            return {"events": 0,
+                    "error": "No connection is in progress — start again."}
+        try:
+            result = flow.wait(timeout=timeout)
+        finally:
+            self._flow = None
+        if result.get("error"):
+            return {"events": 0, "error": result["error"]}
+        return self.sync_google(result.get("code", ""),
+                                verifier=result.get("verifier", ""),
+                                redirect_uri=result.get("redirect_uri", ""))
+
+    def sync_google(self, code: str, verifier: str = "",
+                    redirect_uri: str = "") -> dict:
+        """Exchange an auth code for tokens and pull Google Calendar events.
+
+        `verifier` is the PKCE code verifier the authorization was started
+        with, and `redirect_uri` must be byte-identical to the one in the
+        authorize request — Google rejects the exchange otherwise. Both come
+        from the flow, and both are required: the previous version sent neither
+        and hand-rolled the POST, so it could not have completed even at a
+        working redirect.
+        """
         try:
             from backend.config import config
-            import urllib.request
-            import urllib.parse
+            from backend.integrations import oauth_loopback
 
-            client_id = config.get("integrations", "google_client_id", default="")
-            client_secret = config.get("integrations", "google_client_secret", default="")
+            client_id = config.get("integrations", "google_client_id",
+                                   default="")
+            client_secret = config.get("integrations", "google_client_secret",
+                                       default="")
 
-            if not client_id or not client_secret:
-                return {"events": 0, "error": "Google credentials not configured"}
+            if not client_id:
+                return {"events": 0,
+                        "error": "Google credentials not configured"}
+            if not verifier or not redirect_uri:
+                return {"events": 0,
+                        "error": ("This connection was started before the "
+                                  "current flow; start it again from the "
+                                  "Connect button.")}
 
-            # Exchange code for tokens
-            data = urllib.parse.urlencode({
-                "code": code,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": "http://localhost:9876/oauth/callback",
-                "grant_type": "authorization_code",
-            }).encode()
-            req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data)
-            with urllib.request.urlopen(req) as resp:
-                tokens = json.loads(resp.read())
+            tokens = oauth_loopback.exchange_code(
+                token_endpoint=self.GOOGLE_TOKEN_ENDPOINT,
+                code=code,
+                verifier=verifier,
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=redirect_uri,
+            )
+            if tokens.get("error"):
+                return {"events": 0, "error": tokens["error"]}
+            if not tokens.get("access_token"):
+                return {"events": 0,
+                        "error": "Google returned no access token."}
 
             # Save tokens
             config.set("integrations", "google_tokens", value=tokens)
 
-            # Fetch events
+            # Fetch events. Uses `httpx` like the token exchange above, rather
+            # than the `urllib` this used to reach for: `urllib` has no timeout
+            # here, so an unresponsive Google held the calling thread for the
+            # OS default — and the import was only present because the exchange
+            # was hand-rolled in the same function.
+            import httpx
             access_token = tokens.get("access_token", "")
             time_min = datetime.utcnow().isoformat() + "Z"
-            url = (f"https://www.googleapis.com/calendar/v3/calendars/primary/events?"
-                   f"timeMin={time_min}&maxResults=50&singleEvents=true&orderBy=startTime")
-            req2 = urllib.request.Request(url)
-            req2.add_header("Authorization", f"Bearer {access_token}")
-            with urllib.request.urlopen(req2) as resp2:
-                gcal = json.loads(resp2.read())
+            url = (self.GOOGLE_EVENTS_ENDPOINT +
+                   f"?timeMin={time_min}&maxResults=50&singleEvents=true"
+                   "&orderBy=startTime")
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    resp2 = client.get(url, headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/json"})
+                resp2.raise_for_status()
+                gcal = resp2.json()
+            except Exception as e:  # noqa: BLE001
+                return {"events": 0,
+                        "error": (f"Connected, but reading the calendar "
+                                  f"failed: {e}")}
 
             count = 0
             for item in gcal.get("items", []):

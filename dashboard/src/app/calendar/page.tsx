@@ -11,7 +11,7 @@ interface TaskRow { date:string; task_id:string; title:string; action:string; ti
 interface TaskDetail { id:string; title:string; action:string; time:string; date:string; enabled:boolean; rule:string; payload:string; recurrence:{type:string;weekdays:number[]}; }
 
 export default function CalendarPage() {
-  const { state: wsState, send } = useWS();
+  const { state: wsState, send, onNotification } = useWS();
   const today=new Date();
   const [viewDate,setViewDate]=useState(new Date(today.getFullYear(),today.getMonth(),1));
   const [events,setEvents]=useState<CalendarEvent[]>([]);
@@ -27,6 +27,12 @@ export default function CalendarPage() {
   const [newTaskRule,setNewTaskRule]=useState('none');
   // edit state: taskId -> {title,time,action,rule,payload}
   const [editing,setEditing]=useState<Record<string,Record<string,string>>>({});
+  // Google Calendar connection. `configured` is false until a client id is
+  // set, and the button says so rather than opening a browser at a URL that
+  // cannot work.
+  const [gcal,setGcal]=useState<{configured:boolean;connected:boolean;pending:boolean}>({configured:false,connected:false,pending:false});
+  const [gcalBusy,setGcalBusy]=useState(false);
+
 
   const fetchMonth = useCallback(async () => {
     if (wsState !== 'connected') return;
@@ -49,6 +55,47 @@ export default function CalendarPage() {
   }, [wsState, send, viewDate]);
 
   useEffect(() => { fetchMonth(); }, [fetchMonth]);
+  const refreshGcal = useCallback(async () => {
+    if (wsState !== 'connected') return;
+    try {
+      const r = await send('calendar.googleState', {});
+      if (r) setGcal({
+        configured: !!r.configured, connected: !!r.connected,
+        pending: !!r.pending,
+      });
+    } catch {}
+  }, [wsState, send]);
+
+  useEffect(() => { refreshGcal(); }, [refreshGcal]);
+
+  // The connect call opens a browser and returns immediately; the result
+  // arrives later as a `calendar.google` event. Listening for it is what
+  // flips the button, rather than pretending the call itself connected.
+  useEffect(() => {
+    if (wsState !== 'connected') return;
+    const off = onNotification('calendar.google', (p: Record<string, unknown>) => {
+      setGcalBusy(false);
+      refreshGcal();
+      if (p?.events !== undefined) fetchMonth();
+    });
+    return () => { if (off) off(); };
+  }, [wsState, onNotification, refreshGcal, fetchMonth]);
+
+  const handleConnect = async () => {
+    if (wsState !== 'connected' || gcalBusy) return;
+    setGcalBusy(true);
+    try {
+      const r = await send('calendar.googleConnect', {});
+      if (r?.error) { setGcalBusy(false); alert(r.error); }
+    } catch { setGcalBusy(false); }
+  };
+
+  const handleDisconnect = async () => {
+    if (wsState !== 'connected') return;
+    await send('calendar.googleDisconnect', {});
+    refreshGcal();
+  };
+
 
   const handleAddEvent = async () => {
     if (!newTitle.trim() || !selectedDate || wsState !== 'connected') return;
@@ -135,6 +182,22 @@ export default function CalendarPage() {
           <span className="text-sm font-medium text-[#e8eaed]">{MONTHS[month]} {year}</span>
           <button onClick={nextMonth} className="text-sm px-2 py-1 text-[#8b949e] hover:text-[#e8eaed]">▶</button>
           <button onClick={goToday} className="text-xs px-2 py-1 bg-[#21262d] text-[#e8eaed] rounded hover:bg-[#30363d]">Today</button>
+          {gcal.connected ? (
+            <button onClick={handleDisconnect}
+              title="Google Calendar is connected"
+              className="text-xs px-2 py-1 bg-[#21262d] text-[#3fb950] rounded hover:bg-[#30363d]">
+              ● Google
+            </button>
+          ) : (
+            <button onClick={handleConnect}
+              disabled={!gcal.configured || gcalBusy}
+              title={gcal.configured
+                ? 'Connect Google Calendar'
+                : 'Add a Google client id in Settings first'}
+              className="text-xs px-2 py-1 bg-[#21262d] text-[#e8eaed] rounded hover:bg-[#30363d] disabled:opacity-50 disabled:cursor-not-allowed">
+              {gcalBusy ? 'Waiting for browser…' : 'Connect Google'}
+            </button>
+          )}
         </div>
       </header>
       <div className="flex-1 flex">
