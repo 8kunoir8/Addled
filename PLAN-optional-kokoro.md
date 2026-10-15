@@ -261,37 +261,122 @@ choice when the models are missing, rather than letting it produce silence.
 
 ---
 
-## Risks, and what the plan does about them
+## Risks: what further investigation changed
 
-- **A wrong hash bricks the download.** Mitigated: hashes were computed from
-  copies *proven* identical to upstream (size + first-MB hash), and verification
-  happens before the rename, so a mismatch leaves the previous state intact.
-- **A 325 MB download that dies at 90% restarts.** No byte-range resume, same
-  as `rtk.py`. Acceptable to match, but it is a visible papercut — flagged as a
-  follow-up rather than hidden.
-- **Offline / enterprise installs lose local TTS.** Today a bundled Kokoro works
-  with no network at all. After this, a fresh install needs one download. Edge
-  already required network, so the regression is narrower than it looks, but it
-  is real and belongs in the release notes.
-- **The saving only lands on fresh installs.** An upgrading user keeps working
-  from their existing `Program Files` copy, because resolution prefers the
-  install directory — deliberately, so nothing breaks. The 331 MB is therefore
-  realised on fresh installs until old files are removed. **Decide explicitly**
-  whether an upgrade should delete the now-unused files; not doing it is the
-  safe default and is what this plan assumes.
-- **Two model copies can exist.** Install-dir copy (upgraded user) and data-dir
-  copy (fresh user). The resolution order makes this well-defined and prefers
-  the install, but `status()` must report which one is in use so the UI is not
-  guessing.
+The first draft listed these as open risks. Looking at the codebase, most have
+a precedent already solved here, and the assessment below replaces guesswork
+with what was found.
+
+### Offline installs lose local TTS — much smaller than it looked
+
+A fresh install already needs network for more than this:
+
+- the **Playwright Chromium build** (~150 MB, `backend/browser/auto_install.py`);
+- **torch + transformers** (~2.5 GB, the "Install vision support" button);
+- **SenseVoice STT**, which is *already* an optional download and is **not
+  bundled** — `scripts/fetch_voice_models.py` fetches it behind `--sensevoice`,
+  and `backend/voice/models/SenseVoiceSmall/` does not exist on this machine.
+
+That last one settles it: **the sibling half of the voice feature already works
+exactly this way.** Kokoro moving to a download does not introduce a new
+category — it makes TTS consistent with STT, the browser, and vision. The
+regression is real but narrow, and the release note already has a shape:
+"SenseVoice and the Kokoro voice both download on first use."
+
+### The saving is only for fresh installs; upgrades keep the old files
+
+Confirmed. NSIS extracts **over** an existing install rather than wiping it, and
+the installer is `perMachine: false` (`electron-builder.yml:205`), so an upgraded
+user keeps their `resources/backend/voice/models/*.onnx` in place and the
+resolution order deliberately uses them.
+
+This is the one genuine **decision** in this plan, and it has a clean precedent:
+the installer already runs privileged work after extraction (`customInstall` in
+`electron/installer-precompile.nsh`), for the same reason — `Program Files` is
+read-only to the app but writable to the installer. That hook could delete the
+now-unused models. Options are at the end, under **Decisions**.
+
+### A download that dies at 90% restarts
+
+Still true, and now much less important: **every other on-demand download in
+this app has the same property** (`rtk.py`, `uv.py`, the browser, torch). With
+fp32 chosen, the exposure is 325 MB; and because the install is per-user and
+`DATA_DIR` is `%LOCALAPPDATA%\Addled`, a completed download **survives upgrades
+and is not removed on uninstall** (verified: no `deleteAppDataOnUninstall`).
+So this is paid at most once per machine. Range resume stays a follow-up, not a
+blocker.
+
+### Two model copies can exist
+
+Real but well-defined, and the fix is already in the plan: resolution prefers
+the install directory, and `status()` must report which path is in use so the
+UI never guesses. Worth a check, not a redesign.
+
+### A wrong hash bricks the download
+
+Mitigated as far as it can be: the hashes were computed from copies **proven**
+byte-identical to upstream (size exact, first-MB hash identical), and
+verification happens before the atomic rename, so a mismatch leaves the previous
+state intact. The residual risk is upstream replacing the asset under a fixed
+tag, which would break the download loudly rather than corrupt it silently —
+the right failure direction.
+
+### New consideration: download during install is possible, and precedented
+
+`electron/installer-precompile.nsh` already does exactly this shape: strip
+something from the bundle, put it back in the installer where an elevated writer
+exists, with `IfFileExists` guards, a fallback path, and best-effort failure
+("a slower first import is far better than a failed install"). It detects the
+interpreter, runs it, ignores the result.
+
+So a checkbox in the NSIS UI ("also download the offline voice, ~350 MB,
+requires internet") is a **known-good mechanism here**, not an invention. It
+also needs `fetch_voice_models.py` (or a small sibling) shipped into
+`resources/scripts/`, exactly as `precompile_bundle.py` is. It is more work and
+more installer surface; the alternative is the in-app button alone. See
+**Decisions**.
+
+## Decisions for you
+
+Three real choices, each with the tradeoff as I see it. Everything else in the
+plan I can decide on the evidence and have.
+
+### A. Should an upgrade delete the old bundled models?
+
+| option | effect |
+|---|---|
+| **Leave them** (current plan) | Safest; nothing can break. Costs the user ~356 MB of dead disk until they notice or reinstall. Saving applies to fresh installs only. |
+| **Delete them in the installer** | Delivers the saving to upgrading users too, and uses an existing hook. Risk: deleting files under `Program Files` on upgrade is the kind of thing that is fine until it is not — a mis-scoped path deletes user data. Would need the guard to be narrow and reversible. |
+| **Delete only if a data-dir copy already exists** | Middle ground: only reclaims when the user has a working replacement, so nothing can go missing. More logic, and the case is rare. |
+
+My recommendation: **leave them**, and let the size win come from fresh installs.
+The disk is the user's and 356 MB is not scarce; a wrong delete is worse. Worth
+revisiting if upgrade size becomes a real complaint.
+
+### B. Should the installer offer to download the voice?
+
+| option | effect |
+|---|---|
+| **In-app button only** (current plan) | Smallest change, one code path, no new installer surface. A user who wants a local voice clicks once. |
+| **Installer checkbox, default on** | The user most likely to want it is the one installing, and it is precedented. More NSIS surface, a second download path to keep correct, and an offline install must not fail. |
+| **Installer checkbox, default off, plus the button** | Best of both, most code. |
+
+My recommendation: **in-app button only for now.** It is one path, it is
+testable, and the installer hook can be added later without moving anything —
+the download module and the hashes are the parts that matter, and both are
+shared.
+
+### C. Anything else to raise?
+
+If you would rather I do not decide B or A, tell me and I will take the
+conservative option in each case (leave files alone; in-app button only).
 
 ## Follow-ups (explicitly out of scope)
 
-- **Quantised models.** Upstream publishes `int8` (92.4 MB) and `fp16`
-  (177.5 MB) against fp32's 325.5 MB — the difference between roughly 30s and
-  2 min on a slow line, at an audible quality cost. Offer as a choice later;
-  fp32 first, as decided.
-- **Byte-range resume** for an interrupted download.
-- **A "download the model during install" switch**, for a machine that is
-  online once and offline afterwards.
+- **Quantised models.** `int8` (92.4 MB) and `fp16` (177.5 MB) against fp32's
+  325.5 MB — roughly 30s versus 2 min on a slow line, at an audible quality
+  cost. fp32 first, as decided; offer the choice later.
+- **Byte-range resume**, to match nothing else in the app having it either.
+- **Installer-time download** (Decision B), if the button alone proves annoying.
 - **Verify the hashes in `scripts/fetch_voice_models.py`**, which currently
   trusts whatever it downloads.
