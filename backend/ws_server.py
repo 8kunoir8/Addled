@@ -1437,6 +1437,48 @@ async def _speak_reply(text: str, voice: str | None = None) -> dict:
                 pass
 
 
+async def _auto_speak(text: str, length: int) -> None:
+    """Auto-speak a chat reply, and say what actually happened.
+
+    The log line used to be written *before* the attempt and said "speaking"
+    whatever the outcome, so a failing engine produced:
+
+        21:24:41 INFO  Auto-TTS: speaking chat reply (58 chars)
+        21:24:42 ERROR addled.tts: TTS error: 403, Invalid response status
+
+    The character then said nothing, and nothing told the user why — the log
+    claimed success a second before reporting failure. On a machine where the
+    configured engine was down, every reply was silently dropped.
+
+    So: speak first, then log what happened. A failure is reported to the user
+    through the same bubble channel a failed turn uses, because "Auto TTS is on
+    and nothing is being said" is otherwise indistinguishable from broken
+    speakers, and that is a long way to go to find out it was the engine.
+    """
+    result = await _speak_reply(text)
+    if result.get("success"):
+        engine = result.get("engine") or "?"
+        if result.get("fell_back_from"):
+            log.info("Auto-TTS: spoke the reply with %s (%d chars) after %s "
+                     "failed", engine, length, result["fell_back_from"][:60])
+        else:
+            log.info("Auto-TTS: spoke the reply with %s (%d chars)",
+                     engine, length)
+        return
+    log.warning("Auto-TTS: could not speak the reply (%d chars): %s",
+                length, result.get("error"))
+    if _engine_ref is not None:
+        try:
+            _engine_ref.sig_insight.emit(
+                "I couldn't speak that reply — the voice engine failed"
+                + (f" ({str(result.get('error'))[:120]})"
+                   if result.get("error") else "")
+                + ". Settings → Voice has a local voice you can download "
+                  "that works offline.")
+        except Exception:
+            log.debug("could not report the TTS failure", exc_info=True)
+
+
 def _record_scope(record):
     """Unpack ``record`` into three booleans: (history, memory, journal).
 
@@ -2948,8 +2990,7 @@ def _register_default_handlers():
             from backend.config import config
             if config.get("voice", "auto_tts", default=True):
                 if reply and not reply.startswith(("[Not connected:", "[Provider")):
-                    _spawn(_speak_reply(reply))
-                    log.info("Auto-TTS: speaking chat reply (%d chars)", len(reply))
+                    _spawn(_auto_speak(reply, len(reply)))
         except Exception:
             log.debug("Auto-TTS dispatch failed", exc_info=True)
         return result

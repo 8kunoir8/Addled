@@ -216,9 +216,157 @@ def run_selection_tests():
               tts.engine_speaks("kokoro", "ja") is True)
         check("engine_speaks knows edge has Indonesian",
               tts.engine_speaks("edge", "id") is True)
+
+        # 6. The fallback must work in BOTH directions.
+        #
+        # It was one-way: Kokoro could fall back to edge on a raise, but
+        # `_speak_edge` RETURNS {"success": False} rather than raising, so with
+        # the default engine (edge) unavailable -- and it genuinely was, 403 on
+        # every voice -- speak() returned the failure and said nothing while a
+        # working Kokoro sat installed. The point of these two checks is that a
+        # failure is a failure whichever way it arrives.
+        async def failing_edge(text, voice, rate="+0%"):
+            calls.append(("edge", voice))
+            return {"success": False, "error": "403 rejected"}
+
+        async def failing_kokoro(text, voice, speed=1.0):
+            calls.append(("kokoro", voice))
+            return {"success": False, "error": "no model"}
+
+        config._data["voice"].update({"tts_engine": "edge", "language": "en"})
+        tts._speak_edge = failing_edge
+        calls.clear()
+        result = asyncio.run(tts.speak("hello", speed=1.0))
+        check("a failing edge falls back to kokoro on success:False, not just "
+              "on a raise",
+              result.get("success") is True
+              and result.get("engine") == "kokoro",
+              f"got {result} (pre-fix this returned success=False and the "
+              f"reply went unspoken)")
+        check("and it says which engine it fell back from",
+              bool(result.get("fell_back_from")), str(result))
+
+        tts._speak_edge, tts._speak_kokoro = fake_edge, failing_kokoro
+        config._data["voice"].update({"tts_engine": "kokoro"})
+        calls.clear()
+        result = asyncio.run(tts.speak("hello", speed=1.0))
+        check("a failing kokoro falls back to edge the same way",
+              result.get("success") is True
+              and result.get("engine") == "edge", str(result))
+
+        # 7. Both down: report the failure honestly rather than claiming to
+        #    have spoken, and name what was tried.
+        tts._speak_edge, tts._speak_kokoro = failing_edge, failing_kokoro
+        result = asyncio.run(tts.speak("hello", engine="edge", speed=1.0))
+        check("both engines failing reports failure, not success",
+              result.get("success") is False, str(result))
+        check("and names both engines it tried",
+              set(result.get("tried") or []) == {"edge", "kokoro"},
+              str(result.get("tried")))
+
+        # 8. A pinned voice belongs to the engine it was chosen on and must not
+        #    be carried onto the other one, which would name a voice that
+        #    engine does not have.
+        tts._speak_edge, tts._speak_kokoro = failing_edge, fake_kokoro
+        calls.clear()
+        result = asyncio.run(tts.speak("hello", voice="af_heart",
+                                       engine="edge", speed=1.0))
+        check("a pinned voice is not carried to the other engine",
+              calls and calls[-1][0] == "kokoro"
+              and calls[-1][1] != "af_heart",
+              f"got {calls} -- the edge voice must not be sent to kokoro")
     finally:
         tts._speak_edge, tts._speak_kokoro = real_edge, real_kokoro
         config._data["voice"] = original
+
+
+def run_auto_speak_tests():
+    """Auto-TTS must not claim to speak when it cannot.
+
+    The log line was written BEFORE the attempt and said "speaking" whatever
+    happened, so a failing engine produced "Auto-TTS: speaking chat reply" one
+    second before "TTS error: 403". The character said nothing and nothing told
+    the user why -- indistinguishable from broken speakers.
+    """
+    import logging
+    from backend import ws_server
+
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Capture()
+    logger = logging.getLogger("addled.ws")
+    logger.addHandler(handler)
+    level = logger.level
+    logger.setLevel(logging.DEBUG)
+
+    class StubEngine:
+        """Stands in for the Qt engine so sig_insight is observable."""
+        _voice_busy = False
+        def __init__(self):
+            self.insights = []
+        class _Signal:
+            def __init__(self, sink):
+                self._sink = sink
+            def emit(self, value):
+                self._sink(value)
+        @property
+        def sig_insight(self):
+            return StubEngine._Signal(self.insights.append)
+        @property
+        def sig_agent_state(self):
+            return StubEngine._Signal(lambda _v: None)
+
+    import backend.voice.tts as tts
+    real_kokoro, real_edge = tts._speak_kokoro, tts._speak_edge
+    engine = StubEngine()
+    previous_engine = getattr(ws_server, "_engine_ref", None)
+    ws_server._engine_ref = engine
+    try:
+        async def ok_kokoro(text, voice, speed=1.0):
+            return {"success": True, "engine": "kokoro", "duration_ms": 1}
+
+        async def bad_edge(text, voice, rate="+0%"):
+            return {"success": False, "error": "403 rejected"}
+
+        async def bad_kokoro(text, voice, speed=1.0):
+            return {"success": False, "error": "no model"}
+
+        # 1. Success: the line names the engine, and says nothing to the user.
+        records.clear()
+        engine.insights.clear()
+        tts._speak_kokoro, tts._speak_edge = ok_kokoro, bad_edge
+        asyncio.run(ws_server._auto_speak("hello there", 11))
+        check("a spoken reply logs the engine that spoke it",
+              any("kokoro" in m for m in records), str(records))
+        check("and says nothing to the user when the speech worked",
+              engine.insights == [], str(engine.insights))
+
+        # 2. Failure: no claim of speaking, and the user is told.
+        records.clear()
+        engine.insights.clear()
+        tts._speak_kokoro, tts._speak_edge = bad_kokoro, bad_edge
+        asyncio.run(ws_server._auto_speak("hello there", 11))
+        check("a failed utterance never claims it was spoken",
+              not any("speaking" in m.lower() for m in records),
+              f"records={records} (this is the misleading line)")
+        check("a failed utterance is reported as a failure",
+              any("could not speak" in m for m in records), str(records))
+        check("and the user is told through the bubble rather than the log "
+              "alone",
+              len(engine.insights) == 1, str(engine.insights))
+        check("the message names the cause and a way out",
+              engine.insights and "403" in engine.insights[0]
+              and "Settings" in engine.insights[0],
+              str(engine.insights))
+    finally:
+        tts._speak_kokoro, tts._speak_edge = real_kokoro, real_edge
+        ws_server._engine_ref = previous_engine
+        logger.removeHandler(handler)
+        logger.setLevel(level)
 
 
 def run_payload_test():
@@ -321,6 +469,7 @@ def run_empty_audio_tests():
 def main():
     run_kokoro_tests()
     run_edge_tests()
+    run_auto_speak_tests()
     run_payload_test()
     run_selection_tests()
     run_empty_audio_tests()

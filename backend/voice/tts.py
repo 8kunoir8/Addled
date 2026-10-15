@@ -147,20 +147,56 @@ async def speak(text: str, voice: str | None = None,
                          engine, wanted, alt_engine, alt_voice)
                 engine, voice = alt_engine, alt_voice
 
-    if engine == "kokoro":
-        kokoro_voice = voice or config.get(
-            "voice", "kokoro_voice", default=DEFAULT_KOKORO_VOICE)
-        try:
-            return await _speak_kokoro(text, kokoro_voice, speed)
-        except Exception as e:
-            log.warning("Kokoro TTS failed (%s) — falling back to edge-tts", e)
-    # The configured voice, not the hardcoded default: voice.tts_voice was
-    # previously written by the dashboard and read by nobody, so this setting
-    # silently had no effect on anything the user actually heard.
-    edge_voice = voice or config.get(
-        "voice", "tts_voice", default=DEFAULT_EDGE_VOICE) \
-        or DEFAULT_EDGE_VOICE
-    return await _speak_edge(text, edge_voice, rate)
+    # Both engines are tried, in order, when the first cannot speak. Which one
+    # is first is the configured preference; the fallback exists so a broken
+    # one never means silence.
+    #
+    # This used to be one-way, and it failed in the direction that mattered.
+    # `_speak_edge` RETURNS {"success": False} rather than raising, so with the
+    # default engine (edge) and edge unavailable — Microsoft rejecting the auth
+    # token, or no network — speak() returned the failure and said nothing,
+    # while a working Kokoro sat installed and unused. Kokoro could fall back
+    # to edge; edge could not fall back to Kokoro.
+    #
+    # A failure is a failure whichever way it arrives: `success: False` out of
+    # the engine, or an exception. Both are handled the same way, and the other
+    # engine is tried before giving up.
+    order = ["kokoro", "edge"] if engine == "kokoro" else ["edge", "kokoro"]
+    # A pinned voice belongs to the engine it was chosen on; carrying it to the
+    # other one would name a voice that engine does not have. Only the caller's
+    # explicit `voice` is dropped on fallback, never the configured one.
+    pinned = voice
+    first_error = ""
+    for attempt, name in enumerate(order):
+        if attempt and not engine_available(name):
+            log.info("not falling back to '%s': it is not available", name)
+            continue
+        if name == "kokoro":
+            kokoro_voice = (pinned if attempt == 0 else None) or config.get(
+                "voice", "kokoro_voice", default=DEFAULT_KOKORO_VOICE)
+            try:
+                result = await _speak_kokoro(text, kokoro_voice, speed)
+            except Exception as e:  # noqa: BLE001
+                result = {"success": False, "error": str(e)}
+        else:
+            # The configured voice, not the hardcoded default: voice.tts_voice
+            # was previously written by the dashboard and read by nobody, so
+            # this setting silently had no effect on what the user heard.
+            edge_voice = (pinned if attempt == 0 else None) or config.get(
+                "voice", "tts_voice", default=DEFAULT_EDGE_VOICE) \
+                or DEFAULT_EDGE_VOICE
+            try:
+                result = await _speak_edge(text, edge_voice, rate)
+            except Exception as e:  # noqa: BLE001
+                result = {"success": False, "error": str(e)}
+        if result.get("success"):
+            if attempt:
+                result = {**result, "fell_back_from": first_error}
+                log.info("TTS fell back to %s after %s failed", name, order[0])
+            return result
+        first_error = first_error or str(result.get("error") or "failed")
+        log.warning("TTS engine '%s' failed: %s", name, result.get("error"))
+    return {"success": False, "error": first_error, "tried": order}
 
 
 def engine_available(engine: str) -> bool:
