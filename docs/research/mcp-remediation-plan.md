@@ -29,9 +29,11 @@ Branch `mcp-remediation`, based on `ea05fad`.
 | `dca55ab` | **5.3a** per-tool disable | done, verified with teeth |
 | `e6e9f29` | **5.3b** `last_error` redaction | done, verified with teeth |
 | `696cbd3` | **5.3c** config import from other tools | done, verified with teeth |
+| `874703c` | **F7** per-server credential keying | done, verified with teeth |
 
-Next: the deferred **F7** per-server credential keying — the last item. Every
-other finding (F1–F6, F8–F11) and all of 5.1/5.2/5.3 are done.
+**Every finding is now closed.** F1–F11 are fixed and verified with teeth, and
+5.1 (OAuth a/b/c), 5.2 (DPAPI) and 5.3 (a/b/c) are done. Nothing in this plan
+is outstanding.
 
 ### Known suite failures, and which are not ours
 
