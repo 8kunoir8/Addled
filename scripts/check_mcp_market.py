@@ -576,6 +576,47 @@ def credential_checks(market) -> None:
         check("an empty value clears the stored one",
               credentials.known()["env"] == [], str(credentials.known()))
 
+        # The value is encrypted at rest. Everything above would pass with the
+        # secrets sitting in settings.json in the clear, so this is the check
+        # that the feature exists rather than merely working.
+        from backend.mcp_client import secretstore
+        credentials.save({"ACME_API_KEY": "at-rest-canary-9911"},
+                         param_values={"api_key": "param-canary-9911"})
+        _disk = str(config_mod.config.get("mcp", "credentials", default={}))
+        check("a stored credential is not written in the clear",
+              "at-rest-canary-9911" not in _disk,
+              "the secret is readable in the config file")
+        check("and it is stored in the protected form",
+              secretstore.is_protected(
+                  (config_mod.config.get("mcp", "credentials", default={})
+                   .get("env") or {}).get("ACME_API_KEY", "")),
+              str(_disk)[:120])
+        check("and it still reads back correctly",
+              credentials.env().get("ACME_API_KEY") == "at-rest-canary-9911",
+              str(credentials.env().get("ACME_API_KEY")))
+        check("a credential in headers is protected too",
+              secretstore.is_protected(
+                  (config_mod.config.get("mcp", "credentials", default={})
+                   .get("headers") or {}).get("Authorization", "")),
+              "headers are stored in the clear")
+        check("a credential in params is protected too",
+              secretstore.is_protected(
+                  (config_mod.config.get("mcp", "credentials", default={})
+                   .get("params") or {}).get("api_key", "")),
+              "params are stored in the clear")
+
+        if secretstore.available():
+            check("a value encrypted here decrypts here",
+                  secretstore.unprotect(
+                      secretstore.protect("round-trip")) == "round-trip")
+            check("a value with no prefix is passed through unreadable-as-is",
+                  secretstore.unprotect("plain-text") == "plain-text",
+                  "a legacy value stopped working")
+            credentials.save({"ACME_API_KEY": ""})
+        else:
+            print("  (DPAPI unavailable here; the encryption checks above "
+                  "still assert the stored form)")
+
 
 async def keyed_install_checks(market) -> None:
     """install() accepts the values and judges the entry against them."""

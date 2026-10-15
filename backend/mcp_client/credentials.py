@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import logging
 
+from backend.mcp_client import secretstore
+
 log = logging.getLogger("addled.mcp.credentials")
 
 # All three live in one setting so a reset cannot keep the keys and drop the
@@ -35,15 +37,80 @@ _KIND_PARAMS = "params"
 
 
 def _stored() -> dict:
+    """Every stored value, decrypted, for this process to use.
+
+    The single place values are read, which is why decryption lives here
+    rather than in each accessor: `env()`, `headers()`, `params()` and every
+    `subset_*` call in the add path all come through this function, so none of
+    them has to know the values are encrypted on disk.
+    """
     from backend.config import config
     value = config.get("mcp", "credentials", default={}) or {}
     if not isinstance(value, dict):
         return {_KIND_ENV: {}, _KIND_HEADERS: {}, _KIND_PARAMS: {}}
-    return {
-        _KIND_ENV: dict(value.get(_KIND_ENV) or {}),
-        _KIND_HEADERS: dict(value.get(_KIND_HEADERS) or {}),
-        _KIND_PARAMS: dict(value.get(_KIND_PARAMS) or {}),
-    }
+    out: dict[str, dict[str, str]] = {}
+    for kind in (_KIND_ENV, _KIND_HEADERS, _KIND_PARAMS):
+        bucket = value.get(kind) or {}
+        out[kind] = {str(k): _readable(v) for k, v in bucket.items()}
+    return out
+
+
+def _readable(value: object) -> str:
+    """One stored value in the clear, or the raw text if it is not encrypted.
+
+    A value with no `dpapi:` prefix is returned unchanged so a credential
+    saved before encryption existed keeps working. A value that *is* prefixed
+    but cannot be decrypted returns empty rather than raising: this runs while
+    listing what is configured, and one unreadable string must not take the
+    whole panel down. `have_*` then answers honestly — the name is not
+    satisfied, and the user is asked for it again.
+    """
+    text = str(value if value is not None else "")
+    if not secretstore.is_protected(text):
+        return text
+    try:
+        return secretstore.unprotect(text)
+    except Exception as e:  # noqa: BLE001
+        log.warning("A stored MCP credential could not be decrypted: %s", e)
+        return ""
+
+
+def _encrypted(current: dict) -> dict:
+    """The on-disk form of the in-memory values: every one of them protected.
+
+    All three buckets are protected, not just `headers`. A credential that
+    travels in the URL (`params`) or is handed to a process (`env`) is no less
+    a secret than one in a header, and encrypting only the bucket that looked
+    secret would leave the rest readable — which is the failure this replaces.
+
+    If DPAPI is unavailable the values are written as they are, and the log
+    says so. That is deliberate: this is Windows-only code and the store must
+    still work on a platform without it. The alternative — refusing to save —
+    trades a real feature for a guarantee the host cannot provide either way.
+    A user who needs the encryption gets it wherever DPAPI exists, which is
+    wherever the packaged app runs.
+    """
+    protected: dict[str, dict[str, str]] = {}
+    for kind in (_KIND_ENV, _KIND_HEADERS, _KIND_PARAMS):
+        bucket = current.get(kind) or {}
+        out: dict[str, str] = {}
+        for key, value in bucket.items():
+            text = str(value if value is not None else "")
+            if not text:
+                continue
+            # Already-protected text is kept as it is: re-encrypting an
+            # encrypted string would write a `dpapi:` prefix inside another.
+            if secretstore.is_protected(text):
+                out[str(key)] = text
+                continue
+            try:
+                out[str(key)] = secretstore.protect(text)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Could not encrypt the MCP credential '%s' (%s); "
+                            "it is stored unencrypted", key, e)
+                out[str(key)] = text
+        protected[kind] = out
+    return protected
 
 
 def _clean(mapping: object) -> dict[str, str]:
@@ -141,9 +208,13 @@ def save(env_values: object = None, header_values: object = None,
         else:
             bucket.update(_clean(incoming))
 
+    # Compared in the clear, before encrypting: DPAPI is randomised, so
+    # encrypting first would make every save look like a change and rewrite
+    # settings.json on every keystroke of the credentials form.
     if current != _stored():
+        stored = _encrypted(current)
         try:
-            config.set("mcp", "credentials", value=current)
+            config.set("mcp", "credentials", value=stored)
             log.info("MCP credentials updated (env: %d, headers: %d, params: %d)",
                      len(current[_KIND_ENV]), len(current[_KIND_HEADERS]),
                      len(current[_KIND_PARAMS]))
