@@ -21,9 +21,11 @@ Branch `mcp-remediation`, based on `ea05fad`.
 | `f228fb6` | **Phase 2** colliding tool names all stay reachable (F3) | done, verified with teeth, end to end |
 | `e0fa82b` | plan: record Phase 2 (F3) done | done |
 | `6ff8581` | **Phase 4** HTTP transport conformance (F6/F8/F9/F10) | done, verified with teeth |
+| `7335400` | plan: record Phase 4 done | done |
+| `f29cbfc` | **5.2** Credentials encrypted at rest (F7, DPAPI) | done, verified with teeth |
 
-Next per the revised order: 5.2 (DPAPI secret storage), then 5.1a/b/c (OAuth for
-remote MCP servers, reusing `oauth_loopback.py`), then 5.3.
+Next per the revised order: 5.1a/b/c (OAuth for remote MCP servers, reusing
+`oauth_loopback.py`), then 5.3.
 
 ### Known suite failures, and which are not ours
 
