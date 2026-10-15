@@ -136,9 +136,36 @@ class McpServerState:
         self.tools: list[dict] = []
         self.registered: list[str] = []
         self.state = "disconnected"
-        self.last_error: str | None = None
+        self._last_error: str | None = None
         # When a tool on this server last ran, for the automatic switch-off.
         self.last_used: float = 0.0
+
+    @property
+    def last_error(self) -> str | None:
+        """The last thing that went wrong, with any secret taken out.
+
+        Redacted on *read* rather than at each of the six places it is
+        written. `last_error` goes to the dashboard and into the settings file,
+        and it is built from what the transport raised — a URL with an API key
+        in it, or a body quoting the header that was sent. Six call sites would
+        need six correct calls and the seventh added later would quietly leak;
+        one property cannot be forgotten.
+        """
+        if self._last_error is None:
+            return None
+        try:
+            from backend.mcp_client import credentials
+            return credentials.redact(self._last_error)
+        except Exception as e:  # noqa: BLE001
+            # If the redactor itself fails, say nothing rather than risk
+            # saying something secret. A missing error message is a small loss;
+            # a leaked key is not.
+            log.debug("could not redact an MCP error: %s", e)
+            return "an error occurred (details withheld)"
+
+    @last_error.setter
+    def last_error(self, value: object) -> None:
+        self._last_error = None if value is None else str(value)
 
     @property
     def server_info(self) -> dict:

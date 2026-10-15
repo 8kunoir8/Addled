@@ -20,6 +20,7 @@ back a credential it just stored.
 from __future__ import annotations
 
 import logging
+import re
 
 from backend.mcp_client import secretstore
 
@@ -229,6 +230,66 @@ def known() -> dict:
     return {"env": sorted(stored[_KIND_ENV]),
             "headers": sorted(stored[_KIND_HEADERS]),
             "params": sorted(stored[_KIND_PARAMS])}
+
+
+# Anything that looks like a secret in free text, regardless of whose it is.
+# A server's error message can quote the header it was sent, so the value can
+# come back in a body we did not write; matching the shape catches those, and
+# matching the *stored* values catches the ones that have no recognisable
+# shape at all.
+_BEARER = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9\-._~+/=]{8,}")
+# `name: value`, `name=value`, `"name": "value"` and `name value` all appear.
+# JSON is the one that bites: `{"access_token":"..."}` has no space after the
+# colon, so a pattern requiring whitespace misses the commonest shape of all.
+_KEYED = re.compile(
+    r"(?i)([\"']?\b(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|"
+    r"client[_-]?secret|secret|password|passwd|pwd|token|auth)\b[\"']?)"
+    r"(\s*[=:]\s*|\s+)[\"']?([A-Za-z0-9\-._~+/=]{6,})[\"']?")
+# A bare value in a query string is the commonest leak of all: Smithery's
+# gateway takes its key as `?api_key=...`, and that URL appears in connection
+# errors verbatim.
+_QUERY_SECRET = re.compile(
+    r"(?i)([?&](?:api[_-]?key|apikey|key|token|access_token|password)=)"
+    r"([^&\s]{4,})")
+
+
+def redact(text: object, *extra: object) -> str:
+    """Remove anything that looks like a secret from a message to be shown.
+
+    `last_error` is written to the settings file and drawn on the dashboard, and
+    it is built from whatever the transport raised — which can be a URL carrying
+    an API key, or a body quoting the header that was sent. A credential that
+    leaks into a field designed to be read by a person, and stored in a file
+    that is not encrypted, undoes the rest of this module.
+
+    Values actually held are redacted by exact match as well as by shape, so a
+    secret with no recognisable form is still caught. Callers pass any extra
+    values they know are secret (a token in hand, say).
+    """
+    text = str(text or "")
+    if not text:
+        return ""
+    # The stored values first: an exact match cannot be fooled, and it catches
+    # short or oddly-shaped secrets that no pattern would.
+    stored = _stored()
+    secrets: set[str] = set()
+    for kind in (_KIND_ENV, _KIND_HEADERS, _KIND_PARAMS):
+        for value in (stored.get(kind) or {}).values():
+            value = _readable(value)
+            if len(value) >= 4:
+                secrets.add(value)
+    for value in extra:
+        value = str(value or "")
+        if len(value) >= 4:
+            secrets.add(value)
+    # Longest first, so a value that contains another is replaced whole rather
+    # than leaving a fragment of itself behind.
+    for value in sorted(secrets, key=len, reverse=True):
+        text = text.replace(value, "***")
+    text = _QUERY_SECRET.sub(r"\1***", text)
+    text = _KEYED.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _BEARER.sub(r"\1 ***", text)
+    return text
 
 
 def clear(env_name: str = "", header_name: str = "",

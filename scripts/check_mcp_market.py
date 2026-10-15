@@ -618,6 +618,50 @@ def credential_checks(market) -> None:
                   "still assert the stored form)")
 
 
+        # `last_error` is shown on the dashboard and written to the settings
+        # file, and it is built from whatever the transport raised — so it can
+        # carry a URL with a key in it, or a body quoting the header that was
+        # sent. Encryption is undone if the secret comes back in a field meant
+        # to be read.
+        credentials.save({"ACME_API_KEY": "redact-canary-4242"},
+                         {"Authorization": "Bearer hdr-canary-4242"},
+                         {"api_key": "url-canary-4242"})
+        _leaky = [
+            "failed with ACME_API_KEY=redact-canary-4242",
+            "sent Authorization: Bearer hdr-canary-4242",
+            "GET https://gw.example/mcp?api_key=url-canary-4242 got 401",
+            '{"error":"invalid_token","access_token":"leaked-canary-4242"}',
+            "X-Api-Key: header-canary-4242 was refused",
+            "client_secret='quoted-canary-4242' rejected",
+        ]
+        for _text in _leaky:
+            _out = credentials.redact(_text)
+            check(f"a secret in {_text[:28]!r} does not survive redaction",
+                  "canary-4242" not in _out, _out)
+        # And it does not damage ordinary messages, or the field stops being
+        # useful and gets ignored.
+        for _plain in ("handshake timed out after 20s",
+                       "HTTP 404 Not Found from https://api.example.com/mcp",
+                       "FileNotFoundError: [Errno 2] node is not on PATH",
+                       "the sign-in for this server is no longer valid"):
+            check(f"an ordinary error is left alone: {_plain[:28]!r}",
+                  credentials.redact(_plain) == _plain,
+                  credentials.redact(_plain))
+
+        # The property is the choke point, so one check through it proves the
+        # path the dashboard actually reads.
+        from backend.mcp_client.manager import McpServerState
+        _state = McpServerState({"id": "s", "name": "S"})
+        _state.last_error = "auth failed: ACME_API_KEY=redact-canary-4242"
+        check("last_error is redacted on the way out",
+              "redact-canary-4242" not in str(_state.last_error),
+              str(_state.last_error))
+        _state.last_error = None
+        check("a clean server reports no error at all",
+              _state.last_error is None, str(_state.last_error))
+        credentials.save({"ACME_API_KEY": ""}, {"Authorization": ""},
+                         {"api_key": ""})
+
 async def keyed_install_checks(market) -> None:
     """install() accepts the values and judges the entry against them."""
     specs: list[dict] = []
