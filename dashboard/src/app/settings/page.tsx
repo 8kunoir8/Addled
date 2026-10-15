@@ -1601,6 +1601,50 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
   const [showAllEdge,setShowAllEdge]=useState(false);
   const [customEdge,setCustomEdge]=useState(false);
   const [customKokoro,setCustomKokoro]=useState(false);
+  // The Kokoro models are downloaded on request rather than shipped, so the
+  // section needs their own status: 'installed' is not the same question as
+  // "are any voices listed", and the download button is drawn from it.
+  const [models,setModels]=useState<any>(null);
+  const [modelNote,setModelNote]=useState('');
+  const [installing,setInstalling]=useState(false);
+
+  const refreshModels=useCallback(()=>{
+    if(!connected) return;
+    send('system.voiceModelStatus',{}).then((r:any)=>{
+      setModels(r||null);
+      // Clear the optimistic note once the backend reports the run is over,
+      // or it would sit there saying "Downloading…" forever after finishing.
+      if(r&&!r.installing) setModelNote(n=>n==='Downloading…'?'':n);
+    }).catch(()=>{});
+  },[connected,send]);
+
+  useEffect(()=>{refreshModels();},[refreshModels]);
+
+  // Poll while a download runs, as the tools section does: the backend also
+  // broadcasts, but a poll cannot miss one and it is what notices the end.
+  useEffect(()=>{
+    if(!models?.installing) return;
+    const timer=setInterval(refreshModels,1000);
+    return ()=>clearInterval(timer);
+  },[models?.installing,refreshModels]);
+
+  const startModelInstall=async(force:boolean)=>{
+    if(!connected||installing) return;
+    setInstalling(true); setModelNote('');
+    try{
+      const r=await send('system.voiceModelInstall',{force});
+      if(r?.success) setModelNote('Downloading…');
+      else if(r?.already_installed) setModelNote('Already installed.');
+      else if(r?.already_running) setModelNote('Already downloading.');
+      else setModelNote(r?.error||'The download could not start.');
+    }catch(e:any){
+      setModelNote(e?.message||'The download could not start.');
+    }finally{
+      setInstalling(false);
+      setTimeout(refreshModels,300);
+      setTimeout(refreshModels,3000);
+    }
+  };
 
   const load=useCallback(async(force?:boolean)=>{
     if(!connected) return;
@@ -1648,11 +1692,22 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
   const sourceNote=catalogue&&catalogue.edge_source!=='live'
     ? ` · ${catalogue.edge_source}` : '';
 
+  // Whether Kokoro can actually speak: models present (bundled or downloaded)
+  // AND a voice pack that lists voices. Both are needed, and the catalogue is
+  // the honest source for the second -- a file of the right name that is not
+  // the pinned one lists nothing.
+  const kokoroReady=Boolean(models?.available) && kokoroVoices.length>0;
+  const modelPct=Math.max(0,Math.min(100,Number(models?.percent)||0));
+
   const toggleCls=(on:boolean)=>`w-10 h-5 rounded-full transition-colors ${on?'bg-[#3380FF]':'bg-[#30363d]'}`;
   const knobCls=(on:boolean)=>`w-4 h-4 bg-white rounded-full transition-transform ${on?'translate-x-5':'translate-x-0.5'}`;
 
   return <div className="space-y-1">
-    <SettingRow label="TTS Engine"><select value={engine} onChange={e=>update('voice','tts_engine',e.target.value)} className={selectCls}><option value="kokoro">Kokoro (Local, offline)</option><option value="edge">Edge TTS (Free, online)</option></select></SettingRow>
+    {/* Kokoro cannot be chosen without its models, so it is not offered until
+        they are there — an engine that produces no sound is worse than one
+        absent from the list. `voice.tts` falls back to Edge either way, so a
+        profile that already had Kokoro selected keeps speaking. */}
+    <SettingRow label="TTS Engine"><select value={engine} onChange={e=>update('voice','tts_engine',e.target.value)} className={selectCls}><option value="kokoro" disabled={!kokoroReady}>Kokoro (Local, offline){!kokoroReady?' — models not installed':''}</option><option value="edge">Edge TTS (Free, online)</option></select></SettingRow>
     <SettingRow label="Language" description="What to speak — the voice lists follow this"><select value={language} onChange={e=>update('voice','language',e.target.value)} className={selectCls}>{LANGUAGES.map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></SettingRow>
 
     <SettingRow label="Edge Voice" description={busy?'Loading voices…':(edgeCount?`${edgeCount} available${sourceNote}`:undefined)}>
@@ -1678,7 +1733,7 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
       </SettingRow>
     )}
 
-    <SettingRow label="Kokoro Voice" description={busy?'Loading voices…':(kokoroVoices.length?`${kokoroVoices.length} installed`:'Not installed')}>
+    <SettingRow label="Kokoro Voice" description={busy?'Loading voices…':(kokoroVoices.length?`${kokoroVoices.length} installed`:'Needs the models below')}>
       {customKokoro
         ? <div className="flex items-center gap-2">
             <input type="text" value={kokoroValue} onChange={e=>update('voice','kokoro_voice',e.target.value)} className={`${selectCls} w-44`}/>
@@ -1694,6 +1749,57 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
             <option value="__custom__">Custom…</option>
           </select>}
     </SettingRow>
+
+    {/* The models, which used to travel inside the installer and now do not.
+        Five states, and each needs different words: bundled (a checkout needs
+        nothing), downloaded and verified, a file present but not the pinned
+        one, absent, and downloading. The button is only drawn when there is
+        something to do, so it cannot be clicked during a run or after one. */}
+    <SettingRow label="Kokoro models"
+      description={!models?'Checking…'
+        : models.bundled?'Bundled with this copy — no download needed'
+        : models.installed?'Downloaded and verified'
+        : models.download_present?'Present but not the verified files — download again'
+        : `${(Number(models.total_bytes||0)/1048576).toFixed(0)} MB — downloaded on request, not shipped with Addled`}>
+      <div className="flex items-center gap-2">
+        <span className={`text-xs ${kokoroReady?'text-[#3fb950]':'text-[#d29922]'}`}>
+          {!models?''
+            :models.bundled?'✓ bundled'
+            :models.installed?'✓ installed'
+            :models.download_present?'✗ not verified'
+            :'Not installed — Kokoro is unavailable'}
+        </span>
+        {models&&models.supported&&!models.installing&&!models.bundled&&(
+          <button onClick={()=>startModelInstall(Boolean(models.installed||models.download_present))} disabled={installing||!connected}
+            className="text-xs px-2 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:border-[#484f58] disabled:opacity-50">
+            {models.installed?'Reinstall':models.download_present?'Re-download':'Download'}
+          </button>
+        )}
+      </div>
+    </SettingRow>
+    {models?.installing&&(
+      <SettingRow label="Downloading" description={models.detail||models.phase}>
+        <div className="flex items-center gap-2 w-40">
+          <div className="flex-1 h-1.5 bg-[#21262d] rounded overflow-hidden">
+            <div className="h-full bg-[#3380FF] transition-all" style={{width:`${modelPct}%`}}/>
+          </div>
+          <span className="text-xs text-[#8b949e]">{modelPct}%</span>
+        </div>
+      </SettingRow>
+    )}
+    <p className="text-xs text-[#8b949e] mb-2">
+      Kokoro&apos;s offline voice is two files totalling 356 MB, fetched from the
+      kokoro-onnx release on GitHub and checked against a sha256 Addled pins for
+      them — the release publishes none of its own. They used to travel inside
+      every Addled build, which is most of why it was 589 MB. Nothing is
+      downloaded until you ask, and nothing depends on them: without them Addled
+      speaks through Edge instead, and keeps working.
+    </p>
+    {models&&!models.supported&&(
+      <p className="text-xs text-[#8b949e]">These are the Windows builds. On this machine, put the two files in {models.install_dir} yourself.</p>
+    )}
+    {modelNote&&<p className="text-xs text-[#8b949e]">{modelNote}</p>}
+    {models?.error&&<p className="text-xs text-[#d29922]">{models.error}</p>}
 
     {kokoroMissing&&(
       <p className="text-xs text-[#d29922] py-2">

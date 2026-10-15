@@ -503,6 +503,62 @@ def run_consistency_tests():
               f"neither engine can speak '{code}'")
 
 
+def run_model_install_tests():
+    """The download's own guards, and the states the dashboard draws from.
+
+    These run without the network: the point is that the verification and the
+    state reporting are right, not that GitHub is reachable. The download
+    itself is exercised by scripts/fetch_kokoro.py.
+    """
+    from backend.voice import model_install as mi
+
+    # The ceiling the download honours is the model one. If a model grew past
+    # it, fetch_to_file would refuse it at the top of the transfer.
+    check("every model fits under the download ceiling",
+          mi.TOTAL_BYTES <= mi.MAX_MODEL_BYTES,
+          f"{mi.TOTAL_BYTES} vs {mi.MAX_MODEL_BYTES}")
+
+    # api.github.com is not the release host; the assets redirect to
+    # objects.githubusercontent.com. A pin on the wrong host would refuse the
+    # real download.
+    try:
+        mi.require_allowed(f"{mi.RELEASE}/{mi.MODELS[0]['filename']}")
+        allowed = True
+    except ValueError:
+        allowed = False
+    check("the release host is on the download allowlist", allowed, mi.RELEASE)
+
+    # The digests are the whole defence, so a malformed pin is a silent hole.
+    for model in mi.MODELS:
+        digest = model["sha256"]
+        check(f"{model['filename']} has a well-formed sha256 pin",
+              len(digest) == 64 and all(c in "0123456789abcdef" for c in digest),
+              digest)
+        check(f"{model['filename']} pins a plausible size",
+              model["bytes"] > 1024 * 1024, str(model["bytes"]))
+
+    state = mi.status()
+    for key in ("supported", "bundled", "installed", "available", "installing",
+                "source", "total_bytes", "install_dir"):
+        check(f"status() reports '{key}', which the dashboard reads",
+              key in state, str(sorted(state)))
+
+    # The dashboard must read the same keys, or the row shows undefined.
+    page = open(os.path.join(ROOT, "dashboard", "src", "app", "settings",
+                             "page.tsx"), encoding="utf-8").read()
+    for key in ("available", "bundled", "installed", "download_present"):
+        check(f"the dashboard reads status()['{key}']",
+              f"models.{key}" in page or f"models?.{key}" in page, key)
+
+    # And the two methods it calls must exist, or the button silently does
+    # nothing -- send() rejects, and the catch turns that into a note.
+    server = open(os.path.join(ROOT, "backend", "ws_server.py"),
+                  encoding="utf-8").read()
+    for method in ("system.voiceModelStatus", "system.voiceModelInstall"):
+        check(f"{method} is registered",
+              f'"{method}"' in server, method)
+
+
 def run_payload_test():
     from backend.voice import voices
 
@@ -606,6 +662,7 @@ def main():
     run_auto_speak_tests()
     run_payload_test()
     run_consistency_tests()
+    run_model_install_tests()
     synth_rc = run_real_synthesis_tests()
     run_selection_tests()
     run_empty_audio_tests()
