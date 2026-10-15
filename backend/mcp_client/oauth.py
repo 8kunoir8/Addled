@@ -94,8 +94,35 @@ class OAuthClient:
         return bool(self.tokens.get("access_token"))
 
     def save_tokens(self, payload: dict) -> None:
-        if self._store is not None and isinstance(payload, dict):
-            self._store.set(self.server_id, payload)
+        """Store the tokens, together with the client id they belong to.
+
+        The client id is kept because a refresh has to name the same client the
+        grant was issued to, and a refresh in a later run of the app has no
+        other way to know it. Without this, a token would be renewable only
+        until the app restarted.
+        """
+        if self._store is None or not isinstance(payload, dict):
+            return
+        stored = dict(payload)
+        client_id = str((self.client_info or {}).get("client_id") or "").strip()
+        if client_id:
+            stored["_client_id"] = client_id
+        secret = str((self.client_info or {}).get("client_secret") or "").strip()
+        if secret:
+            stored["_client_secret"] = secret
+        self._store.set(self.server_id, stored)
+
+    def _restore_client(self) -> None:
+        """Take the client id back out of storage, if it is there."""
+        if self.client_info:
+            return
+        held = self.tokens
+        client_id = str(held.get("_client_id") or "").strip()
+        if client_id:
+            self.client_info = {
+                "client_id": client_id,
+                "client_secret": str(held.get("_client_secret") or "").strip(),
+            }
 
     def forget(self) -> None:
         if self._store is not None:
@@ -432,8 +459,18 @@ class OAuthClient:
         if not refresh_token:
             raise OAuthError("this sign-in has expired and cannot be renewed; "
                              "sign in again")
+        self._restore_client()
         metadata = self.auth_server_metadata or await self.discover()
-        info = self.client_info or await self.register()
+        # Deliberately not `register()`: the client id needed to refresh is the
+        # one the grant was issued to, which we already hold. Registering again
+        # would mint a *second* client that this refresh token does not belong
+        # to, and servers reject that — turning a renewable token into a dead
+        # end. Registration is only for starting a new grant.
+        info = self.client_info
+        if not info.get("client_id"):
+            raise OAuthError(
+                "this sign-in cannot be renewed automatically; connect it "
+                "again from its card in Settings")
         payload = await asyncio.to_thread(
             oauth_loopback.refresh_tokens,
             token_endpoint=str(metadata.get("token_endpoint") or ""),

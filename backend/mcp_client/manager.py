@@ -326,6 +326,77 @@ class McpManager:
         self._register_tools(state)
         return {"success": True, "state": "disconnected"}
 
+    # -- oauth -------------------------------------------------------------
+
+    def _auth_client(self, server_id: str):
+        """Whatever knows this server's sign-in state, connected or not.
+
+        A connected server has a real client holding it. A disconnected one
+        does not, so a throwaway is built to answer the question — that is
+        cheap, since the client reaches for the stored token lazily, and it is
+        the only way a card can offer "Authorize" before the first connection
+        has failed.
+        """
+        state = self._servers.get(server_id)
+        if state is not None and state.client is not None:
+            return state.client
+        spec = self._spec(server_id)
+        if not spec:
+            return None
+        if _transport_of(spec) != "http":
+            return None
+        from backend.mcp_client.http import McpHttpClient
+        return McpHttpClient(server_id, spec)
+
+    def auth_required(self, server_id: str) -> bool:
+        client = self._auth_client(server_id)
+        return bool(getattr(client, "auth_required", False))
+
+    def auth_error(self, server_id: str) -> str:
+        client = self._auth_client(server_id)
+        return str(getattr(client, "auth_error", "") or "")
+
+    def authorized(self, server_id: str) -> bool:
+        """Whether a usable token is held for this server."""
+        client = self._auth_client(server_id)
+        if client is None:
+            return False
+        oauth = getattr(client, "oauth", None)
+        return bool(oauth is not None and oauth().has_tokens)
+
+    async def authorize_server(self, server_id: str) -> dict:
+        """Run the sign-in flow for one server, off the event loop.
+
+        The wait for a human in a browser is minutes and is genuinely
+        blocking, so it goes to a thread. Afterwards the server is
+        reconnected, because the whole reason to sign in is to use it: leaving
+        it disconnected would make the button appear to do nothing.
+        """
+        client = self._auth_client(server_id)
+        if client is None:
+            return {"success": False,
+                    "error": "this server has no remote address to sign in to"}
+        result = await asyncio.to_thread(client.authorize)
+        if not result.get("success"):
+            return result
+        state = self._servers.get(server_id)
+        if state is not None and state.state != "ready":
+            await self.disconnect(server_id)
+            again = await self.connect(server_id)
+            if not again.get("success"):
+                return {"success": False, "url": result.get("url"),
+                        "error": again.get("error")
+                                 or "signed in, but the server still "
+                                    "would not connect"}
+        return result
+
+    async def forget_server_auth(self, server_id: str) -> dict:
+        client = self._auth_client(server_id)
+        if client is not None and hasattr(client, "forget_auth"):
+            client.forget_auth()
+        await self.disconnect(server_id)
+        return {"success": True}
+
     async def ensure_connected(self, server_id: str) -> bool:
         state = self._servers.get(server_id)
         if state is not None and state.state == "ready":
@@ -579,6 +650,13 @@ class McpManager:
                       for t in tools],
             "approved": [t.get("name") for t in tools
                          if approval.is_approved(server_id, str(t.get("name")))],
+            # Whether this server wants a sign-in, and why the last attempt
+            # failed. Reported for a disconnected server too, because the whole
+            # point is to offer the button *before* connecting: a server that
+            # 401s is not broken, and the card should say so.
+            "auth_required": self.auth_required(server_id),
+            "auth_error": self.auth_error(server_id),
+            "authorized": self.authorized(server_id),
         }
 
     def status(self) -> dict:

@@ -686,10 +686,16 @@ class _StubOAuthServer:
     starts the flow can be produced for real.
     """
 
-    def __init__(self, *, publish_registration=True):
+    def __init__(self, *, publish_registration=True, reject_refresh=False):
         self.publish_registration = publish_registration
+        self.reject_refresh = reject_refresh
         self.record = {"registered": None, "exchanged": None,
-                       "refreshed": None, "authorize_url": ""}
+                       "refreshed": None, "authorize_url": "",
+                       "mcp_auth": [], "token_calls": 0}
+        # The one bearer the MCP endpoint will accept. Tests set it to stand in
+        # for a token that is still good; left alone it accepts none, so the
+        # 401 path is the default.
+        self.accept_bearer = ""
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -737,15 +743,43 @@ class _StubOAuthServer:
             def do_POST(self):
                 n = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(n)
+                if self.path == "/mcp":
+                    auth = self.headers.get("Authorization") or ""
+                    outer.record["mcp_auth"].append(auth)
+                    if not outer.accept_bearer or auth != (
+                            f"Bearer {outer.accept_bearer}"):
+                        self.send_response(401)
+                        self.send_header(
+                            "WWW-Authenticate",
+                            f'Bearer error="invalid_token", resource_metadata='
+                            f'"http://127.0.0.1:{outer.port}/.well-known/'
+                            f'oauth-protected-resource/mcp"')
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    msg = json.loads(raw or b"{}")
+                    if msg.get("method") == "initialize":
+                        return self._json(200, {
+                            "jsonrpc": "2.0", "id": msg.get("id"),
+                            "result": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {},
+                                "serverInfo": {"name": "stub", "version": "1"}}})
+                    return self._json(202, {})
                 if self.path == "/register":
                     outer.record["registered"] = json.loads(raw or b"{}")
                     return self._json(201, {"client_id": "cid-abc",
                                             "client_secret": "csec-xyz"})
                 if self.path == "/token":
+                    outer.record["token_calls"] += 1
                     form = {k: v[0] for k, v in
                             urllib.parse.parse_qs(raw.decode()).items()}
                     if form.get("grant_type") == "refresh_token":
                         outer.record["refreshed"] = form
+                        if outer.reject_refresh:
+                            return self._json(400, {
+                                "error": "invalid_grant",
+                                "error_description": "refresh token expired"})
                         return self._json(200, {
                             "access_token": "refreshed-access",
                             "token_type": "Bearer", "expires_in": 3600})
@@ -938,6 +972,253 @@ def test_mcp_oauth_needs_no_registration():
         stub.close()
 
 
+def test_mcp_401_interceptor():
+    """A 401 becomes an actionable message, not a bare status code.
+
+    This is what made the market's `runnable: True` a lie: a server wanting
+    OAuth answered every call with something the user could not act on. The
+    client is expected to say what to do, and to expose the state a card needs
+    to offer the button that does it.
+    """
+    import asyncio
+    from backend.mcp_client.http import McpHttpClient, _auth_hint
+    from backend.mcp_client.oauth import TokenStore
+
+    # The message depends on what the challenge said. Never having had a token
+    # is a different situation from having one refused, and telling a user to
+    # sign in when they already did sends them in a circle.
+    assert "rejected" in _auth_hint('Bearer error="invalid_token"'), (
+        "an invalid_token challenge does not say the token was refused")
+    assert "enough access" in _auth_hint('Bearer error="insufficient_scope"')
+    assert "needs a sign-in" in _auth_hint('Bearer realm="x"'), (
+        "a challenge we do not recognise does not say what to do")
+
+    stub = _StubOAuthServer()
+    store = TokenStore()
+    store.clear()
+    try:
+        async def run():
+            problems = []
+            client = McpHttpClient("needs-auth",
+                                   {"url": stub.url, "timeout_s": 5})
+            try:
+                await client.start()
+                problems.append("start() succeeded against a server that "
+                                "wants a sign-in")
+                return problems
+            except Exception as e:  # noqa: BLE001
+                text = str(e)
+            if "sign-in" not in text:
+                problems.append(f"the 401 message is not actionable: {text}")
+            if not client.auth_required:
+                problems.append("auth_required stayed False after a 401")
+            if not client.auth_error:
+                problems.append("auth_error is empty after a 401")
+            return problems
+
+        problems = asyncio.run(run())
+    finally:
+        store.clear()
+        stub.close()
+    assert not problems, "\n  ".join(problems)
+
+
+def test_mcp_auth_header_rules():
+    """An explicit key wins over OAuth; a stored token is sent unasked.
+
+    Two rules that are easy to get backwards and expensive when you do: a
+    server with a static key must keep working now that OAuth exists at all,
+    and a token saved in an earlier run must go out on this run's first
+    request rather than after a wasted 401.
+    """
+    from backend.mcp_client.http import McpHttpClient
+    from backend.mcp_client.oauth import TokenStore
+
+    store = TokenStore()
+    store.clear()
+    try:
+        plain = McpHttpClient("plain", {"url": "https://x.example/mcp"})
+        assert "Authorization" not in plain._headers(), (
+            "a client with no token and no configured header sent an "
+            "Authorization header anyway")
+
+        static = McpHttpClient("static", {
+            "url": "https://x.example/mcp",
+            "headers": {"Authorization": "Bearer static-key"}})
+        assert static._headers()["Authorization"] == "Bearer static-key"
+
+        store.set("tok", {"access_token": "stored-tok"})
+        with_token = McpHttpClient("tok", {"url": "https://x.example/mcp"})
+        assert with_token._headers().get("Authorization") == "Bearer stored-tok", (
+            "a stored token was not sent on the first request")
+
+        both = McpHttpClient("tok", {
+            "url": "https://x.example/mcp",
+            "headers": {"Authorization": "Bearer static-key"}})
+        assert both._headers()["Authorization"] == "Bearer static-key", (
+            "an OAuth token replaced the Authorization the user configured")
+
+        lower = McpHttpClient("tok", {
+            "url": "https://x.example/mcp",
+            "headers": {"authorization": "Basic abc"}})
+        assert lower._headers()["authorization"] == "Basic abc", (
+            "a lower-case authorization header was overwritten")
+        assert "Authorization" not in lower._headers(), (
+            "a second Authorization header was added beside a lower-case one")
+    finally:
+        store.clear()
+
+
+def test_mcp_401_refreshes_once():
+    """A refused token is renewed once; a dead one says so and stops.
+
+    The failure this guards is a loop: refresh, retry, 401, refresh. That
+    hammers the authorization server and never terminates. One attempt is the
+    contract, so the count is asserted rather than assumed.
+    """
+    import asyncio
+    from backend.mcp_client.http import McpHttpClient
+    from backend.mcp_client.oauth import TokenStore
+
+    async def renewable():
+        problems = []
+        stub = _StubOAuthServer()
+        stub.accept_bearer = "refreshed-access"
+        store = TokenStore()
+        store.clear()
+        try:
+            store.set("renew", {"access_token": "stale-tok",
+                                "refresh_token": "good-refresh",
+                                "_client_id": "cid-abc"})
+            client = McpHttpClient("renew", {"url": stub.url, "timeout_s": 5})
+            try:
+                await client.start()
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"a renewable token did not renew: {e}")
+                return problems
+            seen = stub.record["mcp_auth"]
+            if not seen or seen[-1] != "Bearer refreshed-access":
+                problems.append(
+                    f"the renewed token was not sent; the server saw {seen}")
+            if stub.record["token_calls"] != 1:
+                problems.append(
+                    f"the token endpoint was called "
+                    f"{stub.record['token_calls']} times, not once")
+            return problems
+        finally:
+            store.clear()
+            stub.close()
+
+    async def dead():
+        problems = []
+        stub = _StubOAuthServer(reject_refresh=True)
+        store = TokenStore()
+        store.clear()
+        try:
+            store.set("dead", {"access_token": "stale-tok",
+                               "refresh_token": "expired",
+                               "_client_id": "cid-abc"})
+            client = McpHttpClient("dead", {"url": stub.url, "timeout_s": 5})
+            raised = ""
+            try:
+                await client.start()
+            except Exception as e:  # noqa: BLE001
+                raised = str(e)
+            if not raised:
+                problems.append("a dead refresh token did not raise at all")
+            elif "expired" not in raised and "invalid_grant" not in raised:
+                problems.append(
+                    f"a dead refresh token produced: {raised}")
+            if stub.record["token_calls"] != 1:
+                problems.append(
+                    f"the token endpoint was called "
+                    f"{stub.record['token_calls']} times before giving up")
+            return problems
+        finally:
+            store.clear()
+            stub.close()
+
+    async def refused_forever():
+        """A server that renews happily but accepts nothing must not loop.
+
+        This is the shape the guard exists for, and it is not the same as a
+        refresh that fails: here every refresh succeeds and every retry is
+        refused, so only the one-attempt rule stops it. Without the guard this
+        calls the token endpoint without bound.
+        """
+        problems = []
+        # `accept_bearer` stays empty, so nothing is ever accepted — but the
+        # token endpoint answers normally.
+        stub = _StubOAuthServer()
+        store = TokenStore()
+        store.clear()
+        try:
+            store.set("refused", {"access_token": "stale-tok",
+                                  "refresh_token": "good-refresh",
+                                  "_client_id": "cid-abc"})
+            client = McpHttpClient("refused",
+                                   {"url": stub.url, "timeout_s": 5})
+            raised = ""
+            try:
+                await client.start()
+            except RecursionError:
+                raised = "recursion"
+            except Exception as e:  # noqa: BLE001
+                raised = str(e)
+            if not raised:
+                problems.append(
+                    "a server that refuses every token did not raise at all")
+            if stub.record["token_calls"] > 1:
+                problems.append(
+                    f"a server that refuses every token was retried "
+                    f"{stub.record['token_calls']} times; it must be tried "
+                    f"once and then reported")
+            return problems
+        finally:
+            store.clear()
+            stub.close()
+
+    problems = (asyncio.run(renewable()) + asyncio.run(dead())
+                + asyncio.run(refused_forever()))
+    assert not problems, "\n  ".join(problems)
+
+
+def test_mcp_client_id_survives_a_restart():
+    """A refresh in a later run still names the client the grant belongs to.
+
+    A refresh must identify the client the tokens were issued to, and
+    registration is not available again on a server that will not register
+    twice. If the id is lost, a token is renewable until the app restarts and
+    dead afterwards — the worst possible time to find out.
+    """
+    from backend.mcp_client.oauth import OAuthClient, TokenStore
+
+    store = TokenStore()
+    store.clear()
+    try:
+        first = OAuthClient("srv", "https://x.example/mcp", store=store)
+        first.client_info = {"client_id": "cid-1", "client_secret": "sec-1"}
+        first.save_tokens({"access_token": "at", "refresh_token": "rt"})
+
+        # Everything about this is a secret, so the file must not show any of
+        # it in the clear. Read it back the way the app would instead.
+        assert "sec-1" not in str(store._all()), (
+            "the client secret is readable in the config file")
+        assert "cid-1" not in str(store._all()), (
+            "the client id is readable in the config file")
+
+        # A fresh object stands in for the next run of the app.
+        later = OAuthClient("srv", "https://x.example/mcp", store=store)
+        assert not later.client_info, "the client id leaked in without asking"
+        later._restore_client()
+        assert later.client_info.get("client_id") == "cid-1", (
+            "the client id did not survive the restart")
+        assert later.bearer() == "Bearer at", (
+            "carrying the client id disturbed the token")
+    finally:
+        store.clear()
+
+
 def main():
     for name, fn in [
         ("pkce", test_pkce),
@@ -960,7 +1241,13 @@ def main():
         ("mcp oauth flow", test_mcp_oauth_flow),
         ("mcp oauth without registration",
          test_mcp_oauth_needs_no_registration),
+        ("mcp 401 interceptor", test_mcp_401_interceptor),
+        ("mcp auth header rules", test_mcp_auth_header_rules),
+        ("mcp 401 refreshes once", test_mcp_401_refreshes_once),
+        ("mcp client id survives a restart",
+         test_mcp_client_id_survives_a_restart),
     ]:
+
         try:
             fn()
         except Exception as e:  # noqa: BLE001

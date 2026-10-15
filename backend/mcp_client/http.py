@@ -85,6 +85,25 @@ def _explain(status: int, body: str = "") -> str:
 _VERSION_IN_TEXT = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
 
+def _auth_hint(challenge: str) -> str:
+    """What to tell a user whose 401 means "sign in first".
+
+    Kept separate from the transport so the message is the same whether the
+    refusal came from `start()` or from a tool call. A `WWW-Authenticate`
+    naming an error we recognise gets a better sentence than one that does
+    not; anything else still says what to do.
+    """
+    text = str(challenge or "")
+    if "invalid_token" in text:
+        return ("this server rejected the stored sign-in; connect it again "
+                "from its card in Settings")
+    if "insufficient_scope" in text:
+        return ("the sign-in for this server does not grant enough access; "
+                "connect it again from its card in Settings")
+    return ("this server needs a sign-in before it can be used. "
+            "Connect it from its card in Settings.")
+
+
 def _wanted_version(body: str) -> str:
     """The protocol version a server's 400 named, if it named one.
 
@@ -110,16 +129,20 @@ class McpHttpClient:
         self.url = str(spec.get("url") or "").strip()
         self.server_info: dict = {}
         self.protocol_version: str = ""
-        # Filled by the session router below, which keeps the buffer bounded
-        # and is the one place notifications are recorded. Exposed as the same
-        # name the stdio client uses so callers need not know which transport
-        # they hold.
         # Routes incoming messages. It already knows how to answer a
         # server→client request and how to keep notifications; the HTTP client
         # used to do neither, because it scanned the response body for its own
         # id and stopped. Sharing the router means one implementation of that
         # rule rather than two that disagree.
         self._session = JsonRpcSession()
+        # OAuth, when this server wants it. Built lazily on the first 401 so a
+        # server that needs no sign-in pays nothing for the capability, and
+        # created at most once per client so two calls racing on an expired
+        # token start one flow rather than two.
+        self._oauth = None
+        # Why the last sign-in attempt failed, in words for a card to show.
+        # Empty means "no sign-in has been tried or needed".
+        self._auth_failed: str = ""
         self._client = None
         self._session_id = ""
         self._counter = 0
@@ -198,6 +221,59 @@ class McpHttpClient:
         await self.notify("notifications/initialized")
 
 
+    # -- oauth -------------------------------------------------------------
+
+    def oauth(self):
+        """The OAuth state for this server, built on first use."""
+        if self._oauth is None:
+            from backend.mcp_client.oauth import OAuthClient, token_store
+            self._oauth = OAuthClient(self.server_id, self.url,
+                                      store=token_store)
+        return self._oauth
+
+    @property
+    def auth_required(self) -> bool:
+        """Whether this server has told us it needs a sign-in."""
+        return bool(self._auth_failed) and not self.oauth().has_tokens
+
+    @property
+    def auth_error(self) -> str:
+        return self._auth_failed
+
+    def authorize(self, timeout: float = 300.0) -> dict:
+        """Discover, register, open a browser, and wait for the callback.
+
+        Synchronous on purpose: it is called from a worker thread, because
+        waiting for a person to finish in a browser is minutes, and doing that
+        on the event loop would freeze every other socket in the app.
+        """
+        import asyncio
+
+        async def run() -> dict:
+            client = self.oauth()
+            url = await client.authorize_url()
+            import webbrowser
+            try:
+                webbrowser.open(url)
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not open a browser for MCP auth: %s", e)
+            result = await client.wait_for_code(timeout)
+            await client.complete(result)
+            return {"success": True, "url": url}
+
+        try:
+            return asyncio.run(run())
+        except Exception as e:  # noqa: BLE001
+            # The message is what the card shows, so it is the exception's own
+            # words rather than a wrapper — `OAuthError` is written to be read.
+            self._auth_failed = str(e)
+            return {"success": False, "error": str(e)}
+
+    def forget_auth(self) -> None:
+        if self._oauth is not None:
+            self._oauth.forget()
+        self._auth_failed = ""
+
     # -- io ----------------------------------------------------------------
 
     def _headers(self) -> dict:
@@ -212,6 +288,20 @@ class McpHttpClient:
             headers["Mcp-Session-Id"] = self._session_id
         if self.protocol_version:
             headers["MCP-Protocol-Version"] = self.protocol_version
+        # An OAuth token, when this server wants one. Placed after the
+        # configured headers so an explicit `Authorization` in the spec wins:
+        # a server that takes a static key should keep taking it, and a user
+        # who typed one should not have it silently replaced by a token.
+        # Checked case-insensitively because a spec written by hand may spell
+        # the header however it likes.
+        if not any(k.lower() == "authorization" for k in headers):
+            # Read through `oauth()` even when no 401 has arrived yet. A token
+            # stored in a previous run must be *sent* on the first request of
+            # this one; waiting for a 401 first would burn a round trip on
+            # every reconnect and log a refusal that was never real.
+            bearer = self.oauth().bearer()
+            if bearer:
+                headers["Authorization"] = bearer
         return headers
 
     def _target(self) -> str:
@@ -235,7 +325,8 @@ class McpHttpClient:
     async def _post(self, message: dict,
                     timeout: float | None = None,
                     retry_version: bool = False,
-                    retry_session: bool = False) -> list[dict]:
+                    retry_session: bool = False,
+                    retry_auth: bool = False) -> list[dict]:
         if self._client is None:
             raise McpError(-32000, "client is closed")
         limit = self.timeout if timeout is None else timeout
@@ -267,6 +358,37 @@ class McpHttpClient:
                 self.protocol_version = wanted
                 return await self._post(message, timeout=timeout,
                                         retry_version=True)
+
+        # 401 means this server wants an OAuth token and either we have none
+        # or the one we have was refused. `WWW-Authenticate` names where to
+        # learn how to sign in; that header is the only thing that tells us
+        # which authorization server this resource trusts, so it is passed on
+        # rather than guessed at.
+        #
+        # Once per client, guarded by `auth_attempted`: a server that 401s
+        # everything must not send the user to a browser on every tool call.
+        # The retry after a successful authorization is the one case where a
+        # second POST follows, and that is guarded by `retry_auth`.
+        if resp.status_code == 401 and not retry_auth:
+            challenge = (resp.headers.get("WWW-Authenticate")
+                         or resp.headers.get("www-authenticate") or "")
+            if not self._auth_failed:
+                self._auth_failed = _auth_hint(challenge)
+            if self._oauth is not None and self._oauth.has_tokens:
+                # We held a token and it was refused: try to renew it once.
+                try:
+                    await self._oauth.refresh()
+                    return await self._post(message, timeout=timeout,
+                                            retry_auth=True)
+                except Exception as e:  # noqa: BLE001
+                    self._auth_failed = (
+                        f"the sign-in for this server is no longer valid and "
+                        f"could not be renewed ({e}); sign in again")
+                    log.info("MCP server '%s' token refresh failed: %s",
+                             self.server_id, e)
+            raise McpError(-32000, self._auth_failed or (
+                "this server needs a sign-in before it can be used. "
+                "Connect it from its card in Settings."))
 
         # 404 on a request that carried a session id means the session is gone,
         # not that the address is. Servers expire them routinely. Treating it
