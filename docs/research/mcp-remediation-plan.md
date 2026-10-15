@@ -16,9 +16,12 @@ Branch `mcp-remediation`, based on `ea05fad`.
 | `e86be6c` | **3.2** Model cannot self-approve (F5) | done, verified with teeth, 11 assertions rewritten |
 | `d975246` | Retargeted a stale `check_tools` assertion | done |
 | `337b755` | **Phase 6** loopback callback + PKCE + state | done, verified with teeth, shared with 5.1a |
+| `a5ca11e` | plan: record Phase 6, and the failures that are not ours | done |
+| `07683cb` | **3.1** Approval does not survive a repoint (F4) | done, verified with teeth |
+| `f228fb6` | **Phase 2** colliding tool names all stay reachable (F3) | done, verified with teeth, end to end |
 
-Next per the revised order: 3.1 (F4), Phase 2 (F3), Phase 4 (F6/F8/F9/F10),
-then 5.2 before 5.1a/b/c, then 5.3.
+Next per the revised order: Phase 4 (F6/F8/F9/F10), then 5.2 before 5.1a/b/c,
+then 5.3.
 
 ### Known suite failures, and which are not ours
 
