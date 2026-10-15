@@ -150,6 +150,13 @@ extraResources:
   # under the bundled interpreter before the app has ever started.
   - from: scripts/precompile_bundle.py
     to: scripts/precompile_bundle.py
+  # Called by the installer if the "download the offline voice" box is ticked
+  # (see electron/installer-precompile.nsh), and by hand from a terminal. It
+  # imports the app's own backend.voice.model_install, so the pin and the
+  # digest check are the same ones the Settings button uses -- one
+  # implementation, not a second in NSIS that could check less.
+  - from: scripts/fetch_kokoro.py
+    to: scripts/fetch_kokoro.py
   # The embedded interpreter. It ships WITHOUT its bytecode cache, and the
   # installer pre-compiles it once on the user's machine instead (see the
   # post-install step below and scripts/precompile_bundle.py).

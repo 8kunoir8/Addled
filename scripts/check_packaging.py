@@ -48,6 +48,67 @@ def read(relative: str) -> str:
         return handle.read()
 
 
+def _compile_nsis(makensis: str) -> tuple[bool, str]:
+    """Compile the installer script against a minimal harness.
+
+    The real file is only compiled by electron-builder inside a full build, so
+    a syntax error in it reaches a release rather than a test. This compiles
+    just the macros and the two page functions, which is where the file's own
+    content lives, and ignores the two warnings the harness itself causes (it
+    declares neither the standard MUI pages nor an instfiles page).
+    """
+    import shutil
+    import tempfile
+
+    harness = '''!include "MUI2.nsh"
+!include "nsDialogs.nsh"
+!include "LogicLib.nsh"
+Name "VoiceTest"
+OutFile "nsis_test.exe"
+InstallDir "$TEMP\\\\VoiceTest"
+RequestExecutionLevel user
+!include "installer-precompile-include.nsh"
+Page custom customPageAfterChangeDir customPageLeave
+Section
+  SectionIn RO
+!insertmacro customInstall
+SectionEnd
+!insertmacro MUI_LANGUAGE "English"
+'''
+    tmp = tempfile.mkdtemp()
+    try:
+        shutil.copy(os.path.join(ROOT, "electron", "installer-precompile.nsh"),
+                    os.path.join(tmp, "installer-precompile-include.nsh"))
+        with open(os.path.join(tmp, "nsis_test.nsi"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(harness)
+        try:
+            proc = subprocess.run(
+                [makensis, "/INPUTCHARSET", "UTF8", "nsis_test.nsi"],
+                cwd=tmp, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"could not run makensis: {exc}"
+        out = (proc.stdout or "") + (proc.stderr or "")
+        problems = []
+        for line in out.splitlines():
+            low = line.strip().lower()
+            if line.startswith("Error"):
+                problems.append(line)
+            elif low.startswith("!warning"):
+                if ("mui_language" in low or "page instfiles" in low
+                        or "no sections" in low):
+                    continue
+                problems.append(line)
+        if not os.path.isfile(os.path.join(tmp, "nsis_test.exe")):
+            return False, "no installer was produced: " + "; ".join(problems[:3])
+        if problems:
+            return False, "; ".join(problems[:3])
+        return True, ""
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def git(*args: str) -> list[str]:
     proc = subprocess.run(["git", "-C", ROOT, *args], capture_output=True,
                           text=True, encoding="utf-8", errors="replace")
@@ -583,6 +644,55 @@ def main() -> int:
         check(f"the deploy excludes {ignored_path}", covered,
               "a deploy would copy it over the installed app")
 
+    # ---- the installer script itself --------------------------------------
+    #
+    # electron/installer-precompile.nsh is only ever compiled inside a full
+    # build, which takes minutes and needs a built dashboard, so a syntax error
+    # in it surfaces as a failed release rather than a failed test. Compile it
+    # here against a minimal harness instead, in about a second.
+    #
+    # Two properties are asserted by name because they are the ones that are
+    # easy to lose in an edit and expensive to get wrong: the checkbox defaults
+    # to unchecked, and the upgrade cleanup deletes only against a provenance
+    # file (never on a file of the right name alone).
+    nsh_path = os.path.join(ROOT, "electron", "installer-precompile.nsh")
+    try:
+        nsh = read("electron/installer-precompile.nsh")
+    except OSError as exc:
+        check("the installer script is readable", False, str(exc))
+        nsh = ""
+
+    check("the voice-model checkbox is unchecked by default",
+          "${NSD_SetState} $VoiceModelCheckbox ${BST_UNCHECKED}" in nsh,
+          "an opt-in must not be pre-ticked, or 354 MB is downloaded by default")
+
+    # The cleanup must test for the provenance file, which the download writes
+    # last and only after every digest checked. A guard that tested only for
+    # `kokoro-v1.0.onnx` would delete the user's voice on a torn download.
+    for required in ("$LOCALAPPDATA\\Addled\\voice\\models\\installed.json",
+                     "$INSTDIR\\memory\\voice\\models\\installed.json"):
+        check(f"the cleanup guard checks for a verified copy at {required}",
+              f'IfFileExists "{required}"' in nsh,
+              "deleting the bundled models without a provenance file would "
+              "cost the user their only working voice")
+    check("the cleanup never deletes the VAD model",
+          "silero_vad.onnx" not in nsh,
+          "the listener needs silero_vad.onnx and it lives in the same folder")
+    check("the cleanup deletes the two models by name, not by wildcard",
+          'Delete "$INSTDIR\\resources\\backend\\voice\\models\\kokoro-v1.0.onnx"'
+          in nsh and "*" not in "".join(
+              l for l in nsh.splitlines() if l.strip().startswith("Delete")),
+          "a wildcard in that folder would take the VAD model with them")
+
+    # And it must actually compile. makensis ships inside electron-builder, so
+    # a machine that can build an installer can run this.
+    makensis = os.path.expanduser(
+        "~/AppData/Local/electron-builder/Cache/nsis/nsis-3.0.4.1/Bin/"
+        "makensis.exe")
+    if os.path.isfile(makensis) and nsh:
+        check("the installer script compiles", *_compile_nsis(makensis))
+    else:
+        print("   (makensis is not cached here; skipped the compile check)")
     # The files the old hand-written list had drifted past. They are gone from
     # the working tree now, so a list of what exists cannot name them — what
     # matters is that git would ignore each one the moment it came back, because
