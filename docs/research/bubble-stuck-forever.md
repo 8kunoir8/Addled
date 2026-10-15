@@ -114,6 +114,50 @@ problem rather than solve it:
    that is telling them to wait, and nothing on screen says so. The timeout is
    still the fix; this is why it is not an emergency.
 
+## Fixed
+
+Implemented and deployed.
+
+**`backend/character/chat_bubble.py`**
+- `THINKING_TIMEOUT_S = 300`, next to `DECISION_TIMEOUT_S`, with the reasoning
+  above recorded on the constant.
+- `show_thinking` passes it instead of `None`.
+- `_fade_step` clears `_thinking` when the bubble fully hides, because a
+  timed-out "Thinking…" otherwise left the flag set and the next bubble painted
+  with the thinking colours and the italic grey label.
+
+**`backend/main.py`**
+- `_handle_prompt` wraps `run_chat_pipeline` and, on a raise, emits
+  `[Turn failed: <type>] <message>` to the bubble before returning. That is
+  what should have been on screen all along, rather than "Thinking…" waiting
+  for a reply that was never coming.
+
+**`scripts/check_chat_bubble.py`** pins the rule down — every bubble that shows
+is either dismissed by its own deadline or has a path that replaces it — and
+also re-checks that messages and decisions keep theirs, so a future change
+cannot fix one and quietly drop another.
+
+### Verification
+
+- Both files parse; the affected checks in the character suite pass.
+- **Teeth.** Restoring `duration_s=None` fails *it arms the auto-dismiss timer*
+  and *the timer was armed with exactly that deadline* by name. Unwrapping the
+  pipeline call fails *and reports the failure to the bubble on the way out*
+  and *the failure path returns* by name. Both restored afterwards, with no
+  mutation markers left in the tree.
+- **Offscreen, end to end.** Thinking shows with a 300s timer armed; a
+  simulated failing turn puts `[Turn failed: RuntimeError] …` on the bubble
+  instead of "Thinking…"; the bubble then clears in 0.4s.
+- **Live.** Deployed to `C:/Program Files/Addled`, backend restarted, and a real
+  turn driven over `ws://127.0.0.1:9876` returned its reply — the reply that
+  replaces "Thinking…" on the real bubble. The installed `chat_bubble.py`
+  carries `THINKING_TIMEOUT_S = 300` and the installed `main.py` carries the
+  `[Turn failed:` emit.
+- Not forced live: an actual raise from `run_chat_pipeline`. The live provider
+  is healthy, and breaking the config to manufacture one was not worth it; that
+  path is covered by the teeth test rather than by observation. **UNVERIFIED on
+  the live app.**
+
 ## Scope
 
 Only `show_thinking` is affected. `show_message` and `show_decision` both pass
