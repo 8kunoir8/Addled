@@ -178,6 +178,20 @@ def main():
     _ws_thread.start()
     log.info("WebSocket server starting on ws://127.0.0.1:9876")
 
+    # ---- heal an out-of-date Startup entry ------------------------------------
+    # An entry written before the target was fixed launches `python main.py`,
+    # which starts the character alone: no tray icon, and no dashboard for
+    # "Settings" to open. It looks correct from the outside, so the user has no
+    # reason to toggle it off and on. Rewriting it here means a previously
+    # installed app is fixed by the update alone. Best-effort: a machine with no
+    # Startup folder, or a source checkout, does nothing.
+    try:
+        from backend.onboarding import wizard as _onboarding
+        if _onboarding.autostart_enabled():
+            _onboarding.repair_autostart()
+    except Exception as e:  # noqa: BLE001
+        log.debug("autostart repair skipped: %s", e)
+
     # ---- tiny HTTP API for the Electron shell (window show / navigation) -----
     from backend.http_api import start_http_api
     start_http_api(port=9877)

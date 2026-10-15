@@ -729,6 +729,25 @@ def _autostart_shortcut() -> str:
                            r"Microsoft\Windows\Start Menu\Programs\Startup")
     return os.path.join(startup, "Addled.bat")
 
+def app_executable() -> str:
+    """The program the Startup entry should launch: the app, not the backend.
+
+    This used to be `sys.executable` — the bundled `python.exe` — with
+    `backend/main.py` as its argument, and that is the bug. `main.py` is the
+    PyQt half of Addled: it draws the character and serves the APIs, but the
+    tray icon and the dashboard window belong to the Electron shell, which is
+    what starts `main.py` as its own child in the first place. Launching the
+    backend directly therefore boots the floating avatar and nothing else — no
+    tray to click, and no window for "Settings" to open. That is exactly what
+    a user sees after signing in to Windows with this entry installed.
+
+    The installed layout is `<install>/Addled.exe` with this package at
+    `<install>/resources/backend/onboarding/wizard.py`, so the executable is
+    three levels up. In a source checkout there is no `Addled.exe` and no
+    entry is wanted — the caller checks `os.path.isfile` before writing one.
+    """
+    return str(Path(__file__).resolve().parents[3] / "Addled.exe")
+
 def _apply_autostart(enabled: bool) -> bool:
     """Add or remove Addled's entry in the Windows Startup folder.
 
@@ -747,13 +766,63 @@ def _apply_autostart(enabled: bool) -> bool:
         startup = os.path.dirname(shortcut)
         if not os.path.isdir(startup):
             return False
-        exe = sys.executable
-        main_script = Path(__file__).parent.parent / "main.py"
+        exe = app_executable()
+        if not os.path.isfile(exe):
+            # A source checkout, or an install laid out differently. Writing an
+            # entry at a path that does not exist would make Windows show a
+            # "file not found" at sign-in, which is worse than no entry.
+            log.warning("autostart: no app executable at %s", exe)
+            return False
         with open(shortcut, "w") as f:
-            f.write(f'@echo off\n"{exe}" "{main_script}"\n')
+            f.write(f'@echo off\nstart "" "{exe}"\n')
         return True
     except Exception as e:  # noqa: BLE001
         log.warning("could not apply autostart=%s: %s", enabled, e)
+        return False
+
+def autostart_entry_launches_app() -> bool:
+    """Whether the Startup entry that exists launches the app, not the backend.
+
+    An entry written before this was fixed launches `python main.py`, which
+    boots the character with no tray and no dashboard. Such an entry *looks*
+    installed — the file is there, and `autostart_enabled()` says yes — while
+    delivering the broken experience, so existence alone is not the answer.
+    True when there is no entry at all (nothing is wrong), or when the one
+    present names the executable.
+    """
+    try:
+        import os
+        shortcut = _autostart_shortcut()
+        if not os.path.isfile(shortcut):
+            return True
+        with open(shortcut, "r", errors="replace") as f:
+            body = f.read()
+        if "main.py" in body:
+            return False
+        return os.path.basename(app_executable()).lower() in body.lower()
+    except Exception:  # noqa: BLE001
+        # Unreadable is not the same as wrong, and rewriting a file we could
+        # not read would be a guess. Say nothing is wrong and leave it alone.
+        return True
+
+def repair_autostart() -> bool:
+    """Rewrite a stale Startup entry so it launches the app.
+
+    Called when the app starts, so an install that was configured before the
+    fix heals itself rather than waiting for the user to toggle the setting
+    off and on again — they have no reason to, since it looks enabled.
+    Returns whether an entry was rewritten; never raises.
+    """
+    try:
+        import os
+        if not os.path.isfile(_autostart_shortcut()):
+            return False
+        if autostart_entry_launches_app():
+            return False
+        log.info("autostart entry launched the backend; rewriting it to the app")
+        return _apply_autostart(True)
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not repair the autostart entry: %s", e)
         return False
 
 def autostart_enabled() -> bool:
@@ -777,8 +846,17 @@ def set_autostart(enabled: bool) -> dict:
         config.set("system", "autostart", value=bool(enabled))
     except Exception as e:  # noqa: BLE001
         log.debug("could not record the autostart setting: %s", e)
-    return {"success": applied, "autostart": bool(enabled),
-            "error": "" if applied else "No Startup folder on this system."}
+    if applied:
+        return {"success": True, "autostart": bool(enabled), "error": ""}
+    # Two different failures reach here, and naming the wrong one sends the
+    # reader looking in the wrong place: a machine with no Startup folder is
+    # not the same as an install whose executable could not be found.
+    import os
+    reason = ("No Startup folder on this system."
+              if enabled and not os.path.isdir(os.path.dirname(_autostart_shortcut()))
+              else "Could not write the Startup entry for this install."
+              if enabled else "Could not remove the Startup entry.")
+    return {"success": False, "autostart": bool(enabled), "error": reason}
 
 
 def show_onboarding():
