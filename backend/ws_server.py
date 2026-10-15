@@ -2680,10 +2680,15 @@ def _register_default_handlers():
         env = params.get("env")
         headers = params.get("headers")
         queries = params.get("params")
+        # A value saved against a server belongs to that server alone. Without
+        # an id it goes to the shared pool, which is what a market listing can
+        # offer since it knows only the name of the variable it wants.
+        server_id = str(params.get("id") or "").strip()
         if env is None and headers is None and queries is None:
-            return {"success": True, **credentials.known()}
+            return {"success": True, **credentials.known(server_id)}
         try:
-            return {"success": True, **credentials.save(env, headers, queries)}
+            return {"success": True,
+                    **credentials.save(env, headers, queries, server_id)}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

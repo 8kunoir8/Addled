@@ -618,6 +618,97 @@ def credential_checks(market) -> None:
                   "still assert the stored form)")
 
 
+        # ---- F7. a value belongs to one server, not to every server --------
+        # Keying by variable name alone meant one `API_KEY` was shared by every
+        # configured server, so adding a second server that declared the same
+        # name silently handed it the first one's key. Nothing failed; the
+        # wrong credential was simply sent, which is the worst place to have a
+        # bug. These assert the separation, and that the shared pool still
+        # serves every value that was already saved.
+        credentials.save({"F7_API_KEY": "the-shared-value"})
+        check("a value saved with no server is in the shared pool",
+              credentials.env("other-server").get("F7_API_KEY")
+              == "the-shared-value",
+              str(credentials.env("other-server").get("F7_API_KEY")))
+
+        credentials.save({"F7_API_KEY": "server-one-own"},
+                         server_id="server-one")
+        check("a value saved for one server is that server's",
+              credentials.env("server-one").get("F7_API_KEY")
+              == "server-one-own",
+              str(credentials.env("server-one").get("F7_API_KEY")))
+        check("and it does not become another server's value",
+              credentials.env("server-two").get("F7_API_KEY")
+              == "the-shared-value",
+              str(credentials.env("server-two").get("F7_API_KEY")))
+        check("nor does it change the shared pool",
+              credentials.env().get("F7_API_KEY") == "the-shared-value",
+              str(credentials.env().get("F7_API_KEY")))
+
+        # Two servers, two values, neither borrowed.
+        credentials.save({"F7_API_KEY": "server-two-own"},
+                         server_id="server-two")
+        check("two servers hold two different values for one name",
+              credentials.env("server-one").get("F7_API_KEY")
+              == "server-one-own"
+              and credentials.env("server-two").get("F7_API_KEY")
+              == "server-two-own",
+              f'{credentials.env("server-one").get("F7_API_KEY")} / '
+              f'{credentials.env("server-two").get("F7_API_KEY")}')
+
+        # `subset_*` is what actually builds a spec, so the separation has to
+        # hold there or it holds nowhere that matters.
+        check("the spec for one server carries that server's value",
+              credentials.subset_env(["F7_API_KEY"], "server-one")
+              == {"F7_API_KEY": "server-one-own"},
+              str(credentials.subset_env(["F7_API_KEY"], "server-one")))
+        check("a server with no value of its own borrows the shared one",
+              credentials.subset_env(["F7_API_KEY"], "server-three")
+              == {"F7_API_KEY": "the-shared-value"},
+              str(credentials.subset_env(["F7_API_KEY"], "server-three")))
+
+        # Both buckets encrypted, or the separation is bought with a leak.
+        _disk = str(config_mod.config.get("mcp", "credentials", default={}))
+        for _secret in ("the-shared-value", "server-one-own", "server-two-own"):
+            check(f"{_secret} is encrypted at rest in both scopes",
+                  _secret not in _disk,
+                  "a per-server value is readable in the config file")
+
+        # Clearing one server's own value falls back rather than deleting the
+        # shared one — otherwise "forget this one" silently breaks the others.
+        credentials.clear(env_name="F7_API_KEY", server_id="server-one")
+        check("clearing a server's own value falls back to the shared one",
+              credentials.env("server-one").get("F7_API_KEY")
+              == "the-shared-value",
+              str(credentials.env("server-one").get("F7_API_KEY")))
+        check("and leaves another server's own value alone",
+              credentials.env("server-two").get("F7_API_KEY")
+              == "server-two-own",
+              str(credentials.env("server-two").get("F7_API_KEY")))
+
+        # The card needs to say which of the two a server is using.
+        from backend.mcp_client.manager import McpServerState  # noqa: F401
+        from backend.mcp_client.manager import mcp_manager
+        _saved_servers = config_mod.config.get("mcp", "servers", default=[])
+        try:
+            credentials.save({"F7_API_KEY": "server-four-own"},
+                             server_id="server-four")
+            config_mod.config.set("mcp", "servers", value=[
+                {"id": "server-four", "name": "Four", "transport": "stdio",
+                 "command": "node"}])
+            _st = mcp_manager.status()["servers"][0]
+            check("the status says which names this server holds itself",
+                  _st["own_env_keys"] == ["F7_API_KEY"],
+                  str(_st["own_env_keys"]))
+        finally:
+            config_mod.config.set("mcp", "servers", value=_saved_servers)
+
+        for _name in ("F7_API_KEY",):
+            credentials.clear(env_name=_name, server_id="server-one")
+            credentials.clear(env_name=_name, server_id="server-two")
+            credentials.clear(env_name=_name, server_id="server-four")
+            credentials.clear(env_name=_name)
+
         # `last_error` is shown on the dashboard and written to the settings
         # file, and it is built from whatever the transport raised — so it can
         # carry a URL with a key in it, or a body quoting the header that was

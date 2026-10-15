@@ -35,6 +35,10 @@ _KIND_HEADERS = "headers"
 # destination is the query string needs its own bucket rather than being bent
 # into a header.
 _KIND_PARAMS = "params"
+# Values that belong to one server, keyed by its id. Kept beside the shared
+# buckets rather than replacing them, so every value already saved keeps
+# working and the shared pool is only ever a fallback.
+_KIND_SCOPED = "scoped"
 
 
 def _stored() -> dict:
@@ -48,11 +52,25 @@ def _stored() -> dict:
     from backend.config import config
     value = config.get("mcp", "credentials", default={}) or {}
     if not isinstance(value, dict):
-        return {_KIND_ENV: {}, _KIND_HEADERS: {}, _KIND_PARAMS: {}}
-    out: dict[str, dict[str, str]] = {}
+        return {_KIND_ENV: {}, _KIND_HEADERS: {}, _KIND_PARAMS: {},
+                _KIND_SCOPED: {}}
+    out: dict[str, dict] = {}
     for kind in (_KIND_ENV, _KIND_HEADERS, _KIND_PARAMS):
         bucket = value.get(kind) or {}
         out[kind] = {str(k): _readable(v) for k, v in bucket.items()}
+    scoped: dict[str, dict] = {}
+    for sid, per_server in (value.get(_KIND_SCOPED) or {}).items():
+        if not isinstance(per_server, dict):
+            continue
+        block: dict[str, dict[str, str]] = {}
+        for kind in (_KIND_ENV, _KIND_HEADERS, _KIND_PARAMS):
+            bucket = per_server.get(kind) or {}
+            if isinstance(bucket, dict) and bucket:
+                block[kind] = {str(k): _readable(v)
+                               for k, v in bucket.items()}
+        if block:
+            scoped[str(sid)] = block
+    out[_KIND_SCOPED] = scoped
     return out
 
 
@@ -91,27 +109,47 @@ def _encrypted(current: dict) -> dict:
     A user who needs the encryption gets it wherever DPAPI exists, which is
     wherever the packaged app runs.
     """
-    protected: dict[str, dict[str, str]] = {}
+    protected: dict[str, dict] = {}
     for kind in (_KIND_ENV, _KIND_HEADERS, _KIND_PARAMS):
-        bucket = current.get(kind) or {}
-        out: dict[str, str] = {}
-        for key, value in bucket.items():
-            text = str(value if value is not None else "")
-            if not text:
-                continue
-            # Already-protected text is kept as it is: re-encrypting an
-            # encrypted string would write a `dpapi:` prefix inside another.
-            if secretstore.is_protected(text):
-                out[str(key)] = text
-                continue
-            try:
-                out[str(key)] = secretstore.protect(text)
-            except Exception as e:  # noqa: BLE001
-                log.warning("Could not encrypt the MCP credential '%s' (%s); "
-                            "it is stored unencrypted", key, e)
-                out[str(key)] = text
-        protected[kind] = out
+        protected[kind] = _protect_bucket(current.get(kind) or {})
+    # Per-server values are protected the same way. A key that belongs to one
+    # server is no less a secret than a shared one, and leaving this bucket in
+    # the clear would undo the rest of the module for exactly the values added
+    # to stop servers sharing each other's credentials.
+    scoped: dict[str, dict] = {}
+    for sid, per_server in (current.get(_KIND_SCOPED) or {}).items():
+        if not isinstance(per_server, dict):
+            continue
+        block: dict[str, dict[str, str]] = {}
+        for kind in (_KIND_ENV, _KIND_HEADERS, _KIND_PARAMS):
+            bucket = per_server.get(kind) or {}
+            if isinstance(bucket, dict) and bucket:
+                block[kind] = _protect_bucket(bucket)
+        if block:
+            scoped[str(sid)] = block
+    protected[_KIND_SCOPED] = scoped
     return protected
+
+
+def _protect_bucket(bucket: dict) -> dict[str, str]:
+    """One flat name→value bucket, every value encrypted."""
+    out: dict[str, str] = {}
+    for key, value in bucket.items():
+        text = str(value if value is not None else "")
+        if not text:
+            continue
+        # Already-protected text is kept as it is: re-encrypting an
+        # encrypted string would write a `dpapi:` prefix inside another.
+        if secretstore.is_protected(text):
+            out[str(key)] = text
+            continue
+        try:
+            out[str(key)] = secretstore.protect(text)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Could not encrypt the MCP credential '%s' (%s); "
+                        "it is stored unencrypted", key, e)
+            out[str(key)] = text
+    return out
 
 
 def _clean(mapping: object) -> dict[str, str]:
@@ -127,75 +165,127 @@ def _clean(mapping: object) -> dict[str, str]:
     return out
 
 
-def env() -> dict[str, str]:
-    return _stored()[_KIND_ENV]
+# -- per-server values -------------------------------------------------------
+#
+# The same variable name means the same thing to a listing ("an API key for
+# this server") but not necessarily the same *value* to two servers. Keying by
+# name alone meant one `API_KEY` was shared by every configured server, so
+# adding a second server that wanted that name silently handed it the first
+# one's key. Nothing failed; it just sent the wrong credential, which is the
+# worst kind of bug to have in an authentication path.
+#
+# A value saved against a server is used only by that server. A value saved
+# from the market — where all that is known is the name — stays in the shared
+# pool and is used by any server that has nothing of its own under that name.
+# Every value already saved therefore keeps working, and the shared pool is a
+# fallback rather than the answer.
 
 
-def headers() -> dict[str, str]:
-    return _stored()[_KIND_HEADERS]
+def _server_key(server_id: object) -> str:
+    """A stable key for one server's own values.
+
+    Sanitised the same way a server id is everywhere else, because this becomes
+    a key in a config file and a name with a slash or a space in it would be a
+    second spelling of the same server.
+    """
+    text = str(server_id or "").strip()
+    if not text:
+        return ""
+    try:
+        from backend.mcp_client.manager import _sanitise
+        return _sanitise(text)[:48]
+    except Exception:  # noqa: BLE001
+        return "".join(c if c.isalnum() or c == "_" else "_"
+                       for c in text)[:48]
 
 
-def params() -> dict[str, str]:
-    return _stored()[_KIND_PARAMS]
+def _scope(stored: dict, server_id: object = "") -> dict[str, dict]:
+    """The values visible to one server, its own laid over the shared pool."""
+    sid = _server_key(server_id)
+    own = ((stored.get(_KIND_SCOPED) or {}).get(sid) or {}) if sid else {}
+    out: dict[str, dict] = {}
+    for kind in (_KIND_ENV, _KIND_HEADERS, _KIND_PARAMS):
+        merged = dict(stored.get(kind) or {})
+        merged.update(own.get(kind) or {})
+        out[kind] = merged
+    return out
 
 
-def have_env(name: str) -> bool:
-    return bool(env().get(str(name or "").strip()))
+def env(server_id: object = "") -> dict[str, str]:
+    """Values for the named server, over the shared pool.
 
+    `server_id` is optional so every existing caller keeps working and gets the
+    shared pool, which is the most a caller with no server in hand can mean. A
+    caller that *does* know which server it is building a spec for passes it,
+    and gets that server's own values first.
+    """
+    return _scope(_stored(), server_id)[_KIND_ENV]
 
-def have_header(name: str) -> bool:
-    return bool(headers().get(str(name or "").strip()))
+def headers(server_id: object = "") -> dict[str, str]:
+    return _scope(_stored(), server_id)[_KIND_HEADERS]
 
+def params(server_id: object = "") -> dict[str, str]:
+    return _scope(_stored(), server_id)[_KIND_PARAMS]
 
-def have_param(name: str) -> bool:
-    return bool(params().get(str(name or "").strip()))
+def have_env(name: str, server_id: object = "") -> bool:
+    return bool(env(server_id).get(str(name or "").strip()))
 
+def have_header(name: str, server_id: object = "") -> bool:
+    return bool(headers(server_id).get(str(name or "").strip()))
 
-def missing_env(names: object) -> list[str]:
+def have_param(name: str, server_id: object = "") -> bool:
+    return bool(params(server_id).get(str(name or "").strip()))
+
+def missing_env(names: object, server_id: object = "") -> list[str]:
     """The declared names we hold no value for, in the order given."""
-    return [str(n) for n in (names or []) if not have_env(n)]
+    return [str(n) for n in (names or []) if not have_env(n, server_id)]
 
+def missing_headers(names: object, server_id: object = "") -> list[str]:
+    return [str(n) for n in (names or []) if not have_header(n, server_id)]
 
-def missing_headers(names: object) -> list[str]:
-    return [str(n) for n in (names or []) if not have_header(n)]
+def missing_params(names: object, server_id: object = "") -> list[str]:
+    return [str(n) for n in (names or []) if not have_param(n, server_id)]
 
-
-def missing_params(names: object) -> list[str]:
-    return [str(n) for n in (names or []) if not have_param(n)]
-
-
-def subset_env(names: object) -> dict[str, str]:
+def subset_env(names: object, server_id: object = "") -> dict[str, str]:
     """The values we hold for these names — what a spec should be given."""
-    held = env()
+    held = env(server_id)
     return {str(n): held[str(n)] for n in (names or []) if held.get(str(n))}
 
-
-def subset_headers(names: object) -> dict[str, str]:
-    held = headers()
+def subset_headers(names: object, server_id: object = "") -> dict[str, str]:
+    held = headers(server_id)
     return {str(n): held[str(n)] for n in (names or []) if held.get(str(n))}
 
-
-def subset_params(names: object) -> dict[str, str]:
-    held = params()
+def subset_params(names: object, server_id: object = "") -> dict[str, str]:
+    held = params(server_id)
     return {str(n): held[str(n)] for n in (names or []) if held.get(str(n))}
-
 
 def save(env_values: object = None, header_values: object = None,
-         param_values: object = None) -> dict:
+         param_values: object = None, server_id: object = "") -> dict:
     """Remember values the user just typed. Returns the names now known.
 
     An empty value for a name that is already stored clears it, which is how the
     UI removes one — the only way to unset a key without editing settings.json.
+
+    With a `server_id` the values are kept for that server alone; without one
+    they go to the shared pool, which is what a market listing can offer since
+    it knows only the name. Two servers that both declare `API_KEY` therefore
+    stop sharing one value the moment either is saved against its own id.
     """
     from backend.config import config
 
     current = _stored()
+    sid = _server_key(server_id)
+    if sid:
+        current.setdefault(_KIND_SCOPED, {}).setdefault(sid, {})
     for kind, incoming in ((_KIND_ENV, env_values),
                            (_KIND_HEADERS, header_values),
                            (_KIND_PARAMS, param_values)):
         if incoming is None:
             continue
-        bucket = current[kind]
+        if sid:
+            bucket = current[_KIND_SCOPED][sid].setdefault(kind, {})
+        else:
+            bucket = current[kind]
         if isinstance(incoming, dict):
             for key, value in incoming.items():
                 name = str(key or "").strip()
@@ -209,27 +299,34 @@ def save(env_values: object = None, header_values: object = None,
         else:
             bucket.update(_clean(incoming))
 
-    # Compared in the clear, before encrypting: DPAPI is randomised, so
-    # encrypting first would make every save look like a change and rewrite
-    # settings.json on every keystroke of the credentials form.
+    # Compared before encrypting: DPAPI is randomised, so encrypting first
+    # would make every save look like a change and rewrite settings.json on
+    # every keystroke of the credentials form.
     if current != _stored():
         stored = _encrypted(current)
         try:
             config.set("mcp", "credentials", value=stored)
-            log.info("MCP credentials updated (env: %d, headers: %d, params: %d)",
+            log.info("MCP credentials updated (env: %d, headers: %d, params: %d%s)",
                      len(current[_KIND_ENV]), len(current[_KIND_HEADERS]),
-                     len(current[_KIND_PARAMS]))
+                     len(current[_KIND_PARAMS]),
+                     f", scoped servers: {len(current.get(_KIND_SCOPED) or {})}"
+                     if sid else "")
         except Exception as e:  # noqa: BLE001
             log.warning("Could not save MCP credentials: %s", e)
     return known()
 
 
-def known() -> dict:
-    """Which names have a value — names only, never the values."""
-    stored = _stored()
-    return {"env": sorted(stored[_KIND_ENV]),
-            "headers": sorted(stored[_KIND_HEADERS]),
-            "params": sorted(stored[_KIND_PARAMS])}
+def known(server_id: object = "") -> dict:
+    """Which names have a value — names only, never the values.
+
+    With a `server_id` this is what that server can see: its own names plus
+    whatever the shared pool offers. That is the set a card should ask about,
+    because it is the set the server will actually be given.
+    """
+    seen = _scope(_stored(), server_id)
+    return {"env": sorted(seen[_KIND_ENV]),
+            "headers": sorted(seen[_KIND_HEADERS]),
+            "params": sorted(seen[_KIND_PARAMS])}
 
 
 # Anything that looks like a secret in free text, regardless of whose it is.
@@ -293,15 +390,30 @@ def redact(text: object, *extra: object) -> str:
 
 
 def clear(env_name: str = "", header_name: str = "",
-          param_name: str = "") -> dict:
-    """Forget one stored value."""
+          param_name: str = "", server_id: object = "") -> dict:
+    """Forget one stored value.
+
+    With a `server_id` only that server's own value goes; the shared pool is
+    left as it is. Clearing the shared value would take it away from every
+    other server too, which is not what "forget this one" means.
+    """
+    from backend.config import config
+
     current = _stored()
+    sid = _server_key(server_id)
+    if sid:
+        own = ((current.get(_KIND_SCOPED) or {}).get(sid) or {})
+        for kind, name in ((_KIND_ENV, env_name), (_KIND_HEADERS, header_name),
+                           (_KIND_PARAMS, param_name)):
+            if name:
+                (own.get(kind) or {}).pop(name, None)
+        config.set("mcp", "credentials", value=_encrypted(current))
+        return known(server_id)
     if env_name:
         current[_KIND_ENV].pop(env_name, None)
     if header_name:
         current[_KIND_HEADERS].pop(header_name, None)
     if param_name:
         current[_KIND_PARAMS].pop(param_name, None)
-    from backend.config import config
-    config.set("mcp", "credentials", value=current)
+    config.set("mcp", "credentials", value=_encrypted(current))
     return known()

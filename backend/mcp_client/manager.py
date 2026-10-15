@@ -642,6 +642,24 @@ class McpManager:
 
     # -- introspection -----------------------------------------------------
 
+    def _own_value_names(self, server_id: str, kind: str) -> list[str]:
+        """Names this server has a value of its own for, not a borrowed one.
+
+        Read from the scoped bucket directly rather than by comparing the
+        merged view, because a name held both ways must count as its own —
+        that is the value that would be used, and the one a card should say it
+        can clear without touching other servers.
+        """
+        try:
+            from backend.mcp_client import credentials
+            stored = credentials._stored()
+            sid = credentials._server_key(server_id)
+            own = ((stored.get("scoped") or {}).get(sid) or {})
+            return sorted((own.get(kind) or {}).keys())
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not read %s values for %s: %s", kind, server_id, e)
+            return []
+
     def server_status(self, server_id: str) -> dict:
         spec = self._spec(server_id) or {}
         state = self._servers.get(server_id)
@@ -660,6 +678,13 @@ class McpManager:
             # Key names only: header/env values are routinely secrets.
             "header_keys": sorted((spec.get("headers") or {}).keys()),
             "env_keys": sorted((spec.get("env") or {}).keys()),
+            # Names this server holds a value of its *own* for, as opposed to
+            # one it is borrowing from the shared pool. The card needs the
+            # difference: a shared value is overridden by saving here, and a
+            # server with its own key is what stops two servers that declare
+            # the same name from sharing one secret.
+            "own_env_keys": self._own_value_names(server_id, "env"),
+            "own_header_keys": self._own_value_names(server_id, "headers"),
             "timeout_s": spec.get("timeout_s", 30.0),
             "enabled": bool(spec.get("enabled", True)),
             "trusted": bool(spec.get("trusted")),

@@ -284,6 +284,10 @@ function McpSection({settings,update,saving,status}: any){
   // the user ticks it: reading someone else's file is not an instruction.
   const [found,setFound]=useState<any[]|null>(null);
   const [chosen,setChosen]=useState<Record<string,boolean>>({});
+  // A value typed for one specific server. Holding them per server id is the
+  // point: the same variable name on two servers is two different keys, and
+  // one form for both would reintroduce the sharing this replaces.
+  const [ownValues,setOwnValues]=useState<Record<string,string>>({});
   const [marketHits,setMarketHits]=useState<any[]|null>(null);
   const [marketBusy,setMarketBusy]=useState(false);
   const [extraArgs,setExtraArgs]=useState<Record<string,string>>({});
@@ -376,6 +380,32 @@ function McpSection({settings,update,saving,status}: any){
     }
     await act('mcp.add',{server},'add');
     setForm({name:'',transport:form.transport,command:'',url:'',trusted:false,env:''});
+  };
+
+  // Save a credential against one server. Sent with the id so it is kept for
+  // that server alone and never becomes another one's value.
+  const saveOwnValue=async(id:string,name:string,bucket:string,value:string)=>{
+    if(wsState!=='connected')return;
+    if(!value.trim()){ setErr('Type a value first, or use Clear to remove one.'); return; }
+    setBusy('own'); setErr(null);
+    try{
+      const out=await send('mcp.credentials',{id,[bucket]:{[name]:value}});
+      if(out?.status)setLive(out.status); else await load();
+      if(out?.success===false)setErr(out.error||'Could not save that value');
+      else setOwnValues(v=>({...v,[`${id}:${name}`]:''}));
+    }catch(e:any){ setErr(String(e?.message||e)); }
+    finally{ setBusy(null); }
+  };
+
+  const clearOwnValue=async(id:string,name:string,bucket:string)=>{
+    if(wsState!=='connected')return;
+    setBusy('own'); setErr(null);
+    try{
+      const out=await send('mcp.credentials',{id,[bucket]:{[name]:''}});
+      if(out?.status)setLive(out.status); else await load();
+      if(out?.success===false)setErr(out.error||'Could not clear that value');
+    }catch(e:any){ setErr(String(e?.message||e)); }
+    finally{ setBusy(null); }
   };
 
   const scanConfigs=async()=>{
@@ -588,6 +618,42 @@ function McpSection({settings,update,saving,status}: any){
           disabled={!!busy||wsState!=='connected'}
           className={`${btn} text-[#f85149]`}>Remove</button>
       </div>
+      {(s.env_keys?.length||s.header_keys?.length||s.own_env_keys?.length||s.own_header_keys?.length)?
+        <div className="mt-2 border-t border-[#30363d] pt-2">
+          <p className="text-[10px] text-[#8b949e]">
+            Credentials this server uses. A value set here belongs to this server only —
+            servers that want the same name each keep their own.
+          </p>
+          {[...(s.env_keys||[]).map((k:string)=>({k,bucket:'env'})),
+            ...(s.header_keys||[]).map((k:string)=>({k,bucket:'headers'})),
+            ...(s.own_env_keys||[]).filter((k:string)=>!(s.env_keys||[]).includes(k)).map((k:string)=>({k,bucket:'env'})),
+            ...(s.own_header_keys||[]).filter((k:string)=>!(s.header_keys||[]).includes(k)).map((k:string)=>({k,bucket:'headers'}))]
+            .map(({k,bucket}:any)=>{
+              const key=`${s.id}:${k}`;
+              const owns=(bucket==='env'?s.own_env_keys:s.own_header_keys||[]).includes(k);
+              return (
+                <div key={key} className="mt-1 flex items-center gap-2">
+                  <span className="w-40 shrink-0 truncate font-mono text-[10px] text-[#8b949e]" title={k}>{k}</span>
+                  <input type="password" value={ownValues[key]||''} placeholder={owns?'set for this server':'set a value for this server'}
+                    onChange={e=>setOwnValues(v=>({...v,[key]:e.target.value}))}
+                    onKeyDown={e=>{ if(e.key==='Enter')saveOwnValue(s.id,k,bucket,ownValues[key]||''); }}
+                    className={`${inp} flex-1 font-mono text-[10px]`}/>
+                  <button onClick={()=>saveOwnValue(s.id,k,bucket,ownValues[key]||'')}
+                    disabled={!!busy||wsState!=='connected'}
+                    className="shrink-0 text-[10px] px-2 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:border-[#484f58]">
+                    Save
+                  </button>
+                  {owns&&<button onClick={()=>clearOwnValue(s.id,k,bucket)}
+                    disabled={!!busy||wsState!=='connected'}
+                    title="Remove this server's own value; it goes back to any shared one"
+                    className="shrink-0 text-[10px] px-2 py-1 rounded border border-[#30363d] text-[#f85149] hover:border-[#484f58]">
+                    Clear
+                  </button>}
+                  {owns&&<span className="shrink-0 text-[10px] text-[#3fb950]" title="This server has its own value, not a shared one">own</span>}
+                </div>
+              );
+            })}
+        </div>:null}
       {s.tools?.length?<div className="mt-2 space-y-1">
         {s.tools.map((t:any)=>{
           // A trusted server never asks, so there is nothing to allow per tool;

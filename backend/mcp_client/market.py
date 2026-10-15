@@ -451,11 +451,15 @@ def to_spec(candidate: dict, *, trusted: bool = False,
         "command": candidate.get("command") or "",
         "args": list(candidate.get("args") or []),
         "url": candidate.get("url") or "",
-        "env": credentials.subset_env(candidate.get("requires_env")),
+        # Values are looked up for *this* server, so a name the user has
+        # given this one a value for wins over the shared pool. The shared
+        # pool is what a market value lands in, since a listing knows only
+        # the name of the variable it wants.
+        "env": credentials.subset_env(candidate.get("requires_env"), sid),
         "headers": credentials.subset_headers(
-            candidate.get("requires_headers")),
+            candidate.get("requires_headers"), sid),
         "params": credentials.subset_params(
-            candidate.get("requires_params")),
+            candidate.get("requires_params"), sid),
         "enabled": True,
         "trusted": bool(trusted),
         # Marks a server nobody chose by hand, so the idle sweep knows which
