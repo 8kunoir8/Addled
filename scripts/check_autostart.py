@@ -92,10 +92,14 @@ print("An entry written by the old, broken code is recognised")
 # Exactly what the user has on disk today.
 entry.write_text(f'@echo off\n"{APP_EXE[:-10]}resources\\python\\python.exe" '
                  f'"{BACKEND}"\n')
+# Both read the sandbox, not the machine's real Startup folder: without the
+# patch they would read whatever is actually installed, and this check would
+# pass or fail depending on the developer's own settings. That is a bug in the
+# check, not the code, and it bit once already.
 check("it is reported as not launching the app",
-      wizard_mod.autostart_entry_launches_app() is False)
+      with_sandbox(wizard_mod.autostart_entry_launches_app) is False)
 check("yet it still counts as 'installed' -- the trap",
-      wizard_mod.autostart_enabled() is True,
+      with_sandbox(wizard_mod.autostart_enabled) is True,
       "existence alone would call this healthy")
 
 print()
