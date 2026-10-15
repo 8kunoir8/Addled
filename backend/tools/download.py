@@ -179,3 +179,84 @@ def extract_members(archive: bytes, names: tuple[str, ...],
 def extract_exe(archive: bytes, exe_name: str, destination: Path) -> Path:
     """Take one exe out of the archive, refusing anything implausible."""
     return extract_members(archive, (exe_name,), destination.parent)[exe_name]
+
+
+# A model file is far larger than any tool archive here: the Kokoro ONNX is
+# 325 MB against rtk's 9 MB. `fetch_bytes` cannot serve it -- it holds the whole
+# file in memory and caps at MAX_ARCHIVE_BYTES -- so models stream to disk
+# instead. The ceiling is separate so raising one cannot silently widen the
+# other; it is generous because the fp16 and fp32 variants differ by 150 MB.
+MAX_MODEL_BYTES = 512 * 1024 * 1024
+
+
+def fetch_to_file(url: str, destination: Path, on_progress=None,
+                  expected_bytes: int = 0, timeout: int = 900) -> dict:
+    """Stream a large file to disk, and prove it arrived intact.
+
+    Writes to `<destination>.part` and moves it into place only on success, so
+    an interrupted download can never be mistaken for a complete one. That is
+    the same discipline `extract_members` uses for executables, and it matters
+    more here: a truncated 325 MB model does not fail loudly on load, it fails
+    somewhere inside the ONNX runtime.
+
+    `expected_bytes` is the size to insist on. It is not optional in spirit —
+    a caller that knows the size should pass it, because it is the cheapest
+    proof the transfer finished — but it defaults to 0 meaning "accept what
+    Content-Length says", for a source that does not publish one.
+
+    Returns {"path", "bytes", "sha256"}. Verification against a *published*
+    digest is the caller's job, because these model releases do not publish
+    one; see `backend/voice/model_install.py`, which pins the hashes.
+    """
+    require_allowed(url)
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.with_name(destination.name + ".part")
+
+    digest = hashlib.sha256()
+    received = 0
+    declared = 0
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            declared = int(response.headers.get("Content-Length") or 0)
+            total = expected_bytes or declared
+            if total > MAX_MODEL_BYTES:
+                raise ValueError(
+                    f"the file is {total} bytes, larger than the "
+                    f"{MAX_MODEL_BYTES} byte ceiling")
+            with open(staging, "wb") as out:
+                while True:
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    digest.update(chunk)
+                    received += len(chunk)
+                    if received > MAX_MODEL_BYTES:
+                        raise ValueError(
+                            "the download exceeded the size ceiling mid-transfer")
+                    if on_progress:
+                        on_progress(received, total)
+        if expected_bytes and received != expected_bytes:
+            raise ValueError(
+                f"the download is {received} bytes and {expected_bytes} were "
+                f"expected — it was truncated")
+        if declared and received != declared:
+            raise ValueError(
+                f"the download is {received} bytes and the server declared "
+                f"{declared}")
+        if received == 0:
+            raise ValueError("the download was empty")
+        os.replace(staging, destination)
+    except BaseException:
+        # Including KeyboardInterrupt and cancellation: a partial file must not
+        # survive as the .part either, or a later run might resume from it
+        # without knowing how much is missing.
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        raise
+    return {"path": destination, "bytes": received,
+            "sha256": digest.hexdigest()}

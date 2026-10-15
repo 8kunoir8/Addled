@@ -2447,6 +2447,31 @@ def _register_default_handlers():
             remote=policy.is_remote(ws),
         )
 
+    async def system_voice_model_status(params: dict, ws) -> dict:
+        """Whether the Kokoro models are present, and how far a download has got.
+
+        The dashboard draws the Download button and its size from this, which
+        is why it reports the bundled case separately: a source checkout
+        already has the models and must not be offered 356 MB it does not need.
+        """
+        from backend.voice import model_install
+        return model_install.status()
+
+    async def system_voice_model_install(params: dict, ws) -> dict:
+        """Download the Kokoro voice models, on the user's explicit instruction.
+
+        Returns as soon as the download starts; progress arrives on
+        `system.voiceModelProgress`, and `system.voiceModelStatus` reports the
+        outcome. Refused when the request comes from a remote client, because
+        the model has to live on the machine that will speak.
+        """
+        from backend.remote import policy
+        from backend.voice import model_install
+        return await model_install.install(
+            force=bool(params.get("force")),
+            remote=policy.is_remote(ws),
+        )
+
     async def system_uv_status(params: dict, ws) -> dict:
         """Whether uv/uvx are available to launch PyPI-packaged MCP servers.
 
@@ -6836,6 +6861,8 @@ def _register_default_handlers():
     _server.register("system.rtkStatus", system_rtk_status)
     _server.register("system.rtkInstall", system_rtk_install)
     _server.register("system.uvStatus", system_uv_status)
+    _server.register("system.voiceModelStatus", system_voice_model_status)
+    _server.register("system.voiceModelInstall", system_voice_model_install)
     _server.register("system.uvInstall", system_uv_install)
     _server.register("desktop.status", desktop_status)
     _server.register("desktop.grant", desktop_grant)
