@@ -24,6 +24,17 @@ log = logging.getLogger("addled.stt")
 SAMPLE_RATE = 16000
 FRAME = 512  # VAD frame size @16 kHz
 
+# The fallback when `voice.stt_model` is unset, in ONE place.
+#
+# It used to be written twice with different values -- "tiny" for file
+# transcription, "small" for the live listener -- while config's own default is
+# "small". With the key unset, transcribing a recording and listening to speech
+# therefore disagreed about the model. The two are not interchangeable: a bigger
+# model is more accurate and slower, so the mismatch was a real difference in
+# behaviour rather than a cosmetic one. Matching config is the point; a second
+# literal is how this drifted the first time.
+DEFAULT_STT_MODEL = "small"
+
 # One model, shared by the listener and by file transcription. Loading a
 # second copy would double the RAM for no benefit, and the model is large
 # enough that doing so is worth avoiding.
@@ -85,9 +96,10 @@ def transcribe_file(path: str) -> dict:
 
     try:
         from backend.config import config
-        size = config.get("voice", "stt_model", default="tiny") or "tiny"
+        size = config.get("voice", "stt_model",
+                          default=DEFAULT_STT_MODEL) or DEFAULT_STT_MODEL
     except Exception:  # noqa: BLE001
-        size = "tiny"
+        size = DEFAULT_STT_MODEL
 
     try:
         from faster_whisper import WhisperModel
@@ -213,7 +225,7 @@ class VoiceListener:
         self._wake_word = wake_word or config.get(
             "voice", "wake_word", default="hey addled")
         self._model_size = model_size or config.get(
-            "voice", "stt_model", default="small")
+            "voice", "stt_model", default=DEFAULT_STT_MODEL)
         self._engine = config.get("voice", "stt_engine", default="sensevoice")
         self._stt_kind = "whisper"  # set in _load_model
         self._thread: threading.Thread | None = None

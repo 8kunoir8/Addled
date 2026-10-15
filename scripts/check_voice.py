@@ -369,6 +369,133 @@ def run_auto_speak_tests():
         logger.setLevel(level)
 
 
+def run_real_synthesis_tests():
+    """Edge must actually be able to speak right now, not just be importable.
+
+    This is the check the file did not have, and its absence is why a broken
+    engine shipped: every other check here mocks `_speak_edge`, so they verify
+    ROUTING and would pass against a version that cannot reach the service at
+    all. That is not hypothetical -- 7.2.8 was rejected with HTTP 403 on every
+    voice, and nothing in the suite noticed.
+
+    Network-dependent, so it returns a deliberate "cannot run here" (exit 2,
+    the convention check_all.py reads) when the service cannot be reached at
+    all. A 403 is different: the service answered and refused us, which is
+    exactly the failure this exists to catch.
+    """
+    from backend.voice import tts
+
+    try:
+        import edge_tts  # noqa: F401
+    except ImportError:
+        print("edge-tts is not installed; skipping the live synthesis check")
+        return 2
+
+    version = ""
+    try:
+        from importlib.metadata import version as _v
+        version = _v("edge-tts")
+    except Exception:  # noqa: BLE001
+        pass
+
+    async def try_speak():
+        import tempfile
+        path = os.path.join(tempfile.gettempdir(), "_addled_tts_check.mp3")
+        try:
+            communicate = edge_tts.Communicate("Addled voice check.",
+                                               "en-US-JennyNeural")
+            await communicate.save(path)
+            size = os.path.getsize(path)
+            return size, ""
+        except Exception as e:  # noqa: BLE001
+            return 0, str(e)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    size, error = asyncio.run(try_speak())
+    if size:
+        check(f"Edge really synthesizes audio (edge-tts {version})",
+              True, "")
+        return 0
+
+    # A refusal from the service is a real failure; being offline is not.
+    offline = any(marker in error for marker in (
+        "getaddrinfo", "Temporary failure in name resolution",
+        "Name or service not known", "Network is unreachable",
+        "Connection refused", "timed out", "TimeoutError"))
+    if offline:
+        print(f"cannot reach the Edge service here ({error[:80]}); skipping")
+        return 2
+
+    check("Edge really synthesizes audio", False,
+          f"the service refused: {error[:160]}. edge-tts {version} is pinned at "
+          f">=7.3.1 for this reason -- check the installed version.")
+    # A whole-engine failure is not a per-voice one: report it once.
+    return 1
+
+
+def run_consistency_tests():
+    """The settings page and the backend must not disagree.
+
+    Each of these is a drift that was really there, and each is invisible at
+    runtime until a user hits it: two different defaults for one key, a
+    fallback that disagreed with the backend, and a language the voice pack
+    speaks but the picker cannot offer.
+    """
+    import re
+    from backend.config import DEFAULT_SETTINGS
+    from backend.voice import stt, tts, voices
+
+    # 1. stt_model had two defaults -- "tiny" for file transcription, "small"
+    #    for the listener -- while config says "small".
+    source = open(os.path.join(ROOT, "backend", "voice", "stt.py"),
+                  encoding="utf-8").read()
+    hardcoded = re.findall(r'stt_model",\s*default="([a-z]+)"', source)
+    check("stt_model is not given a per-call-site default any more",
+          hardcoded == [],
+          f"found hardcoded defaults {hardcoded}; use DEFAULT_STT_MODEL")
+    check("DEFAULT_STT_MODEL matches the config default",
+          stt.DEFAULT_STT_MODEL == DEFAULT_SETTINGS["voice"]["stt_model"],
+          f"{stt.DEFAULT_STT_MODEL} vs "
+          f"{DEFAULT_SETTINGS['voice']['stt_model']}")
+
+    # 2. The dashboard's Language fallback disagreed with the backend default.
+    page = open(os.path.join(ROOT, "dashboard", "src", "app", "settings",
+                             "page.tsx"), encoding="utf-8").read()
+    match = re.search(r"const language\s*=\s*v\.language\s*\|\|\s*'([a-z-]+)'",
+                      page)
+    check("the dashboard Language fallback is readable", bool(match), "no match")
+    if match:
+        check("the dashboard Language fallback matches the backend default",
+              match.group(1) == DEFAULT_SETTINGS["voice"]["language"],
+              f"dashboard '{match.group(1)}' vs backend "
+              f"'{DEFAULT_SETTINGS['voice']['language']}'")
+
+    # 3. Every language the voice pack speaks must be selectable in the picker,
+    #    or its voices are unreachable. en-gb and it were both missing.
+    # Scoped to the LANGUAGES block: an unscoped scan picks up unrelated
+    # ['key','label'] pairs elsewhere in the file (model "capabilities" like
+    # 'long' and 'vision'), which are not languages at all.
+    block = re.search(r"const LANGUAGES[^=]*=\s*\[(.*?)\];", page, re.S)
+    check("the LANGUAGES block is readable", bool(block), "no match")
+    picker = set(re.findall(r"\[\s*'([a-z-]+)'\s*,", block.group(1))) if block else set()
+    for code in voices.kokoro_languages():
+        check(f"the Language picker can offer '{code}', which Kokoro speaks",
+              code in picker, f"picker has {sorted(picker)}")
+
+    # 4. And a language the picker offers that Kokoro lacks must be one Edge
+    #    can actually speak, or choosing it produces no voice at all.
+    for code in sorted(picker - set(voices.kokoro_languages())):
+        if code == "auto":
+            continue
+        check(f"'{code}' has a Kokoro voice or an Edge one",
+              code in tts.LANG_TO_EDGE,
+              f"neither engine can speak '{code}'")
+
+
 def run_payload_test():
     from backend.voice import voices
 
@@ -471,13 +598,19 @@ def main():
     run_edge_tests()
     run_auto_speak_tests()
     run_payload_test()
+    run_consistency_tests()
+    synth_rc = run_real_synthesis_tests()
     run_selection_tests()
     run_empty_audio_tests()
     print()
     print(f"{'FAIL' if fails else 'PASS'}: {len(fails)} failure(s)")
     for f in fails:
         print("  -", f)
-    return 1 if fails else 0
+    if fails:
+        return 1
+    # A deliberate "cannot run here" is not a pass: check_all.py reads exit 2
+    # for exactly this, so an offline machine skips rather than claims success.
+    return synth_rc
 
 
 sys.exit(main())

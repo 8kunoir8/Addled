@@ -1572,16 +1572,29 @@ function EmotionSection({ send, connected }: { send: (m: string, p?: Record<stri
   </div>;
 }
 
+// Every language the voice pack or the Edge fallback can actually speak.
+//
+// `en-gb` and `it` were missing although Kokoro has voices for both (8 for
+// British English, including bm_george, which is the British default in
+// LANG_TO_KOKORO) -- so they could not be selected, and the "Kokoro has no
+// <language> voice" warning compared against a list containing a value the
+// user had no way to pick. `id` and `ko` stay: Kokoro genuinely lacks them and
+// the warning is the useful part, since Edge speaks both.
 const LANGUAGES: [string, string][] = [
-  ['en','English'],['id','Indonesian'],['zh','Chinese'],['ja','Japanese'],
-  ['ko','Korean'],['es','Spanish'],['fr','French'],['hi','Hindi'],
-  ['pt','Portuguese'],['auto','Auto (detect)'],
+  ['en','English'],['en-gb','English (British)'],['id','Indonesian'],
+  ['zh','Chinese'],['ja','Japanese'],['ko','Korean'],['es','Spanish'],
+  ['fr','French'],['hi','Hindi'],['it','Italian'],['pt','Portuguese'],
+  ['auto','Auto (detect)'],
 ];
 
 function VoiceSection({ settings, update, saving, status, send, connected }: any) {
   const v=settings?.voice||{};
   const engine=v.tts_engine||'edge';
-  const language=v.language||'auto';
+  // The fallback matches the backend default (DEFAULT_SETTINGS voice.language
+  // is 'en'), not 'auto'. Every other fallback in this section already agreed
+  // with the backend; this one did not, so a fresh profile showed a different
+  // language selected than the backend would actually use.
+  const language=v.language||'en';
   const [catalogue,setCatalogue]=useState<any>(null);
   const [loadError,setLoadError]=useState('');
   const [busy,setBusy]=useState(false);
