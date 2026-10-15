@@ -184,6 +184,37 @@ def _declared_keys(schema: object) -> tuple[list[str], dict[str, str]]:
     return names, help_text
 
 
+def _declares_oauth(remote: dict) -> bool:
+    """Whether a remote entry says it wants an OAuth sign-in.
+
+    The registry has spelled this more than one way. `auth: "oauth"` is the
+    current one; an `oauth` object, or `type` naming it, appear in the wild as
+    well. All are treated as the same claim, because getting this wrong in the
+    permissive direction is a card that offers a sign-in a server does not
+    want, and in the strict direction is one that offers none and 401s — and
+    only the second is unrecoverable.
+    """
+    auth = remote.get("auth")
+    if isinstance(auth, str) and "oauth" in auth.lower():
+        return True
+    if isinstance(auth, dict) and auth:
+        return True
+    if isinstance(remote.get("oauth"), dict):
+        return True
+    kind = str(remote.get("type") or "").lower()
+    if kind == "oauth":
+        return True
+    for scheme in remote.get("securitySchemes") or []:
+        if isinstance(scheme, str) and "oauth" in scheme.lower():
+            return True
+        if isinstance(scheme, dict):
+            text = " ".join(str(scheme.get(k) or "")
+                            for k in ("type", "scheme", "name"))
+            if "oauth" in text.lower():
+                return True
+    return False
+
+
 def _pick_remote(entry: dict) -> dict | None:
     for remote in entry.get("remotes") or []:
         if not isinstance(remote, dict):
@@ -203,7 +234,12 @@ def _pick_remote(entry: dict) -> dict | None:
         return {"url": url,
                 "requires_headers": [str(h.get("name")).strip()
                                      for h in declared],
-                "header_hints": hints}
+                "header_hints": hints,
+                # A server that wants a sign-in wants no static header for it;
+                # a bearer token is obtained, not typed. Reported rather than
+                # guessed, because "needs a key" and "needs a sign-in" offer
+                # the user different buttons.
+                "oauth": _declares_oauth(remote)}
     return None
 
 
@@ -216,6 +252,35 @@ def _pick_package(entry: dict) -> dict | None:
             if str(package.get("registryType") or "").lower() == wanted:
                 return package
     return None
+
+
+def _has_tokens(server_id: str) -> bool:
+    """Whether a sign-in for this server has been stored.
+
+    Imported late, and never allowed to raise: `market` is on the dashboard's
+    read path and must work on a machine that has never configured OAuth.
+    A failure to answer "is there a token" is not a reason to fail a search.
+    """
+    try:
+        from backend.mcp_client.oauth import token_store
+        held = token_store.get(server_id) or {}
+        return bool(str(held.get("access_token") or "").strip()
+                    or str(held.get("refresh_token") or "").strip())
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not read stored MCP tokens: %s", e)
+        return False
+
+
+def _candidate_id(name: str) -> str:
+    """The id `to_spec` will give a candidate with this name.
+
+    It has to be the *same* spelling, and the same one `to_spec` uses, or a
+    token stored under one name is looked for under another and the sign-in
+    appears not to have worked. `to_spec` is the authority; this mirrors it.
+    """
+    from backend.mcp_client.manager import _sanitise
+    return _sanitise(str(name or "").replace("/", "-").replace(".", "-")) \
+        or "server"
 
 
 def _finish(candidate: dict, hint: str = "") -> dict:
@@ -268,6 +333,17 @@ def _finish(candidate: dict, hint: str = "") -> dict:
     if missing_headers:
         reasons.append("needs an API key for " + ", ".join(missing_headers))
         kinds.append("headers")
+    # A server that wants an OAuth sign-in is not runnable until someone has
+    # signed in, and saying otherwise is what made the card lie: it offered Add,
+    # the connection 401'd, and nothing on screen explained why or offered the
+    # thing that would fix it. The check is deliberately last and unconditional:
+    # a token may already be held from an earlier sign-in, and holding one is
+    # what "runnable" means here.
+    if candidate.get("oauth"):
+        held = _has_tokens(_candidate_id(candidate.get("name")))
+        if not held:
+            reasons.append("needs a sign-in")
+            kinds.append("oauth")
     candidate["blocked_reason"] = "; ".join(reasons)
     candidate["blocked_kinds"] = kinds
     # Which names are still missing, so a card can offer a field for those and
@@ -306,6 +382,7 @@ def normalise(raw: dict) -> dict | None:
         "requires_headers": [],
         "requires_params": [],
         "header_hints": {},
+        "oauth": False,
         "runnable": False,
         "blocked_reason": "",
         "blocked_kinds": [],
@@ -344,6 +421,7 @@ def normalise(raw: dict) -> dict | None:
             "requires_headers": remote["requires_headers"],
             "header_hints": remote.get("header_hints") or {},
             "runtime": "remote",
+            "oauth": bool(remote.get("oauth")),
         })
     else:
         return None

@@ -2503,6 +2503,49 @@ def _register_default_handlers():
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    async def mcp_authorize(params: dict, ws) -> dict:
+        """Start a sign-in for one server and return as soon as it is going.
+
+        The wait for a person to finish in a browser is minutes, and holding
+        the request open for it would freeze the dashboard. So the browser is
+        opened, the wait is handed to a worker thread, and the answer arrives
+        later as a broadcast — the same shape as the calendar's connect, for
+        the same reason.
+        """
+        import asyncio as _asyncio
+
+        from backend.mcp_client.manager import mcp_manager
+        server_id = str(params.get("id") or "")
+        if not server_id:
+            return {"success": False, "error": "missing server id"}
+
+        async def finish() -> None:
+            try:
+                out = await mcp_manager.authorize_server(server_id)
+            except Exception as e:  # noqa: BLE001
+                out = {"success": False, "error": str(e)}
+            try:
+                get_server().broadcast_nowait("mcp.auth", {
+                    "id": server_id, **out,
+                    "status": mcp_manager.status()})
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not report MCP auth result: %s", e)
+
+        loop = _asyncio.get_running_loop()
+        loop.create_task(finish())
+        return {"success": True, "pending": True, "id": server_id}
+
+    async def mcp_forget_auth(params: dict, ws) -> dict:
+        from backend.mcp_client.manager import mcp_manager
+        server_id = str(params.get("id") or "")
+        if not server_id:
+            return {"success": False, "error": "missing server id"}
+        try:
+            out = await mcp_manager.forget_server_auth(server_id)
+            return {**out, "status": mcp_manager.status()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     async def mcp_reload(params: dict, ws) -> dict:
         """Reconnect every configured server (after editing the list)."""
         from backend.mcp_client.manager import mcp_manager
@@ -6727,6 +6770,8 @@ def _register_default_handlers():
     _server.register("mcp.remove", mcp_remove)
     _server.register("mcp.connect", mcp_connect)
     _server.register("mcp.disconnect", mcp_disconnect)
+    _server.register("mcp.authorize", mcp_authorize)
+    _server.register("mcp.forgetAuth", mcp_forget_auth)
     _server.register("mcp.reload", mcp_reload)
     _server.register("mcp.tools", mcp_tools)
     _server.register("mcp.searchMarket", mcp_search_market)

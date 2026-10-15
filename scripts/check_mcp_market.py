@@ -1065,6 +1065,79 @@ async def detail_cache_checks(market) -> None:
           first and first[0].get("key_help"))
 
 
+def oauth_checks(market) -> None:
+    """An OAuth server is not offered as ready; a signed-in one is.
+
+    The card used to say `runnable: True` for these, offer Add, and get a 401
+    with nothing on screen explaining it. Being addable and being usable are
+    different questions, and this is where the market has to answer the second
+    one honestly.
+    """
+    from backend.mcp_client.oauth import token_store
+
+    def entry(auth=None, name="acme/oauththing"):
+        remote = {"type": "streamable-http", "url": "https://oauth.example/mcp"}
+        if auth is not None:
+            remote["auth"] = auth
+        return {"server": {"name": name, "title": "OAuth thing",
+                           "version": "1.0.0",
+                           "description": "Needs a sign-in", "remotes": [remote]}}
+
+    saved = token_store._all()
+    token_store.clear()
+    try:
+        blocked = market.normalise(entry("oauth"))
+        check("an OAuth server is flagged as needing one",
+              blocked["oauth"] is True, blocked.get("oauth"))
+        check("an OAuth server is blocked for sign-in, not offered as ready",
+              blocked["blocked_kinds"] == ["oauth"] and not blocked["runnable"],
+              f'{blocked["blocked_kinds"]} runnable={blocked["runnable"]}')
+        check("the reason a person reads says sign in",
+              "sign-in" in blocked["blocked_reason"],
+              blocked["blocked_reason"])
+
+        # Every spelling the registry has used, and a few it has not.
+        for raw, want in (({"auth": "oauth"}, True),
+                          ({"auth": "OAuth2"}, True),
+                          ({"auth": {"type": "oauth"}}, True),
+                          ({"oauth": {}}, True),
+                          ({"type": "oauth"}, True),
+                          ({"securitySchemes": ["oauth2"]}, True),
+                          ({"securitySchemes": [{"type": "oauth2"}]}, True),
+                          ({"auth": "api_key"}, False),
+                          ({"auth": "none"}, False),
+                          ({}, False),
+                          ({"auth": 123}, False),
+                          ({"securitySchemes": ["apiKey"]}, False)):
+            check(f"OAuth declared as {raw!r}",
+                  market._declares_oauth(raw) is want, raw)
+
+        # A key is still a key: the sign-in path must not swallow it.
+        keyed = market.normalise(
+            {"server": {"name": "acme/keyed", "title": "Keyed", "version": "1",
+                        "remotes": [{"url": "https://keyed.example/mcp",
+                                     "headers": [{"name": "X-Api-Key"}]}]}})
+        check("a header key is still reported as needing a key",
+              keyed["blocked_kinds"] == ["headers"] and not keyed["oauth"],
+              f'{keyed["blocked_kinds"]} oauth={keyed["oauth"]}')
+
+        # And once signed in it becomes addable — under the id `to_spec`
+        # actually uses, which is the whole reason the lookup mirrors it.
+        sid = market.to_spec(blocked)["id"]
+        token_store.set(sid, {"access_token": "tok"})
+        signed_in = market.normalise(entry("oauth"))
+        check("a signed-in OAuth server is offered as ready",
+              signed_in["runnable"] and not signed_in["blocked_kinds"],
+              f'kinds={signed_in["blocked_kinds"]} '
+              f'runnable={signed_in["runnable"]} id={sid}')
+    finally:
+        # Whatever the store held before is put back verbatim, so a run leaves
+        # the real settings exactly as it found them.
+        token_store.clear()
+        for k, v in saved.items():
+            token_store.set(k, v)
+
+
 def main() -> int:
     from backend.mcp_client import market
 
@@ -1088,6 +1161,7 @@ def main() -> int:
         asyncio.run(smithery_endpoint_checks(market))
         asyncio.run(hosted_reach_checks(market))
         param_checks(market)
+        oauth_checks(market)
     # Deliberately outside the stubs above: this check has to run the real
     # function to observe its cache, so it fakes the network itself instead.
     asyncio.run(detail_cache_checks(market))

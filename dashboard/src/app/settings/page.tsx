@@ -270,10 +270,14 @@ const MCP_STATES: Record<string,string> = {
 
 function McpSection({settings,update,saving,status}: any){
   const m=settings?.mcp||{};
-  const {send,state:wsState}=useWS();
+  const {send,state:wsState,onNotification}=useWS();
   const [live,setLive]=useState<any>(null);
   const [busy,setBusy]=useState<string|null>(null);
   const [err,setErr]=useState<string|null>(null);
+  // Which server's sign-in is in progress. A browser is open somewhere and the
+  // answer comes back later, so the card has to keep showing that it is
+  // waiting; otherwise the button looks dead for however long the user takes.
+  const [authing,setAuthing]=useState<string|null>(null);
   const [form,setForm]=useState<any>({name:'',transport:'stdio',command:'',url:'',trusted:false,env:''});
   const [marketQuery,setMarketQuery]=useState('');
   const [marketHits,setMarketHits]=useState<any[]|null>(null);
@@ -310,6 +314,17 @@ function McpSection({settings,update,saving,status}: any){
   },[send,wsState]);
 
   useEffect(()=>{ load(); },[load]);
+
+  // The result of a sign-in arrives long after the click that began it.
+  useEffect(()=>{
+    const off=onNotification('mcp.auth',(params:any)=>{
+      setAuthing(null);
+      if(params?.status)setLive(params.status);
+      if(params?.success===false)setErr(params.error||'Sign-in failed');
+      else load();
+    });
+    return off;
+  },[onNotification,load]);
 
   const act=async(method:string,params:any,label:string)=>{
     if(wsState!=='connected')return;
@@ -504,6 +519,10 @@ function McpSection({settings,update,saving,status}: any){
         </span>
       </div>
       {s.last_error&&<p className="mt-1 text-[10px] text-[#d29922]">⚠ {s.last_error}</p>}
+      {s.transport==='http'&&(s.auth_required||s.auth_error)&&
+        <p className="mt-1 text-[10px] text-[#d29922]">
+          🔑 {s.auth_error||'This server needs a sign-in.'}
+        </p>}
       <div className="mt-2 flex flex-wrap items-center gap-3">
         <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
           <input type="checkbox" checked={s.enabled}
@@ -516,6 +535,20 @@ function McpSection({settings,update,saving,status}: any){
             onChange={e=>act('mcp.update',{id:s.id,patch:{trusted:e.target.checked}},'toggle')}/>
           Trusted
         </label>
+        {s.transport==='http'&&!s.authorized&&
+          <button onClick={()=>{
+              setErr(null); setAuthing(s.id);
+              act('mcp.authorize',{id:s.id},'authorize').catch(()=>setAuthing(null));
+            }}
+            disabled={!!busy||wsState!=='connected'||authing===s.id}
+            title="Opens your browser to sign in to this server">
+            {authing===s.id?'Waiting for your browser…':'🔑 Authorize'}
+          </button>}
+        {s.transport==='http'&&s.authorized&&
+          <button onClick={()=>{ if(window.confirm(`Sign out of ${s.name}?`)) act('mcp.forgetAuth',{id:s.id},'forgetAuth'); }}
+            disabled={!!busy||wsState!=='connected'}
+            title="Forget the stored sign-in for this server"
+            className={btn}>Forget sign-in</button>}
         <button onClick={()=>act('mcp.connect',{id:s.id},'connect')}
           disabled={!!busy||wsState!=='connected'} className={btn}>Connect</button>
         <button onClick={()=>act('mcp.disconnect',{id:s.id},'disconnect')}
