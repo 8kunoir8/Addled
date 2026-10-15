@@ -26,9 +26,12 @@ Branch `mcp-remediation`, based on `ea05fad`.
 | `4336e6a` | **5.1a** OAuth client: discovery, DCR, PKCE, exchange | done, verified with teeth |
 | `811f990` | **5.1b** 401 interceptor, refresh-once, manager surface | done, verified with teeth |
 | `23cb984` | **5.1c** Authorize button; `oauth` market blocker | done, verified with teeth |
+| `dca55ab` | **5.3a** per-tool disable | done, verified with teeth |
+| `e6e9f29` | **5.3b** `last_error` redaction | done, verified with teeth |
+| `696cbd3` | **5.3c** config import from other tools | done, verified with teeth |
 
-Next per the revised order: 5.3a (per-tool disable), 5.3b (redact
-`last_error`), 5.3c (config import), then the deferred F7 per-server keying.
+Next: the deferred **F7** per-server credential keying — the last item. Every
+other finding (F1–F6, F8–F11) and all of 5.1/5.2/5.3 are done.
 
 ### Known suite failures, and which are not ours
 
