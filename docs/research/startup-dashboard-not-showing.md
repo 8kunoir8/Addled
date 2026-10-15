@@ -147,3 +147,31 @@ end to end — `system.setAutostart` over the WebSocket, `set_autostart()`,
 `autostart_enabled()`, surfaced in `system.status`, with a working toggle in
 the dashboard at `dashboard/src/app/settings/page.tsx` — and only the program
 it named was wrong. The fix is the writer, not the feature.
+
+## The fix, verified on the machine
+
+Commit `5c7073d`, deployed with `scripts/deploy_to_install.ps1`.
+
+The entry that was on disk, before:
+
+```bat
+@echo off
+"C:\Program Files\Addled\resources\python\python.exe" "C:\Program Files\Addled\resources\backend\main.py"
+```
+
+After the backend was restarted to load the new code, with no user action:
+
+```bat
+@echo off
+start "" "C:\Program Files\Addled\Addled.exe"
+```
+
+`main.py` now calls `repair_autostart()` on startup, so an install configured
+before the fix heals itself. Running the entry as Windows would at sign-in
+brings up `Addled.exe`; the dashboard window is there and visible
+(`EnumWindows` found two titled "Addled", both `visible=True`), and the tray
+icon comes with it, since both belong to the shell the entry now starts.
+
+`system.status` reports `autostart: true`, the provider is still `9router`, and
+`mcp.servers` is empty — the deploy's settings guard held, twice.
+
