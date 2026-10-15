@@ -109,6 +109,47 @@ check suite so it never touches the network. A metered or offline user can turn
 it off; without it the market cannot tell an open server from a closed one that
 did not say.
 
+### The live installed app was driven, not just the branch code
+
+The code above was tested against real *servers*. Separately, the installed
+build at `C:/Program Files/Addled` was driven over its own WebSocket API
+(`ws://127.0.0.1:9876`, JSON-RPC 2.0) to test real *clients*, which is a
+different question and found a different result.
+
+The installed build is **older than this branch**: its `mcp_client/` has no
+`oauth.py`, `secretstore.py` or `configimport.py`, and its `ws_server.py`
+registers 13 MCP methods against this branch's 17 (no `scanConfigs`,
+`importConfigs`, `authorize`, `forgetAuth`). It is running, and was driven
+live:
+
+- `mcp.list` returned real state (`enabled`, `autoconnect`, `servers`).
+- `mcp.add` + `mcp.connect` of `https://tandem.ac/mcp` **succeeded** through
+  the app's own code path: `state=ready`, `protocol_version=2025-06-18`, 13
+  tools with real names (`search_docs`, `get_doc`, …). `mcp.disconnect` and
+  `mcp.remove` then cleaned up, leaving the app as found.
+
+#### Live finding 3: the shipped app gives wrong advice for an OAuth server
+
+Against the same `propick.ae/mcp` that live finding 1 is about, the **installed
+app** reports:
+
+> the server rejected the credential (HTTP 401) - replace it with Forget on the
+> market card, or check the server wants that key
+
+There was no credential. The user never set one. The server wants OAuth, which
+the installed build cannot do at all, and the message sends the user to a
+"Forget" control for a key that does not exist. This is a **shipped,
+user-facing dead end with wrong instructions** — not a theoretical gap.
+
+The branch answers the same server differently — "this server needs a sign-in
+before it can be used. Connect it from its card in Settings." — and, since
+live finding 1, actually reports `auth_required=True` so the card can offer
+the button. (The installed build reports `auth_required: null` for this
+server, because it has no such field.)
+
+This is the strongest evidence for Phase 5.1: the gap it closes is one real
+users hit, and the old message actively misdirects them.
+
 **Every finding is now closed.** F1–F11 are fixed and verified with teeth, and
 5.1 (OAuth a/b/c), 5.2 (DPAPI) and 5.3 (a/b/c) are done. Nothing in this plan
 is outstanding.
