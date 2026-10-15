@@ -32,6 +32,113 @@ def check(label, cond, detail=""):
     if not cond:
         fails.append(f"{label}: {detail}")
 
+
+class _StubMcpServer:
+    """A streamable-HTTP MCP server that can misbehave in named ways.
+
+    The transport bugs (F6/F8/F9) only appear in responses a well-behaved
+    server never sends — a batch with a server->client request, a 400 naming a
+    different protocol version, a 404 for a session it has forgotten. Testing
+    them needs a server that does those on purpose, and one that records what
+    it was sent so the check can assert on the request as well as the reply.
+    """
+
+    def __init__(self, *, collide_batch=False, require_version=None,
+                 expire_once=False, want_version=None):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.collide_batch = collide_batch
+        self.require_version = require_version
+        self.want_version = want_version
+        self.expire_once = expire_once
+        self.record = {"versions": [], "posts": [], "deleted": None,
+                       "inits": 0}
+        self._valid_sessions: set = set()
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _json(self, code, payload, session=None):
+                body = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                if session:
+                    self.send_header("Mcp-Session-Id", session)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_DELETE(self):
+                outer.record["deleted"] = self.headers.get("Mcp-Session-Id")
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                msg = json.loads(self.rfile.read(n) or b"{}")
+                method = msg.get("method")
+                sid = self.headers.get("Mcp-Session-Id")
+                outer.record["posts"].append(method)
+                if method == "initialize":
+                    outer.record["inits"] += 1
+                    new = f"sess-{outer.record['inits']}"
+                    outer._valid_sessions.add(new)
+                    return self._json(200, {
+                        "jsonrpc": "2.0", "id": msg["id"],
+                        "result": {"protocolVersion": "2025-06-18",
+                                   "capabilities": {},
+                                   "serverInfo": {"name": "stub",
+                                                  "version": "1"}}},
+                        session=new)
+                if method == "notifications/initialized":
+                    self.send_response(202)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                outer.record["versions"].append(
+                    self.headers.get("MCP-Protocol-Version"))
+                if outer.want_version and \
+                        self.headers.get("MCP-Protocol-Version") != outer.want_version:
+                    return self._json(400, {"error": {
+                        "code": -32600,
+                        "message": "Unsupported MCP-Protocol-Version; use "
+                                   + outer.want_version}})
+                if outer.expire_once and sid and sid in outer._valid_sessions:
+                    # Forget it once, so the client's reinitialize and retry
+                    # succeed. Expiring again on the retry would mean the
+                    # server never accepts anything, which is a different (and
+                    # uninteresting) failure than the one being tested.
+                    outer._valid_sessions.discard(sid)
+                    outer.expire_once = False
+                    return self._json(404, {"error": {
+                        "code": -32001, "message": "Session not found"}})
+                if sid and sid not in outer._valid_sessions:
+                    return self._json(404, {"error": {
+                        "code": -32001, "message": "Session not found"}})
+                if outer.collide_batch:
+                    return self._json(200, [
+                        {"jsonrpc": "2.0", "id": 99, "method": "roots/list"},
+                        {"jsonrpc": "2.0", "method": "notifications/message",
+                         "params": {"level": "info", "data": "hi"}},
+                        {"jsonrpc": "2.0", "id": msg["id"],
+                         "result": {"ok": True}}])
+                return self._json(200, {"jsonrpc": "2.0", "id": msg["id"],
+                                        "result": {"ok": True}})
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}/mcp"
+        self._thread = threading.Thread(target=self._httpd.serve_forever,
+                                       daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
 async def approved(name, params):
     """Run an MCP tool the way a user does: allow it, then run it.
 
@@ -719,6 +826,119 @@ async def main():
         finally:
             await mcp_manager.disconnect("f3e2e")
             config.set("mcp", "servers", value=_saved)
+
+        # ---- 9g. HTTP transport conformance (F6/F8/F9) -------------------
+        # Each of these is a response a well-behaved server never sends, so
+        # each needs a server that sends it on purpose. They are grouped
+        # because they are all "what the client does with an awkward body".
+        from backend.mcp_client.http import McpHttpClient
+
+        # F6: a batch carrying a server->client request, and a notification.
+        # The client used to scan for its own id and return, which left the
+        # server's request unanswered and the notification unseen.
+        _stub = _StubMcpServer(collide_batch=True)
+        try:
+            _c = McpHttpClient("probe", {"url": _stub.url, "timeout_s": 5})
+            await _c.start()
+            _r = await _c.request("tools/list", {})
+            await asyncio.sleep(0.3)
+            check("F6: the reply is still returned when the batch is mixed",
+                  _r.get("ok") is True, str(_r))
+            check("F6: a server->client request is answered",
+                  "roots/list" not in _stub.record["posts"]
+                  and _stub.record["posts"].count(None) + 1 > 0
+                  and any(p is None for p in _stub.record["posts"]),
+                  f"posts: {_stub.record['posts']}")
+            check("F6: a notification beside the result is kept",
+                  any(n.get("method") == "notifications/message"
+                      for n in _c.notifications),
+                  f"notifications: {_c.notifications}")
+            await _c.close()
+        finally:
+            _stub.close()
+
+        # F9: a 404 on a session-bearing request means the session expired.
+        # Reported before as "there is no server at this address any more",
+        # which was false and left the connection broken until a manual
+        # reconnect.
+        _stub = _StubMcpServer(expire_once=True)
+        try:
+            _c = McpHttpClient("probe", {"url": _stub.url, "timeout_s": 5})
+            await _c.start()
+            _first = _c._session_id
+            # Reported rather than raised: without the fix this raises, and an
+            # aborting run names nothing.
+            try:
+                _r = await _c.request("tools/list", {})
+            except Exception as _e:  # noqa: BLE001
+                _r = {"error": f"{type(_e).__name__}: {_e}"}
+            check("F9: an expired session is reinitialized and retried",
+                  _r.get("ok") is True,
+                  f"got {_r!r}; the caller would have seen a 404")
+            check("F9: a fresh session was negotiated",
+                  _c._session_id and _c._session_id != _first,
+                  f"{_first} -> {_c._session_id}")
+            check("F9: it reinitialized exactly once",
+                  _stub.record["inits"] == 2,
+                  f"inits: {_stub.record['inits']}")
+            await _c.close()
+            check("F9: the session is DELETEd on close",
+                  _stub.record["deleted"] == _c._session_id
+                  or _stub.record["deleted"] is not None,
+                  f"deleted: {_stub.record['deleted']!r}")
+        finally:
+            _stub.close()
+
+        # F8: a 400 naming another protocol version is retried once with it.
+        _stub = _StubMcpServer(want_version="2025-03-26")
+        try:
+            _c = McpHttpClient("probe", {"url": _stub.url, "timeout_s": 5})
+            await _c.start()
+            # The header is only recorded once a non-handshake request
+            # arrives, so these are asserted after the call that sends one.
+            # Captured rather than raised: the whole point of the check is
+            # what happens when this 400 arrives, and an unhandled error here
+            # would abort the run instead of naming the finding.
+            try:
+                _r = await _c.request("tools/list", {})
+            except Exception as _e:  # noqa: BLE001
+                _r = {"error": f"{type(_e).__name__}: {_e}"}
+            check("F8: the negotiated version is sent on the next request",
+                  _stub.record["versions"][:1] == ["2025-06-18"],
+                  f"versions: {_stub.record['versions']}")
+            check("F8: a version-mismatch 400 is retried with the asked-for one",
+                  _r.get("ok") is True,
+                  f"got {_r!r}; the server would have been unusable")
+            check("F8: the asked-for version was adopted",
+                  _c.protocol_version == "2025-03-26",
+                  f"version: {_c.protocol_version}")
+            check("F8: it retried with the version the server named",
+                  _stub.record["versions"] == ["2025-06-18", "2025-03-26"],
+                  f"versions: {_stub.record['versions']}")
+            await _c.close()
+        finally:
+            _stub.close()
+
+        # F10: a transport we cannot speak is refused, not coerced to http.
+        for _bad in ("sse", "ws", "ftp", "gibberish"):
+            _clean, _err = mcp_manager.validate(
+                {"name": f"bad-{_bad}", "transport": _bad,
+                 "url": "https://a.example/mcp"})
+            check(f"F10: transport '{_bad}' is rejected",
+                  _err is not None and _clean is None,
+                  f"accepted as {_clean and _clean.get('transport')!r}")
+        _clean, _err = mcp_manager.validate(
+            {"name": "alias", "transport": "streamable-http",
+             "url": "https://a.example/mcp"})
+        check("F10: 'streamable-http' is accepted as an alias for http",
+              _err is None and _clean.get("transport") == "http",
+              f"error={_err}")
+        _clean, _err = mcp_manager.validate(
+            {"name": "inferred", "url": "https://a.example/mcp"})
+        check("F10: an absent transport is still inferred",
+              _err is None and _clean.get("transport") == "http",
+              f"error={_err}")
+
 
         # The escape hatch: a server needing something unanticipated can still
         # be given it, from Settings, without editing code.

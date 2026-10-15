@@ -603,10 +603,31 @@ class McpManager:
         if not sid:
             sid = _sanitise(name.lower().replace(" ", "-")) or "server"
         sid = _sanitise(sid)
-        transport = str(spec.get("transport") or "").strip().lower()
-        if transport not in ("stdio", "http"):
+        # A declared transport we cannot speak is refused, not guessed at.
+        # This used to coerce `sse`, `ws` and outright nonsense to `http`,
+        # so a person configuring an SSE server got an HTTP client and a
+        # failure that mentioned neither — the definition looked accepted and
+        # the reason it could never connect was invisible.
+        #
+        # `streamable-http` is a real spelling of http in the wild and is
+        # accepted as an alias. An *absent* transport is still inferred from
+        # the shape of the spec, because a market entry or a pasted snippet
+        # may carry no transport field at all.
+        _declared = str(spec.get("transport") or "").strip().lower()
+        _aliases = {"streamable-http": "http", "streamable_http": "http"}
+        if _declared in _aliases:
+            transport = _aliases[_declared]
+        elif _declared in ("stdio", "http"):
+            transport = _declared
+        elif not _declared:
             transport = "http" if spec.get("url") and not spec.get("command") \
                 else "stdio"
+        else:
+            _hint = ("; 'sse' is not supported yet"
+                     if _declared == "sse" else "")
+            return None, (
+                f"unsupported transport '{_declared}'. This build speaks "
+                f"'stdio' and 'http' (also spelled 'streamable-http'){_hint}")
 
         command = spec.get("command")
         if isinstance(command, str):

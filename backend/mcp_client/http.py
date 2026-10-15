@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.parse
 
 from backend.mcp_client.protocol import (
+    JsonRpcSession,
     McpError,
     initialize_params,
     parse_sse,
@@ -80,6 +82,23 @@ def _explain(status: int, body: str = "") -> str:
     return f"the server answered HTTP {status}{_body_note(body)}"
 
 
+_VERSION_IN_TEXT = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+
+
+def _wanted_version(body: str) -> str:
+    """The protocol version a server's 400 named, if it named one.
+
+    Servers say this in several ways — a JSON `error.message`, a plain string,
+    an `MCP-Protocol-Version` hint in the body — so rather than parse each
+    shape, look for the one thing that is always the same: a date-shaped
+    version. It has to be a date, or a server complaining about anything else
+    (a bad argument, a missing header) would be read as a version request and
+    the retry would send a version we invented.
+    """
+    match = _VERSION_IN_TEXT.search(str(body or ""))
+    return match.group(1) if match else ""
+
+
 class McpHttpClient:
     """A remote MCP server reached over streamable HTTP."""
 
@@ -91,10 +110,30 @@ class McpHttpClient:
         self.url = str(spec.get("url") or "").strip()
         self.server_info: dict = {}
         self.protocol_version: str = ""
-        self.notifications: list[dict] = []
+        # Filled by the session router below, which keeps the buffer bounded
+        # and is the one place notifications are recorded. Exposed as the same
+        # name the stdio client uses so callers need not know which transport
+        # they hold.
+        # Routes incoming messages. It already knows how to answer a
+        # server→client request and how to keep notifications; the HTTP client
+        # used to do neither, because it scanned the response body for its own
+        # id and stopped. Sharing the router means one implementation of that
+        # rule rather than two that disagree.
+        self._session = JsonRpcSession()
         self._client = None
         self._session_id = ""
         self._counter = 0
+
+    @property
+    def notifications(self) -> list[dict]:
+        """Notifications the server has sent, newest last.
+
+        Read from the router rather than stored here, so there is exactly one
+        buffer and it is the same one that decides what a server→client request
+        is. A second list beside it would drift the moment one path recorded
+        something the other did not.
+        """
+        return self._session.notifications
 
     @property
     def alive(self) -> bool:
@@ -118,12 +157,46 @@ class McpHttpClient:
         return result
 
     async def close(self, grace: float = 3.0) -> None:
+        # The protocol asks the client to DELETE a session when it is done.
+        # Without it the server keeps the session — and everything it holds for
+        # it — until its own timeout, which on a long-lived app is a leak the
+        # server pays for. Best-effort: closing must not fail because the
+        # server is already gone, and it must not hang on a server that will
+        # not answer, so it gets a short deadline of its own.
         client, self._client = self._client, None
+        if client is not None and self._session_id:
+            try:
+                await client.delete(self._target(),
+                                    headers=self._headers(),
+                                    timeout=min(grace, 5.0))
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not close MCP session %s: %s",
+                          self._session_id, e)
+            self._session_id = ""
         if client is not None:
             try:
                 await client.aclose()
             except Exception:
                 pass
+
+    async def _reinitialize(self) -> None:
+        """Start a fresh session after the server dropped ours.
+
+        `initialize` is sent through `request`, which will not touch `_post`'s
+        session-retry branch: the id is already cleared, so there is nothing to
+        expire. A failure here is not swallowed — if we cannot re-initialize,
+        the caller has to hear that rather than see the original 404.
+        """
+        self._session_id = ""
+        result = await self.request("initialize", initialize_params())
+        version = str(result.get("protocolVersion") or "")
+        if version:
+            self.protocol_version = version
+        info = result.get("serverInfo")
+        if isinstance(info, dict):
+            self.server_info = info
+        await self.notify("notifications/initialized")
+
 
     # -- io ----------------------------------------------------------------
 
@@ -160,7 +233,9 @@ class McpHttpClient:
         return f"{self.url}{'&' if '?' in self.url else '?'}{query}"
 
     async def _post(self, message: dict,
-                    timeout: float | None = None) -> list[dict]:
+                    timeout: float | None = None,
+                    retry_version: bool = False,
+                    retry_session: bool = False) -> list[dict]:
         if self._client is None:
             raise McpError(-32000, "client is closed")
         limit = self.timeout if timeout is None else timeout
@@ -177,6 +252,38 @@ class McpHttpClient:
 
         if resp.status_code == 202:
             return []
+
+        # A version the server will not speak. The spec lets a server answer a
+        # request carrying the wrong `MCP-Protocol-Version` with a 400 naming
+        # the one it wants; retrying once with that version turns a dead
+        # server into a working one, and is what every other client does.
+        # `retry_version` is set only for the retry, so this cannot loop.
+        if resp.status_code == 400 and not retry_version:
+            wanted = _wanted_version(resp.text)
+            if wanted and wanted != self.protocol_version:
+                log.info("MCP server '%s' asked for protocol version %s "
+                         "(we sent %s); retrying", self.server_id, wanted,
+                         self.protocol_version or "none")
+                self.protocol_version = wanted
+                return await self._post(message, timeout=timeout,
+                                        retry_version=True)
+
+        # 404 on a request that carried a session id means the session is gone,
+        # not that the address is. Servers expire them routinely. Treating it
+        # as "there is no server at this address any more" told the user their
+        # server had disappeared when it was running perfectly, and left the
+        # connection permanently broken until they reconnected by hand.
+        # Re-initialize and try once; the guard keeps a server that 404s
+        # everything from looping.
+        if (resp.status_code == 404 and self._session_id
+                and not retry_session):
+            log.info("MCP session %s on '%s' expired; reinitializing",
+                     self._session_id, self.server_id)
+            self._session_id = ""
+            await self._reinitialize()
+            return await self._post(message, timeout=timeout,
+                                    retry_session=True)
+
         if resp.status_code >= 400:
             raise McpError(-32000, _explain(resp.status_code, resp.text))
         ctype = (resp.headers.get("content-type") or "").lower()
@@ -204,20 +311,52 @@ class McpHttpClient:
         limit = self.timeout if timeout is None else timeout
         messages = await self._post(message, timeout=limit)
 
+        # Every message is routed, not just the reply we are waiting for. A
+        # response body can carry more than one thing: the server may ask us
+        # something (`roots/list`, `sampling/createMessage`) in the same batch,
+        # and it may send notifications alongside the result. Scanning for our
+        # id and returning discarded both — the request went unanswered, so the
+        # server waited, and the notification was never seen.
+        result: dict | None = None
+        error: McpError | None = None
         for msg in messages:
-            if "method" in msg and "id" not in msg:
-                self.notifications.append(msg)
+            if not isinstance(msg, dict):
+                continue
+            reply = self._session.feed(msg)
+            if reply is not None:
+                # The peer asked something we do not implement. Answering with
+                # a proper error is the protocol's requirement: silence leaves
+                # the server holding an entry open for a client that will never
+                # write back.
+                await self._reply(reply)
                 continue
             if msg.get("id") != req_id or "method" in msg:
                 continue
-            error = msg.get("error")
-            if error:
-                raise McpError(int(error.get("code") or -32603),
-                               str(error.get("message") or "server error"),
-                               error.get("data"))
-            result = msg.get("result")
-            return result if isinstance(result, dict) else {"value": result}
+            if msg.get("error"):
+                err = msg["error"]
+                error = McpError(int(err.get("code") or -32603),
+                                 str(err.get("message") or "server error"),
+                                 err.get("data"))
+                continue
+            payload = msg.get("result")
+            result = payload if isinstance(payload, dict) else {"value": payload}
+
+        if error is not None:
+            raise error
+        if result is not None:
+            return result
         raise McpError(-32000, f"no response to '{method}'")
+
+    async def _reply(self, envelope: dict) -> None:
+        """Send a JSON-RPC error back for a request we do not implement.
+
+        Best-effort: the request we are waiting on must still be able to
+        return, so a failure to deliver this cannot become the caller's error.
+        """
+        try:
+            await self._post(envelope)
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not answer a server request: %s", e)
 
     async def notify(self, method: str, params: dict | None = None) -> None:
         message = {"jsonrpc": "2.0", "method": method}
