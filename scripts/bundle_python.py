@@ -22,6 +22,21 @@ CACHE = ROOT / "build_cache"
 BUNDLE = ROOT / "python-bundle"
 COMPLETE_MARK = BUNDLE / ".bundle-complete"
 
+REQUIREMENTS = ROOT / "requirements-core.txt"
+
+
+def _requirements_fingerprint() -> str:
+    """Hash what the bundle is built from, not just the interpreter version.
+
+    Keying the marker on PY_VERSION alone meant an edited requirements-core.txt
+    was invisible: the bundle skipped and the previous contents shipped. That is
+    how edge-tts 7.2.8 (rejected with HTTP 403 on every voice) survived a
+    version bump -- the fix had to be installed by hand, and the marker still
+    claimed the bundle was current. The marker now holds two lines: the version
+    and this digest.
+    """
+    return hashlib.sha256(REQUIREMENTS.read_bytes()).hexdigest()
+
 # Keep the embedded interpreter isolated from the build machine's packages:
 # without this, `import site` leaks the user site-packages dir into sys.path
 # and pip skips installing what the bundle actually needs.
@@ -46,9 +61,14 @@ def download(url: str, dest: pathlib.Path) -> None:
 def main() -> int:
     # ── 1. Extract embeddable Python ─────────────────────────────────────
     zip_path = CACHE / f"python-{PY_VERSION}-embed-amd64.zip"
-    if COMPLETE_MARK.exists() and COMPLETE_MARK.read_text().strip() == PY_VERSION:
+    marker = (COMPLETE_MARK.read_text(encoding="utf-8").splitlines()
+              if COMPLETE_MARK.exists() else [])
+    expected = [PY_VERSION, _requirements_fingerprint()]
+    if marker == expected:
         log(f"python-bundle already complete for {PY_VERSION} — skipping")
         return 0
+    if marker and marker[0] == PY_VERSION:
+        log("requirements-core.txt changed since the bundle was built — rebuilding")
 
     download(EMBED_URL, zip_path)
     if BUNDLE.exists():
@@ -171,7 +191,8 @@ def main() -> int:
         return 1
     log(f"vision check: {r2.stdout.strip()}")
 
-    COMPLETE_MARK.write_text(PY_VERSION, encoding="utf-8")
+    COMPLETE_MARK.write_text(
+        f"{PY_VERSION}\n{_requirements_fingerprint()}\n", encoding="utf-8")
     size_mb = sum(f.stat().st_size for f in BUNDLE.rglob("*") if f.is_file()) // 1024 // 1024
     log(f"bundle complete: {size_mb} MB in {BUNDLE.name}")
     return 0
