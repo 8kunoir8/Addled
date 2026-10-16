@@ -232,11 +232,18 @@ class VoiceListener:
         self._running = False
         self._callbacks: list = []
         self._wake_callbacks: list = []
+        self._listen_end_callbacks: list = []
         self.enabled = False
         self.model_loaded = False
         self._vad = None
         self._use_vad = False
         self._last_lang: str | None = None  # detected language of last command
+        # Set by request_listen() from the GUI thread when the user asks to talk
+        # (a left-click on the floating character). The capture loop polls it and
+        # enters command mode. An Event rather than a bool so the loop can clear
+        # it atomically and a click during a slow read is never lost.
+        self._listen_request = threading.Event()
+
 
     def on_command(self, callback) -> None:
         self._callbacks.append(callback)
@@ -244,8 +251,38 @@ class VoiceListener:
     def on_wake(self, callback) -> None:
         self._wake_callbacks.append(callback)
 
+    def on_listen_end(self, callback) -> None:
+        """Called when the listening window closes without a command.
+
+        Needed so the UI can leave the listening animation: the wake callback
+        turns it on, and without a matching 'off' the character would sit on the
+        listening frame indefinitely. Fires on the same condition that ends the
+        command window (silence timeout, or a command that was handled).
+        """
+        self._listen_end_callbacks.append(callback)
+
+    def request_listen(self) -> bool:
+        """Ask the listener to start listening now, as if the wake word were heard.
+
+        Called from the GUI thread when the user clicks the floating character.
+        Returns True if a running listener will pick it up; False if voice input
+        is unavailable, so the caller can fall back to the typed prompt rather
+        than appearing to do nothing.
+        """
+        if not (self._running and self.enabled):
+            return False
+        self._listen_request.set()
+        return True
+
     def _trigger_wake(self) -> None:
         for cb in list(self._wake_callbacks):
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def _trigger_listen_end(self) -> None:
+        for cb in list(self._listen_end_callbacks):
             try:
                 cb()
             except Exception:
@@ -353,6 +390,16 @@ class VoiceListener:
                          self._wake_word, "silero" if use_vad else "rms")
                 while self._running:
                     data, _ = stream.read(block)
+                    # A click on the character asks to talk without saying the
+                    # wake word. Treat it exactly like a heard wake word: fire
+                    # the wake callbacks (which is what shows the listening
+                    # animation) and open the same command window.
+                    if self._listen_request.is_set():
+                        self._listen_request.clear()
+                        log.info("Listen requested by click")
+                        self._trigger_wake()
+                        mode = "command"
+                        command_start = time.monotonic()
                     rms = float(np.sqrt(np.mean(np.square(data))))
                     if rms < 0.01:
                         silence_blocks += 1
@@ -361,11 +408,34 @@ class VoiceListener:
                     else:
                         silence_blocks = 0
 
+                    prev_mode = mode
                     if use_vad:
                         mode, command_start = self._process_vad(
                             data, mode, command_start)
                     else:
-                        mode = self._process_rms(stream, data, block, mode)
+                        # The legacy RMS path has no command window of its own,
+                        # so a click-requested (or wake-requested) command is
+                        # handled here: transcribe this block as the command and
+                        # go back to wake mode. Without this the mode we set above
+                        # would be discarded and the user's speech ignored.
+                        if mode == "command" and not use_vad:
+                            text, lang = self._transcribe(data)
+                            if lang:
+                                self._last_lang = lang
+                            if text:
+                                self._trigger_command(
+                                    self._strip_wake_word(text))
+                                mode = "wake"
+                            elif time.monotonic() - command_start > 8:
+                                mode = "wake"
+                        else:
+                            mode = self._process_rms(stream, data, block, mode)
+                    # Leaving command mode ends the listening window: tell the
+                    # UI so it can drop the listening animation. Fired here, once,
+                    # for both the VAD and RMS paths, rather than at each of the
+                    # several places that set mode back to "wake".
+                    if prev_mode == "command" and mode != "command":
+                        self._trigger_listen_end()
         except Exception as e:
             log.warning("Voice listener stopped: %s", e)
         finally:

@@ -626,6 +626,10 @@ def main():
     wake_word = config.get("voice", "wake_word", default="hey addled")
     voice_listener.on_command(_on_voice_command)
     voice_listener.on_wake(lambda: engine.sig_agent_state.emit("listening"))
+    # The wake callback turns the listening animation on; without a matching
+    # 'off' the character would sit on the listening frame forever. The listener
+    # fires this when the command window closes (silence, or a handled command).
+    voice_listener.on_listen_end(lambda: engine.sig_agent_state.emit("idle"))
     if config.get("voice", "mic_enabled", default=True):
         voice_listener.start()
         log.info("Voice input: %s (wake word '%s')",
@@ -880,7 +884,11 @@ def main():
                     engine.sig_agent_state.emit("idle")
 
     def _on_prompt():
-        """Left-click on the character: type something at Addled.
+        """Typed prompt: say something to Addled with the keyboard.
+
+        Reached from the right-click menu's "Ask Addled...", and as the fallback
+        when a left click cannot start listening (voice unavailable). It is no
+        longer what a plain left click does.
 
         **When a question is open, this is the answer to it.** Clicking the
         character and typing is the obvious thing to try while the bubble is
@@ -922,7 +930,21 @@ def main():
         except Exception as e:
             log.warning("Prompt dispatch failed: %s", e)
 
-    char_widget.set_interaction_callbacks(on_ask=_on_prompt)
+    def _on_listen() -> bool:
+        """Left-click on the character: start listening.
+
+        Returns True if listening actually started, so the avatar can fall back
+        to the typed prompt when voice is unavailable (mic off, listener
+        disabled, or the deps missing) rather than doing nothing at all.
+        """
+        try:
+            return bool(voice_listener.request_listen())
+        except Exception as e:
+            log.warning("Listen request failed: %s", e)
+            return False
+
+    char_widget.set_interaction_callbacks(on_ask=_on_prompt,
+                                          on_listen=_on_listen)
 
     # ---- event loop ----------------------------------------------------------
     exit_code = app.exec()

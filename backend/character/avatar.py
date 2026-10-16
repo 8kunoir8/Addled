@@ -104,6 +104,7 @@ class CharacterWidget(QWidget):
 
         # Interaction callbacks
         self._on_ask_callback = None
+        self._on_listen_callback = None
         self._on_menu_callback = None
 
         # 30fps timer
@@ -155,9 +156,17 @@ class CharacterWidget(QWidget):
         self._animator._base_glow = glow
         self.update()
 
-    def set_interaction_callbacks(self, on_ask=None, on_menu=None):
-        """Set callbacks for click and right-click."""
+    def set_interaction_callbacks(self, on_ask=None, on_menu=None,
+                                  on_listen=None):
+        """Set callbacks for the click, the right-click menu, and listening.
+
+        `on_listen` is what a left click invokes; it should return a truthy
+        value if listening actually started, and falsy to let the click fall
+        back to the typed prompt. `on_ask` is the typed prompt itself, still
+        used by the right-click menu.
+        """
         self._on_ask_callback = on_ask
+        self._on_listen_callback = on_listen
         self._on_menu_callback = on_menu
 
     # ---- sprite skin (codex-pet style) ---------------------------------------
@@ -271,7 +280,30 @@ class CharacterWidget(QWidget):
                 self._on_click()
 
     def _on_click(self):
-        """Left click without drag = open prompt."""
+        """Left click without drag = start listening.
+
+        Talking to the character is the obvious thing to do when you click it.
+        The typed prompt is still available from the right-click menu, so the
+        keyboard path is not lost — it is just no longer the icon's default.
+
+        If voice input is unavailable (mic off, or the listener is not running)
+        the callback returns falsy and we fall back to the prompt rather than
+        appearing to do nothing.
+        """
+        if self._on_listen_callback:
+            try:
+                if self._on_listen_callback():
+                    return
+            except Exception:
+                # A failing listen must not kill the click: fall through to the
+                # prompt so the character stays usable.
+                import logging
+                logging.getLogger("addled.avatar").exception(
+                    "Listen callback failed")
+        self._open_prompt()
+
+    def _open_prompt(self):
+        """Show the typed prompt (right-click menu, and the mic-off fallback)."""
         if self._on_ask_callback:
             self._on_ask_callback()
         else:
@@ -288,7 +320,7 @@ class CharacterWidget(QWidget):
         """)
 
         ask = menu.addAction("Ask Addled...")
-        ask.triggered.connect(self._on_click)
+        ask.triggered.connect(self._open_prompt)
 
         sleep_action = menu.addAction("Sleep")
         sleep_action.triggered.connect(lambda: self.set_agent_state("sleeping"))
