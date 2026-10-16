@@ -16,6 +16,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SUITES = [
+    "check_search_routing.py",
     "verify_python.py",
     "check_tools.py",
     "check_tool_calls.py",

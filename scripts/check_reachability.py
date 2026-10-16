@@ -336,6 +336,88 @@ def check_discovery_tools_always_offered() -> int:
     return 0
 
 
+
+def check_every_phrasing_reaches_its_skill(enabled: dict) -> int:
+    """No phrasing may STOP reaching its skill, measured against a baseline.
+
+    The reachability loop in `main()` `break`s on the first phrasing that
+    works, so a skill is recorded reachable and its remaining phrasings are
+    never tried. That hid a real regression: deleting the browser intent entry
+    entirely, `main()` still PASSED, because "open the website example.com"
+    reaches `browser_navigate` anyway (lexical scoring matches "website" in the
+    tool's own description) while "go to google.com" silently stopped reaching
+    it. One phrasing surviving is enough for that loop; it is not enough to
+    notice the loss.
+
+    Why a baseline rather than "all must pass": some listed phrasings never
+    worked. 17 of 234 were already failing when this check was written
+    ("scrape the article" -> browser_extract, "what is my name" -> memory_get,
+    and others), each covered by a second phrasing for the same skill. Demanding
+    all of them pass would fail on arrival and be muted, which is worse than
+    absent - so the rule is: whatever worked before must keep working. The
+    known-broken ones are listed here so a NEW loss is unmistakable, and
+    removing a name from this set is how one gets fixed on purpose.
+    """
+    # Phrasings that did not route when this check was added. Recorded, not
+    # hidden: each skill still reaches via its other phrasing, so none of these
+    # is a reachability failure - they are gaps in the table, pinned so that a
+    # change which fixes one is noticed too (it will read as a NEW pass).
+    KNOWN_BROKEN: set[tuple[str, str]] = {
+        ("delete_file", "remove temp.txt"),
+        ("copy_file", "make a duplicate of it"),
+        ("browser_extract", "scrape the article"),
+        ("calendar_list", "my schedule this week"),
+        ("calendar_delete", "remove that appointment"),
+        ("memory_get", "what is my name"),
+        ("memory_link", "connect that to this"),
+        ("sop_lookup", "how do we usually do this"),
+        ("sop_list", "what runbooks do we have"),
+        ("self_read", "show me your own code"),
+        ("self_propose", "modify yourself"),
+        ("swarm_delegate", "have the reviewer check this"),
+        ("swarm_delegate", "ask the researcher to look into it"),
+        ("task_schedule", "remind me to call mum at 5pm"),
+        ("ask_user", "which file did you mean"),
+        ("ask_user", "I am not sure what you mean"),
+        ("ask_user", "can you clarify"),
+    }
+
+    broken: list[tuple[str, str]] = []
+    fixed: list[tuple[str, str]] = []
+    checked = 0
+    for name, asks in PHRASINGS.items():
+        if name not in enabled or name in CORE:
+            continue
+        for q in asks:
+            checked += 1
+            reaches = name in offered_for(q)
+            if not reaches and (name, q) not in KNOWN_BROKEN:
+                broken.append((name, q))
+            elif reaches and (name, q) in KNOWN_BROKEN:
+                fixed.append((name, q))
+
+    print("=" * 74)
+    print(f"PHRASING ROUTING: {checked} checked, {len(broken)} newly lost, "
+          f"{len(fixed)} newly working")
+    print("=" * 74)
+    if fixed:
+        for name, q in fixed:
+            print(f"  [{name}] now reached by {q!r} — remove it from "
+                  f"KNOWN_BROKEN to keep it working")
+    if broken:
+        for name, q in broken:
+            print(f"  [{name}] no longer reached by {q!r}")
+        print(f"\nFAIL: {len(broken)} phrasing(s) stopped reaching their skill")
+        return 1
+    if fixed:
+        # Not a failure, but it means the baseline is now stale and would hide
+        # a future loss of that phrasing. Say so rather than drift.
+        print("PASS, but the baseline above is stale — update KNOWN_BROKEN")
+        return 0
+    print("PASS: no phrasing lost its route; the baseline is accurate")
+    return 0
+
+
 def main() -> int:
     catalogue_rc = check_catalogue_reaches_every_skill()
     print()
@@ -410,11 +492,16 @@ def main() -> int:
               "summarise this report", "read this word document"):
         print(f"  {q!r}\n     -> {sorted(offered_for(q) - CORE)}")
 
-    if builtin_never or missing or catalogue_rc or discovery_rc:
+    print()
+    phrasing_rc = check_every_phrasing_reaches_its_skill(enabled)
+
+    if (builtin_never or missing or catalogue_rc or discovery_rc
+            or phrasing_rc):
         print(f"\nFAIL: {len(builtin_never)} built-in skill(s) reachable-only-by-name, "
               f"{len(missing)} with no phrasing defined, "
               f"catalogue future-skill check rc={catalogue_rc}, "
-              f"discovery-tool visibility check rc={discovery_rc}")
+              f"discovery-tool visibility check rc={discovery_rc}, "
+              f"every-phrasing check rc={phrasing_rc}")
         if market_never:
             print(f"      ({len(market_never)} market skills also never offered — "
                   f"they are installed content, reported separately)")

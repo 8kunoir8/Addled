@@ -491,6 +491,29 @@ _SEARCH_STOPWORDS = {
     "saya", "kamu", "kita", "mereka", "atau", "karena", "kalau", "mau",
 }
 
+# The two halves of a web request, shared by the intent table in
+# `filter_for_query` and the suppression rule beside it. They MUST be the same
+# sets, evaluated on the same tokens (`_significant_terms`): when the two
+# disagreed, "go to google.com" was matched by a raw-string pattern while
+# `terms & words` saw nothing, and the browser tools were stripped from a
+# query that asked to navigate.
+#
+# Only words that survive `_SEARCH_STOPWORDS` can appear here. "go" and "get"
+# are stopwords, so navigation by "go to X" is not distinguishable from a
+# question by these words alone - it falls to the look-up side, which is the
+# safe direction because `web_search` can still reach the browser through its
+# own fallback.
+_LOOK_UP_WORDS = {
+    "website", "websites", "site", "sites", "webpage", "webpages",
+    "url", "link", "links", "browse", "browser", "google", "online",
+    "internet", "web", "search",
+}
+_OPERATE_WORDS = {
+    "open", "navigate", "visit", "click", "tap", "press", "type", "fill",
+    "enter", "submit", "log", "login", "sign", "signup", "checkout",
+    "download", "form",
+}
+
 
 def _http_get(url: str, timeout: float = 10.0) -> str:
     import urllib.request
@@ -1020,11 +1043,37 @@ class SkillRegistry:
             ({"save", "store", "note", "remember", "memorise", "memorize",
               "preference", "preferences"},
              {"memory_set"}),
-            # Browsing: "website", "link", "url" are not "browser_navigate".
-            ({"website", "websites", "site", "sites", "webpage", "webpages",
-              "url", "link", "links", "browse", "browser", "google", "online"},
+            # Browsing, split by what the user wants DONE rather than by
+            # subject - both halves are about the web, so topic cannot
+            # separate them.
+            #
+            # OPERATE: navigate/click/type/log in act on a page. These are the
+            # only phrasings that expose the tools which drive a browser, and
+            # they are literal instructions ("open the website X", "click the
+            # button") that the model follows correctly.
+            #
+            # Measured 2026-10-16 against the live provider: with the old
+            # single entry, "open google.com and search for pizza" and "use the
+            # browser to check the price" both drove Chromium, and twice out of
+            # two an open-ended research ask chose `browser_task` over the free
+            # path. The browser costs ~100x `web_search`, so it should be
+            # reached by an instruction to operate a page, not by a question.
+            (_OPERATE_WORDS,
              {"browser_navigate", "browser_extract", "browser_click",
-              "browser_type", "browser_task", "web_fetch"}),
+              "browser_type"}),
+            # LOOK UP: a question about the web. `web_search` is already
+            # always offered (it is core), so naming it here is what keeps the
+            # cheap path in front of the model for exactly the phrasings that
+            # used to summon the browser. `web_fetch` comes too - fetching a
+            # known URL is reading, not driving a page.
+            #
+            # `browser_task` is NOT here, and cannot be kept out by this table
+            # alone: intents only ADD score, and `browser_task` reaches the
+            # set on its own description matching "browser". Excluding it is
+            # the job of `suppress_page_tools` below, which is why the two
+            # halves share `_LOOK_UP_WORDS`/`_OPERATE_WORDS`.
+            (_LOOK_UP_WORDS,
+             {"web_search", "web_fetch"}),
             # Searching inside files, as distinct from finding files.
             ({"grep", "contains", "containing", "mentions", "mentions",
               "inside", "within", "occurrences", "usages"},
@@ -1068,6 +1117,61 @@ class SkillRegistry:
             if terms & words:
                 for tool in tools:
                     intent_hits[tool] = max(intent_hits.get(tool, 0.0), 4.0)
+
+        # Intents ADD score; they never take it away. That is fine for
+        # discovery ("spreadsheet" should surface excel_write) but it cannot
+        # express "not this". A look-up phrasing ("google X", "look online for
+        # X") has to be able to STOP the page-driving tools that would
+        # otherwise reach the set on their own description - `browser_task`
+        # matches on the word "browser" in the phrase, whatever the intent
+        # table says. Measured before this: `browser_task` was still offered
+        # for "browse the web" with the look-up half in place, i.e. naming it
+        # elsewhere did nothing at all.
+        #
+        # So: a look-up intent with NO operate intent hides the tools that
+        # drive a page. Both firing (e.g. "open google.com and search") keeps
+        # them, because the user did ask to operate something.
+
+        # The tokens alone cannot decide this, for two measured reasons - both
+        # handled explicitly rather than by adding more words:
+        #
+        #   1. "go to google.com" tokenizes to ['com', 'google'] ("go" and "to"
+        #      are stopwords), so nothing marks it as navigation. A dotted host
+        #      does: naming a host is asking to go there, whatever verb was
+        #      used. "google who won the world cup" has no host, and stays a
+        #      look-up.
+        #   2. "do this task in the browser" names the browser as the
+        #      INSTRUMENT of a task. It has no operate verb, so suppression
+        #      hid the very tool that performs it - the regression
+        #      `check_reachability` caught.
+        #
+        # A look-up treats the web as the SOURCE ("google X", "search the web
+        # for X", "look online for X"); an operation treats it as the
+        # INSTRUMENT. That distinction is why these are not just more entries
+        # in `_OPERATE_WORDS`.
+        names_host = bool(re.search(
+            r"\b[\w-]+\.(?:com|org|net|io|dev|ai|co|id|uk|de|jp|fr|ru|cn|"
+            r"app|xyz)\b", q_lower))
+        browser_as_instrument = bool(
+            terms & {"browser", "webpage"} and
+            terms & {"task", "form", "page", "site", "website", "login",
+                     "signup", "checkout", "click", "type", "fill", "open",
+                     "download", "submit", "navigate", "visit"})
+        behaves_like_operation = names_host or browser_as_instrument
+
+        looks_up = bool(terms & _LOOK_UP_WORDS)
+        operates = bool(terms & _OPERATE_WORDS) or behaves_like_operation
+        suppress_page_tools = looks_up and not operates
+
+        # An operation the vocabulary cannot see still has to reach the tools
+        # that perform it: a named host gives no operate WORD, so the intent
+        # table above never fires for "go to google.com" and the browser would
+        # be suppressed into nothing rather than offered. Seed the intent the
+        # same way the table does, so both halves agree.
+        if behaves_like_operation:
+            for _tool in ("browser_navigate", "browser_extract",
+                          "browser_click", "browser_type"):
+                intent_hits[_tool] = max(intent_hits.get(_tool, 0.0), 4.0)
 
         scores: dict[str, float] = {}
         for name, skill in enabled.items():
@@ -1215,7 +1319,15 @@ class SkillRegistry:
             must.append(name)
         pool = [n for n in selected if n not in must]
         room = max(0, max_tools - len(must))
-        return set(pool[:room] + must)
+        chosen = set(pool[:room] + must)
+        if suppress_page_tools:
+            # Hide the tools that drive a page. `must` never contains them, so
+            # this only ever removes what scored - and it leaves `must` intact,
+            # so the core utilities cannot be affected. See the note at
+            # `suppress_page_tools` for why an intent cannot express this.
+            chosen -= {"browser_navigate", "browser_click", "browser_type",
+                       "browser_extract", "browser_task"}
+        return chosen
 
     def to_prompt_tools(self, only: set[str] | None = None,
                         catalogue: bool = True) -> str:
