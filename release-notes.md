@@ -1,3 +1,94 @@
+# Addled 1.0.42
+
+## Security work on MCP servers, and the character answers a click
+
+This release is mostly about the connectors. An MCP server is someone else's
+code running on your machine, and several of the ways it could reach further
+than intended are closed here.
+
+## A credential belongs to one server, not to all of them
+
+Credentials are now **encrypted at rest with the OS keychain**, not left in
+plain sight in the config file, and a secret is scoped to the server it was
+entered for. Previously a token held for one server was reachable from any
+other, which turns one compromised server into a key to every other.
+
+## The model can no longer approve its own tool calls
+
+An approval was reachable in a way that let the agent resolve it without you.
+Approvals are now answers that only a you-shaped surface can give, and an
+approval does **not** survive the server being repointed — otherwise "yes" to a
+tool could carry over to a different one wearing the same name.
+
+## Signing in where the server asks for it
+
+Remote servers that answer `401` now get a real OAuth flow: discovery,
+dynamic client registration and PKCE, with a loopback callback that actually
+receives the code. The Authorize button appears when a server needs it, and a
+server that is not signed in is no longer described as ready.
+
+Two smaller corrections from the same work: a stdio server no longer inherits
+the whole parent environment (it gets what it needs, not every variable you
+have set), and SSE framed with CRLF now parses instead of producing nothing.
+
+## Click the character and talk
+
+A left click on the floating character now **starts listening** and shows the
+listening animation, instead of opening a text box. The typed prompt is still
+there under right-click → "Ask Addled...", so the keyboard path is not lost.
+
+The listener had no way to be told "listen now" — it only entered command mode
+by hearing the wake word. A click now does exactly what a heard wake word does.
+If voice is unavailable (mic off, or the listener disabled) the click falls back
+to the prompt rather than appearing to do nothing.
+
+This also fixes a bug found on the way: the wake word switched the character to
+its listening animation and **nothing ever switched it back**, so after a spoken
+wake word it sat on the listening frame indefinitely.
+
+## Start with Windows means the whole app
+
+"Start with Windows" launched the backend only, so on a fresh login there was a
+running agent with no window, no dashboard and no tray icon. It now starts the
+app. The check that was supposed to catch this had been reading a folder the app
+does not write to, which is why it passed while the feature was broken.
+
+## Notes
+
+- An upgrade keeps your setup: settings, memory, skills, tools, MCP servers and
+  the swarm roster all live beside the install, and the installer ships no copy
+  of any of them. Credentials are the one thing that move — from plain text in
+  the config into the OS keychain, on first run of this version.
+- The Kokoro voice models are no longer bundled. They are a download you opt
+  into from Settings, verified against a pinned checksum. The bundle was the
+  single largest part of the installer and most installs never used it.
+- `chat.send` now honours a `record` flag, so an internal turn can be kept out
+  of your chat history. Nothing you can reach sends it yet; it exists because a
+  check harness was writing its own turns into the real store and there was no
+  supported way not to.
+
+## Verification
+
+All 125 runnable check suites pass (one skipped: it needs an office install).
+
+The click-to-listen change is covered by three behavioural tests: the callback
+semantics, the capture loop's real transition table pinned against its own
+source, and the avatar's dispatch driven through offscreen Qt — including the
+mic-off fallback, the no-callback case, and a listen callback that raises. The
+suite would fail against the old code: removing the `request_listen` handling
+leaves the mode on `wake` and the command is discarded, which is the exact bug
+the RMS fallback had before this release.
+
+The change is deployed and running on a real install, where the log records
+`Voice listener active (wake word: 'Fox', vad: silero)` and a listen request
+returns true — that is, a click genuinely starts listening rather than silently
+falling back. The animation itself and a transcribed command were checked by
+hand at the microphone, not by the suite.
+
+The MCP fixes are covered by the suites named for them (`check_mcp.py`,
+`check_mcp_import.py`, `check_mcp_market.py`, `check_tools.py`), each written
+against the failure it prevents.
+
 # Addled 1.0.41
 
 ## Upload a skill as a zip, and the files it ships actually open
