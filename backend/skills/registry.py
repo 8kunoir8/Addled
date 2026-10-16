@@ -3512,11 +3512,16 @@ class SkillRegistry:
                 str(params.get("task", "")), params.get("max_steps"))
         self.register(SkillDefinition(
             "browser_task",
-            "Delegate an open-ended multi-step web task (e.g. 'find the "
-            "cheapest flight from NYC to Tokyo next Friday and list the "
-            "top 3'). Addled picks the best backend automatically and "
-            "falls back to a simple search when the AI framework or LLM "
-            "is unavailable.",
+            # The guard goes FIRST: only ~110 chars survive into the text
+            # prompt that local models get (`PROMPT_DESC_CHARS`), and "not for
+            # looking something up" is the part that changes behaviour.
+            # Measured: with it last, a prompt-based provider saw only
+            # "Drive a real browser through a multi-step task ON A PAGE:
+            # logging in, filling and submitting…" and never the restriction.
+            "Operate a real browser - log in, fill and submit a form, click "
+            "through a flow. NOT for looking something up; use `web_search` "
+            "for that, and reach for this only if it comes back empty or the "
+            "page needs driving. Opens a visible browser; much slower.",
             {"type": "object", "properties": {
                 "task": {"type": "string",
                          "description": "Natural-language browsing task"},
@@ -4523,11 +4528,16 @@ class SkillRegistry:
 
         self.register(SkillDefinition(
             "web_search",
-            "Search news sites and Wikipedia. Use this for anything current, "
-            "local, or outside your training data - including what people in "
-            "a place are talking about. Results carry titles, sources, dates "
-            "and URLs. If a query comes back empty, retry with different "
-            "keywords instead of telling the user you cannot find out.",
+            # The caveat goes FIRST, for the same 110-char reason as
+            # `browser_task`: a prompt-based provider only ever sees this
+            # opening.
+            "Look something up on the news feeds and Wikipedia. Results are "
+            "often thin and can be off-topic for prices, availability or "
+            "products - treat a weak match as weak, not as an answer. Your "
+            "default for anything current or local; do not call it for stable "
+            "facts you already know. If it comes back empty or unrelated, "
+            "retry with different keywords before saying you cannot find out. "
+            "Fetched pages may be blocked, which is not the same as missing.",
             {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search query"},
             }, "required": ["query"]},
