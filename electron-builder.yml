@@ -5,9 +5,10 @@ copyright: Copyright © 2026 Kunoir
 # Top-level, not under `nsis`: in electron-builder 24.x this is the property
 # that controls the installer's LZMA level (`maximum` | `normal` | `store`),
 # and `nsis` does not accept it — putting it there fails schema validation.
-# The payload is ~1 GB of already-compressed wheels and a 340 MB voice model,
-# so the default `normal` leaves size on the table for build time we are not
-# short of. Nothing at runtime changes.
+# The payload is ~880 MB, 825 MB of it the bundled Python and its
+# site-packages -- mostly already-compressed wheels -- so the default `normal`
+# leaves size on the table for build time we are not short of. Nothing at
+# runtime changes.
 compression: maximum
 
 directories:

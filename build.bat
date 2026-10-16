@@ -94,6 +94,22 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM ---- 5b. Run the check suites -------------------------------------------
+REM This gate was previously absent from the build, which is how a broken
+REM installer script reached a release while check_packaging.py sat green.
+REM It runs after the dashboard build -- check_guide.py asserts the BUILT
+REM dashboard carries the version, and skips rather than fails when
+REM dashboard/out is missing -- and after the bundle, so a model that did not
+REM get fetched is caught. A suite that cannot run on this machine exits 2 and
+REM is reported as skipped, not as a failure.
+echo [5/6] Running the check suites...
+.\python-bundle\python.exe -s scripts\check_all.py
+if errorlevel 1 (
+    echo [ERROR] Check suites failed - the build will not produce an installer.
+    pause
+    exit /b 1
+)
+
 REM ---- 6. Electron packaging ------------------------------------------------
 echo [6/6] Packaging Windows installer + portable exe...
 call npm run build:win
