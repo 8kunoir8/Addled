@@ -65,6 +65,11 @@ def _compile_nsis(makensis: str) -> tuple[bool, str]:
 !include "LogicLib.nsh"
 Name "VoiceTest"
 OutFile "nsis_test.exe"
+!ifdef BUILD_UNINSTALLER
+  # A separate artifact per pass, so a leftover from the installer pass cannot
+  # be mistaken for the uninstaller pass having produced one.
+  OutFile "nsis_test_uninstaller.exe"
+!endif
 InstallDir "$TEMP\\\\VoiceTest"
 RequestExecutionLevel user
 !include "installer-precompile-include.nsh"
@@ -74,8 +79,15 @@ RequestExecutionLevel user
 # functions directly and hide the defect this harness exists to catch — with a
 # bare Function and no macro, the real build fails NSIS warning 6010
 # ("install function ... not referenced") while this harness passed.
-!ifmacrodef customPageAfterChangeDir
-  !insertmacro customPageAfterChangeDir
+# electron-builder wraps this insert in `!ifndef BUILD_UNINSTALLER` (its
+# assistedInstaller.nsh line 7): the uninstaller pass has no install pages, so
+# the macro is never inserted there. Mirroring that guard is the whole point —
+# without it the harness inserts the macro in both passes and hides a page
+# function that is unguarded, which is exactly what broke the real build.
+!ifndef BUILD_UNINSTALLER
+  !ifmacrodef customPageAfterChangeDir
+    !insertmacro customPageAfterChangeDir
+  !endif
 !endif
 Section
   SectionIn RO
@@ -90,36 +102,45 @@ SectionEnd
         with open(os.path.join(tmp, "nsis_test.nsi"), "w",
                   encoding="utf-8") as handle:
             handle.write(harness)
-        try:
-            proc = subprocess.run(
-                [makensis, "/INPUTCHARSET", "UTF8", "nsis_test.nsi"],
-                cwd=tmp, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=120)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, f"could not run makensis: {exc}"
-        out = (proc.stdout or "") + (proc.stderr or "")
-        problems = []
-        for line in out.splitlines():
-            low = line.strip().lower()
-            if line.startswith("Error"):
-                problems.append(line)
-            elif low.startswith("!warning"):
-                if ("mui_language" in low or "page instfiles" in low
-                        or "no sections" in low):
-                    continue
-                problems.append(line)
-            elif low.startswith("warning"):
-                # NSIS's numbered warnings, e.g. `warning 6010: install
-                # function "..." not referenced`. The build treats these as
-                # errors, so this harness must too: a page function that
-                # nothing references compiles here but aborts the release,
-                # which is exactly how the voice-model page shipped broken.
-                if "6010" in low or "not referenced" in low:
+        # Both passes matter. electron-builder compiles this script once per
+        # pass and the second one defines BUILD_UNINSTALLER, which makes its
+        # assistedInstaller.nsh skip the custom-page insert entirely. A page
+        # function that is not guarded against that pass is defined but never
+        # referenced there — warning 6010, which the real build treats as fatal.
+        # Checking only the installer pass is what let that ship.
+        for label, defs in (("installer", []),
+                            ("uninstaller", ["/DBUILD_UNINSTALLER"])):
+            try:
+                proc = subprocess.run(
+                    [makensis, "/INPUTCHARSET", "UTF8", *defs,
+                     "nsis_test.nsi"],
+                    cwd=tmp, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=120)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return False, f"could not run makensis: {exc}"
+            out = (proc.stdout or "") + (proc.stderr or "")
+            problems = []
+            for line in out.splitlines():
+                low = line.strip().lower()
+                if line.startswith("Error"):
                     problems.append(line)
-        if not os.path.isfile(os.path.join(tmp, "nsis_test.exe")):
-            return False, "no installer was produced: " + "; ".join(problems[:3])
-        if problems:
-            return False, "; ".join(problems[:3])
+                elif low.startswith("!warning"):
+                    if ("mui_language" in low or "page instfiles" in low
+                            or "no sections" in low):
+                        continue
+                    problems.append(line)
+                elif low.startswith("warning"):
+                    # NSIS's numbered warnings, e.g. `warning 6010: install
+                    # function "..." not referenced`. The build treats these as
+                    # errors, so this harness must too.
+                    if "6010" in low or "not referenced" in low:
+                        problems.append(line)
+            if problems:
+                return False, f"{label} pass: " + "; ".join(problems[:3])
+            produced = ("nsis_test_uninstaller.exe" if defs
+                        else "nsis_test.exe")
+            if not os.path.isfile(os.path.join(tmp, produced)):
+                return False, f"{label} pass produced no {produced}"
         return True, ""
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

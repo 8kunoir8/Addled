@@ -155,9 +155,16 @@
 # the app fully working and the button in Settings still there. Failing an
 # install over an optional download would be far worse than a second click.
 
+# The page exists only in the installer, so it is declared only there.
+# electron-builder builds its uninstaller by compiling this same script with
+# BUILD_UNINSTALLER defined, and its assistedInstaller.nsh wraps the custom-page
+# insert in `!ifndef BUILD_UNINSTALLER`. Without the same guard here the two
+# functions are defined but never referenced in that pass, NSIS reports warning
+# 6010 and electron-builder fails the build. Note customInstall above is NOT
+# guarded: it is used by both passes.
+!ifndef BUILD_UNINSTALLER
 Var VoiceModelCheckbox
 Var VoiceModelState
-
 # electron-builder's assistedInstaller.nsh calls `!insertmacro
 # customPageAfterChangeDir` when that macro exists, and it is where a custom
 # page must be declared. Defining only the functions below left them
@@ -192,3 +199,5 @@ FunctionEnd
 Function customPageLeave
   ${NSD_GetState} $VoiceModelCheckbox $VoiceModelState
 FunctionEnd
+
+!endif  # BUILD_UNINSTALLER
