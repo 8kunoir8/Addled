@@ -68,7 +68,15 @@ OutFile "nsis_test.exe"
 InstallDir "$TEMP\\\\VoiceTest"
 RequestExecutionLevel user
 !include "installer-precompile-include.nsh"
-Page custom customPageAfterChangeDir customPageLeave
+# Mirror electron-builder: assistedInstaller.nsh inserts the user's
+# `customPageAfterChangeDir` macro if one is defined, and that macro is what
+# declares the page. Declaring the page here instead would reference the
+# functions directly and hide the defect this harness exists to catch — with a
+# bare Function and no macro, the real build fails NSIS warning 6010
+# ("install function ... not referenced") while this harness passed.
+!ifmacrodef customPageAfterChangeDir
+  !insertmacro customPageAfterChangeDir
+!endif
 Section
   SectionIn RO
 !insertmacro customInstall
@@ -100,6 +108,14 @@ SectionEnd
                         or "no sections" in low):
                     continue
                 problems.append(line)
+            elif low.startswith("warning"):
+                # NSIS's numbered warnings, e.g. `warning 6010: install
+                # function "..." not referenced`. The build treats these as
+                # errors, so this harness must too: a page function that
+                # nothing references compiles here but aborts the release,
+                # which is exactly how the voice-model page shipped broken.
+                if "6010" in low or "not referenced" in low:
+                    problems.append(line)
         if not os.path.isfile(os.path.join(tmp, "nsis_test.exe")):
             return False, "no installer was produced: " + "; ".join(problems[:3])
         if problems:

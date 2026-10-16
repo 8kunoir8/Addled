@@ -18,6 +18,14 @@
 # interpreter is resources\python\python.exe and the script is shipped to
 # resources\scripts\precompile_bundle.py (see extraResources).
 
+# electron-builder compiles this file in its own pass, to pre-build the
+# uninstaller, and in that pass the main installer's `!include "MUI2.nsh"` has
+# not happened yet. `MUI_HEADER_TEXT` below therefore had no definition and the
+# build aborted with "macro named MUI_HEADER_TEXT not found". Including it here
+# makes the file compile on its own; the include is guarded, so the main
+# script's own MUI2 include is unaffected.
+!include MUI2.nsh
+
 !macro voiceModelsCleanup
   # An upgrade over an install that predates this change.
   #
@@ -150,7 +158,17 @@
 Var VoiceModelCheckbox
 Var VoiceModelState
 
-Function customPageAfterChangeDir
+# electron-builder's assistedInstaller.nsh calls `!insertmacro
+# customPageAfterChangeDir` when that macro exists, and it is where a custom
+# page must be declared. Defining only the functions below left them
+# unreferenced, which NSIS reports as warning 6010 ("install function ... not
+# referenced") and electron-builder treats as an error, so the build aborted.
+# The macro declares the page; the two Functions are what it runs.
+!macro customPageAfterChangeDir
+  Page custom customPageAfterChangeDirPage customPageLeave
+!macroend
+
+Function customPageAfterChangeDirPage
   !insertmacro MUI_HEADER_TEXT "Offline voice" "Optional download"
   nsDialogs::Create 1018
   Pop $0
