@@ -118,18 +118,42 @@ def main() -> int:
     log("core requirements installed")
 
     # ── 4b. Fetch the local embedder model (ONNX MiniLM) ────────────────
+    # check=False on purpose: the embedder is excluded from the installer
+    # (`electron-builder.yml` `!memory/models/**`) and re-fetched on demand, so
+    # a failure here degrades a feature rather than breaking the install. The
+    # return value is captured so the reason is visible in the log rather than
+    # scrolling past as one line among many.
     log("fetching embedder model ...")
-    subprocess.run(
+    embedder = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "fetch_embedder.py")],
         check=False, env=ISOLATED_ENV,
     )
+    if embedder.returncode != 0:
+        log("embedder model NOT fetched — the app will select another embedder "
+            "source on first run (this is not fatal)")
 
     # ── 4c. Fetch voice models (Silero VAD + Kokoro TTS) ────────────────
     log("fetching voice models ...")
-    subprocess.run(
+    voice = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "fetch_voice_models.py")],
         check=False, env=ISOLATED_ENV,
     )
+
+    # The VAD model is the exception: it is 2.3 MB, it ships, and the speech
+    # listener needs it before any download could have happened. Kokoro being
+    # absent is the intent (it is excluded from the installer), which is why this
+    # asserts the VAD file by name instead of trusting the fetch's exit code --
+    # fetch_voice_models.py reports failure for Kokoro too, and that failure is
+    # expected on every build.
+    vad_model = ROOT / "backend" / "voice" / "models" / "silero_vad.onnx"
+    if not vad_model.is_file():
+        log(f"ERROR: {vad_model.relative_to(ROOT)} is required in the installer "
+            "and was not fetched — the speech listener cannot work without it")
+        if voice.returncode != 0:
+            log("(the voice fetch also reported a failure; see its output above)")
+        return 1
+    log("silero_vad.onnx present — the listener works with no download")
+
 
     # ── 5. Verify critical imports ───────────────────────────────────────
     check = (
