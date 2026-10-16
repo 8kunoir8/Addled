@@ -1233,13 +1233,25 @@ def _write_plan_file(request: str, plan: str) -> str:
         return ""
 
 
+# "The caller said nothing about `record`", distinguished from "the caller
+# asked for True". Without this the two are the same value, and `params` cannot
+# be honoured without breaking an explicit keyword. See `run_chat_pipeline`.
+#
+# A plain object, because `bool` cannot be subclassed in Python: an attempt to
+# make the sentinel a bool subclass, so that `inspect.signature` would still
+# report `True`, raised `TypeError: type 'bool' is not an acceptable base type`
+# at import. Visibility is instead handled by `check_parity.py`, which asserts
+# the default's BEHAVIOUR - a call that says nothing about `record` records -
+# rather than the repr of the default object.
+_UNSET = object()
+
 async def run_chat_pipeline(
     message: str,
     params: dict | None = None,
     *,
     persona: str | None = None,
     tools: list[str] | None = None,
-    record: bool = True,
+    record: object = _UNSET,
     announce: bool = True,
     max_tool_rounds: int | None = None,
     force_role: str | None = None,
@@ -1268,6 +1280,23 @@ async def run_chat_pipeline(
     provider         an already-resolved provider. None asks the registry.
     """
     params = params or {}
+    # `record` in `params` used to be silently ignored.
+    #
+    # The keyword is keyword-only, so a caller that passed the flag the way
+    # every other parameter of this pipeline travels - inside `params`, which
+    # is how `source`, `conversation` and `maxToolRounds` all arrive - got the
+    # default instead. Nothing failed; the turn simply recorded, and a
+    # verification harness that asked not to be remembered wrote its probes
+    # into the user's real conversations. That happened: a probe conversation
+    # is still in the chat store because of it.
+    #
+    # The sentinel is what makes this correct. A plain `record: bool = True`
+    # cannot tell "the caller asked for True" from "the caller said nothing",
+    # and the two need opposite handling: the first must win, the second must
+    # yield to `params`. Testing `record is True` instead would quietly break
+    # `chat_send`, which passes the keyword explicitly and must keep winning.
+    if record is _UNSET:
+        record = params.get("record", True)
     from backend.config import config
 
     # Plan mode, reachable from any surface that talks to Addled, not just

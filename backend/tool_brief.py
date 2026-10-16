@@ -68,7 +68,13 @@ _FACTS: list[tuple[str, str]] = [
     ("memory_set",
      "Remember facts with `memory_set` and recall them with `memory_get`."),
     ("desktop_click",
-     "Inspect and drive the screen: read it (`screen_read`), click "
+     # `screen_read` used to stand where `screenshot` is now, and it was never a
+     # skill. A model told to read the screen with a tool that does not exist
+     # reaches for whatever does - `list_windows`, `screenshot` - which is how
+     # "type my email into the form" ended up listing the user's open windows
+     # instead of typing into a page. The name is checked by
+     # `check_tool_brief.py` now, so this cannot come back silently.
+     "Inspect and drive the screen: take a picture of it (`screenshot`), click "
      "(`desktop_click`), type (`desktop_type`), scroll, manage windows, and set "
      "volume or brightness."),
 ]

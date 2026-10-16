@@ -307,7 +307,16 @@ async def run():
     # ---- 3. chat's defaults are unchanged --------------------------------
     signature = inspect.signature(ws_server.run_chat_pipeline)
     inner = inspect.signature(ws_server._run_chat_pipeline_inner)
-    for name, default in (("persona", None), ("tools", None), ("record", True),
+    # `record` is asserted by BEHAVIOUR, not by the repr of its default.
+    #
+    # Its default is a private sentinel, so that "the caller said nothing" can
+    # be told apart from "the caller asked for True" - without that, a
+    # `record=False` travelling in `params` (the shape every other pipeline
+    # option uses) was silently ignored and the turn recorded anyway. Checking
+    # `param.default is True` would forbid the fix that makes the option work.
+    # What actually matters to a caller is unchanged and is checked below: a
+    # turn that says nothing about `record` records.
+    for name, default in (("persona", None), ("tools", None),
                           ("announce", True), ("max_tool_rounds", None),
                           ("force_role", None)):
         param = signature.parameters.get(name)
@@ -319,6 +328,17 @@ async def run():
                   f"default is {param.default!r}")
             check(f"'{name}' is keyword-only, so positional calls still work",
                   param.kind is inspect.Parameter.KEYWORD_ONLY, str(param.kind))
+    record_param = signature.parameters.get("record")
+    check("run_chat_pipeline has a 'record' option",
+          record_param is not None, "missing")
+    if record_param is not None:
+        check("'record' is keyword-only, so positional calls still work",
+              record_param.kind is inspect.Parameter.KEYWORD_ONLY,
+              str(record_param.kind))
+        # The default must be truthy: "said nothing" means record.
+        check("'record' defaults to recording",
+              bool(record_param.default) is True,
+              f"default is {record_param.default!r}")
     check("the inner pipeline keeps the same options",
           all(n in inner.parameters for n in
               ("persona", "tools", "record", "max_tool_rounds", "force_role")),

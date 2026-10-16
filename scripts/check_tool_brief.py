@@ -55,7 +55,38 @@ def main() -> int:
     check("every fact names its own tool", not unnamed,
           f"describes but does not name: {unnamed}")
 
-    # ---- RULE 1b: every CAPABILITY the app has is described ----------------
+    # ---- RULE 1b: every name inside the PROSE is real, too ----------------
+    # RULE 1 above checks the table's keys. It never looked at the other names
+    # in the sentence, and that gap shipped a real defect: the desktop fact read
+    # "read it (`screen_read`), click (`desktop_click`)..." and `screen_read`
+    # does not exist. The model was told to read the screen with a tool that is
+    # not there, which is precisely the failure this module's docstring says it
+    # exists to prevent - and it passed, because the key `desktop_click` was
+    # real and did appear.
+    #
+    # Backticked tokens are the convention the prose uses for a tool name, so
+    # every one of them is required to resolve. Anything else a fact wants to
+    # show the model can be written without backticks.
+    import re
+    prose_bad = []
+    for key, fact in tool_brief._FACTS:
+        for token in re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", fact):
+            if token not in real:
+                prose_bad.append(f"{key} -> `{token}`")
+    check("every tool named inside a fact's prose is a real skill",
+          not prose_bad, f"not real: {prose_bad}")
+
+    # The same scan over the domain table, whose entries are also read into the
+    # closing sentence. It names no tools today; the check is here so the first
+    # one added is validated rather than trusted.
+    domain_bad = []
+    for key, _noun in tool_brief._DOMAINS:
+        if key not in real:
+            domain_bad.append(key)
+    check("every domain entry names a real skill", not domain_bad,
+          f"not real: {domain_bad}")
+
+    # ---- RULE 1c: every CAPABILITY the app has is described ----------------
     # The direction the original check missed. It proved nothing was named that
     # does not exist, but nothing proved that what exists is named -- so five
     # `meeting_*` skills shipped, the prose never mentioned meetings, and the

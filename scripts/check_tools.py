@@ -131,6 +131,22 @@ def run_catalogue_tests():
           len(big["function"]["description"]) >= len(sample.description.rstrip("…")),
           "")
 
+    # How many tools the live path actually offers.
+    #
+    # Asserted because nothing narrows it. The prompt path runs
+    # `filter_for_query` and caps at 19; the native path calls
+    # `to_openai_tools(None)`, which has no cap, so every enabled skill reaches
+    # the model on every turn. Measured at 133 against the live install - a
+    # number nobody chose, because nothing here was watching it. Capping is NOT
+    # a fix for a wrong tool choice: a controlled test at 133 vs 19 tools
+    # changed nothing about which tool a live model picked. The number is
+    # pinned so a grown catalogue is a decision someone made rather than an
+    # accident, and so the token cost of a native turn cannot drift unreviewed.
+    NATIVE_MAX = 150
+    check(f"the native catalogue stays under {NATIVE_MAX}",
+          len(native) <= NATIVE_MAX,
+          f"{len(native)} tools offered on every native turn")
+
 
 # ---- the parser has to accept how small models actually answer ---------------
 
