@@ -1,3 +1,84 @@
+# Addled 1.0.43
+
+## Formatting stays formatting: the chat renders markdown, the voice speaks words
+
+Replies are written in markdown. The chat printed it as-is, so you read the
+asterisks instead of the emphasis, and the voice read the markup aloud along
+with it — `**Full path:**` came out as "asterisk asterisk full path colon
+asterisk asterisk". Both surfaces now work from the same grammar.
+
+## The chat shows what was meant
+
+Bold, italics, inline code, links, headings, bulleted and numbered lists, rules
+and fenced code blocks all render. The tone tag the character opens a reply with
+— `[happy]` — is a small label rather than something to read past.
+
+Your own messages stay exactly as you typed them. If you write `**` you meant
+those characters, and the app should not be editing your words.
+
+This is a small hand-written renderer rather than a general markdown library.
+The text comes from a model, and a general renderer accepts raw HTML; a renderer
+that builds every node from text cannot be talked into running a script by a
+reply that contains one. Six constructs covered every markdown token found in
+the stored conversations, and anything it does not recognise is shown literally
+rather than dropped — a reply must never lose a sentence to a formatting rule.
+
+## The voice reads the sentence, not the syntax
+
+Speech is generated from the same text with the markup removed. Code blocks are
+skipped rather than read: a shell command spoken aloud is noise you cannot
+follow, and it is on screen if you want it. Inline code stays, because `Length`
+or `35%` in the middle of a sentence is part of that sentence.
+
+## Built to agree with itself
+
+The page and the voice are different languages — TypeScript and Python — so
+there are two implementations of one grammar. That is a real cost, and it is
+accepted because a voice that says something different from the screen is its
+own bug.
+
+A check runs the same corpus through both and fails if they disagree. It has
+already earned its place, catching three bugs that each lived in exactly one
+language:
+
+- the `[happy]` tone tag was being spoken aloud
+- an ellipsis inside inline code — `ReadAllBytes(...)` — was shortened to two
+  dots, which is editing the reply rather than formatting it
+- `` **bold with `code` inside** `` left its backticks in the spoken text
+
+The check was falsified three ways before being trusted: drifting the
+TypeScript only, breaking the Python only, and removing the conversion while
+leaving the import in place.
+
+## The speech log was reporting the wrong number
+
+The Auto-TTS line reported the length of the markdown rather than of what was
+spoken, so it printed the same number either way and could not answer the one
+question it is read for. It now logs what was actually said.
+
+## Notes
+
+- An upgrade keeps your setup: settings, memory, skills, tools, MCP servers and
+  conversations are untouched.
+- No configuration is needed. Formatting simply appears where it used to show
+  as source.
+
+## Verification
+
+All 128 runnable check suites pass (one skipped: it needs an office install;
+one fails only when a frameless window is in the foreground, which is the app
+itself rather than a game).
+
+Of 18 real stored replies, none retain markup after conversion. The two
+implementations agree on all 18, and on 24 edge cases built from the shapes
+that broke them — an unclosed `**`, adjacent code spans, a fence with no
+closing, asterisks used as multiplication.
+
+The live install logs `Auto-TTS: spoke the reply with kokoro (144 chars)` for
+a reply that is 150 characters of markdown — the voice received the stripped
+text, not the source. The rendering was confirmed on screen by the person
+using it.
+
 # Addled 1.0.42
 
 ## Security work on MCP servers, and the character answers a click
