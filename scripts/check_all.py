@@ -72,6 +72,7 @@ SUITES = [
     "check_code_learning.py",
     "check_dashboard_server.py",
     "check_appearance.py",
+    "check_markdown_speech.py",
     "check_bot_media.py",
     "check_vision_deps.py",
     "check_vision_feedback.py",

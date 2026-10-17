@@ -1,5 +1,6 @@
 'use client';
 
+import { Markdown } from '@/components/Markdown';
 import { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import { useWS } from '@/lib/useWS';
@@ -608,10 +609,23 @@ export default function ChatPage() {
                   ))}
                 </div>
               )}
-              <div className="whitespace-pre-wrap break-words">
-                {msg.content}
-                {msg.streaming && <span className="typing-cursor" />}
-              </div>
+              {/* Assistant replies are markdown - `**bold**`, `code`, lists,
+                  fenced blocks - and were printed raw, asterisks and all, so
+                  the user read the markup instead of the emphasis. They are
+                  rendered now. The user's OWN messages are left verbatim: if
+                  somebody types `**` they meant those characters, and
+                  reformatting a person's words would be worse than the bug. */}
+              {msg.role === 'assistant' ? (
+                <div className="break-words">
+                  <Markdown text={msg.content} />
+                  {msg.streaming && <span className="typing-cursor" />}
+                </div>
+              ) : (
+                <div className="whitespace-pre-wrap break-words">
+                  {msg.content}
+                  {msg.streaming && <span className="typing-cursor" />}
+                </div>
+              )}
               <div className={`text-xs mt-1 ${msg.role === 'user' ? 'text-blue-200' : 'text-[var(--text-secondary)]'}`}>
                 {msg.timestamp > 0 &&
                   new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}

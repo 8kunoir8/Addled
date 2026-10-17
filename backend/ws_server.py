@@ -1447,7 +1447,27 @@ async def _speak_reply(text: str, voice: str | None = None) -> dict:
     voice None means "use whatever voice.tts_voice / voice.kokoro_voice is
     configured" — the previous hardcoded default meant the Edge voice setting
     was ignored on every path that reached the audio output.
+
+    The text is markdown, because it is a model reply, and it is CONVERTED here
+    rather than at each caller: this is the one funnel both auto-speak and the
+    explicit `voice.speak` method pass through. Handed raw, the voice read the
+    markup - "asterisk asterisk full path colon asterisk asterisk" - while the
+    chat page showed it formatted, so the two surfaces disagreed about what the
+    character had said. Code fences are dropped: a shell command read aloud is
+    noise, and it is on screen.
     """
+    spoken = text
+    try:
+        from backend.markdown_speech import markdown_to_speech
+        spoken = markdown_to_speech(text)
+    except Exception as e:  # noqa: BLE001
+        # Speaking the markup is bad; saying nothing is worse. Fall back to the
+        # text we were given and let the log carry the reason.
+        log.debug("could not strip markdown before speaking: %s", e)
+    if not (spoken or "").strip():
+        # Nothing survived - a reply that was only a code block. Do not start
+        # the animation for an utterance of silence.
+        return {"success": True, "duration_ms": 0, "engine": "none"}
     if _engine_ref is not None:
         _engine_ref._voice_busy = True
         try:
@@ -1456,7 +1476,7 @@ async def _speak_reply(text: str, voice: str | None = None) -> dict:
             pass
     try:
         from backend.voice.tts import speak
-        return await speak(text, voice)
+        return await speak(spoken, voice)
     finally:
         if _engine_ref is not None:
             _engine_ref._voice_busy = False
