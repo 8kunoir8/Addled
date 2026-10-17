@@ -92,6 +92,7 @@ def classify_window(*, class_name: str, width: int, height: int,
                     work_w: int, work_h: int,
                     pid: int = 0, own_pid: int = -1,
                     image_path: str = "",
+                    monitor_w: int = 0, monitor_h: int = 0,
                     shell_classes=SHELL_CLASSES,
                     system_roots=SYSTEM_ROOTS,
                     noactivate_rejects: bool = True) -> tuple[bool, str]:
@@ -101,11 +102,11 @@ def classify_window(*, class_name: str, width: int, height: int,
     that fired, which is what makes a wrong verdict diagnosable from a log - and
     what lets the tests assert a row failed for the right reason rather than by
     luck.
-
     Order is deliberate. Size and identity come first because they are decisive
     and cheap; the style rules follow. `IsZoomed` comes before the caption test
     because a maximised window is the specific thing that looks like a
-    full-screen app without being one.
+    full-screen app without being one. The monitor test comes after both,
+    because it is the only thing that recognises a game which keeps its caption.
     """
     if width < work_w - SLACK or height < work_h - SLACK:
         return False, "too small"
@@ -138,6 +139,20 @@ def classify_window(*, class_name: str, width: int, height: int,
     has_caption = bool(style & WS_CAPTION)
     has_frame = bool(style & WS_THICKFRAME)
     is_popup = bool(style & WS_POPUP)
+
+    # A window LARGER than the monitor is not a normal window: the user cannot
+    # see the edges or reach the title bar. It is how borderless fullscreen is
+    # implemented - draw past the screen edge so no border shows. Measured on
+    # Delta Force in windowed mode: 2576x1479 at (-8,-31) on a 2560x1440
+    # monitor, with WS_CAPTION set, which the rules below would otherwise call a
+    # dialog. Not zoomed, so `IsZoomed` does not catch it either.
+    #
+    # This is placed AFTER the shell and overlay rules on purpose: the two
+    # other windows that match on this desktop are `Progman` and a cursor
+    # overlay, and both are rejected before reaching here.
+    if monitor_w and monitor_h:
+        if width > monitor_w + SLACK and height > monitor_h + SLACK:
+            return True, "larger than the monitor"
 
     # A popup with a caption and no frame is a dialog or a splash.
     if has_caption and not has_frame:
@@ -313,6 +328,7 @@ class PresenceGuard:
                 style=facts["style"], exstyle=facts["exstyle"],
                 zoomed=facts["zoomed"],
                 work_w=facts["work_w"], work_h=facts["work_h"],
+                monitor_w=facts["monitor_w"], monitor_h=facts["monitor_h"],
                 pid=facts["pid"], own_pid=os.getpid(),
                 image_path=facts["image_path"],
             )
@@ -384,6 +400,23 @@ class PresenceGuard:
             work_w = user32.GetSystemMetrics(0)
             work_h = user32.GetSystemMetrics(1)
 
+        # The monitor the window sits on, for the "larger than the screen"
+        # test. MONITOR_DEFAULTTONEAREST (2) always returns a monitor, so there
+        # is no failure case to handle here.
+        mon = (ctypes.c_long * 4)()
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_ulong),
+                        ("rcMonitor", (ctypes.c_long * 4)),
+                        ("rcWork", (ctypes.c_long * 4)),
+                        ("dwFlags", ctypes.c_ulong)]
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        monitor_w = monitor_h = 0
+        if user32.GetMonitorInfoW(
+                user32.MonitorFromWindow(hwnd, 2), ctypes.byref(mi)):
+            monitor_w = mi.rcMonitor[2] - mi.rcMonitor[0]
+            monitor_h = mi.rcMonitor[3] - mi.rcMonitor[1]
+
         return {
             "class_name": cls.value,
             "width": rect.right - rect.left,
@@ -393,6 +426,8 @@ class PresenceGuard:
             "zoomed": bool(user32.IsZoomed(hwnd)),
             "work_w": work_w,
             "work_h": work_h,
+            "monitor_w": monitor_w,
+            "monitor_h": monitor_h,
             "pid": pid.value,
             "image_path": _image_path(pid.value),
         }

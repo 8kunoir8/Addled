@@ -247,6 +247,7 @@ async def main() -> int:
     )
 
     WORK_W, WORK_H = 2560, 1392
+    MON_W, MON_H = 2560, 1440
     GAME_PATH = (r"E:\Program\Game\Delta Force\DeltaForce\Binaries"
                  r"\Win64\DeltaForceClient-Win64-Shipping.exe")
     SYS_PATH = r"C:\Windows\System32\some.exe"
@@ -291,14 +292,18 @@ async def main() -> int:
          0, False, OTHER_PID, SYS_PATH, False, "system binary"),
         ("small ordinary window", "Qt51519QWindowIcon", 816, 633, 0x96CF0000,
          0x00000100, False, OTHER_PID, r"E:\app\app.exe", False, "too small"),
-        ("game wider than the monitor", "UnityWndClass", 3640, 1920, 0x80000000,
-         0, False, OTHER_PID, GAME_PATH, True, "borderless fullscreen"),
+        # 3640x1920 exceeds the 2560x1440 monitor, so the overshoot rule fires
+        # before the style rules. Still True - the verdict is what matters, and
+        # the reason is asserted so the ordering stays visible.
+        ("game larger than the monitor", "UnityWndClass", 3640, 1920, 0x80000000,
+         0, False, OTHER_PID, GAME_PATH, True, "larger than the monitor"),
     ]
 
     for (label, cls, w, h, style, ex, zoomed, pid, path, want, want_why) in cases:
         got, why = classify_window(
             class_name=cls, width=w, height=h, style=style, exstyle=ex,
             zoomed=zoomed, work_w=WORK_W, work_h=WORK_H,
+            monitor_w=MON_W, monitor_h=MON_H,
             pid=pid, own_pid=OWN_PID, image_path=path)
         # Assert the REASON too. A row that returns False because it was "too
         # small" proves nothing about the rule it was written for.
@@ -325,6 +330,46 @@ async def main() -> int:
         pid=OTHER_PID, own_pid=OWN_PID, image_path=GAME_PATH)
     check("a small frameless popup is not a game",
           (got, why) == (False, "too small"), f"got {got} ({why})")
+
+    # A game that KEEPS ITS CAPTION. Measured live: Delta Force in windowed
+    # mode is 2576x1479 at (-8,-31) on a 2560x1440 monitor, style 0x14CA0000
+    # (WS_CAPTION set), not zoomed. Borderless fullscreen is implemented by
+    # drawing past the screen edge, so the window is LARGER than the monitor -
+    # which no ordinary window the user can reach is.
+    #
+    # The old code returned False for this window, so this is a gap that
+    # predates the rewrite, found by testing against the running game.
+    got, why = classify_window(
+        class_name="UnrealWindow", width=2576, height=1479, style=0x14CA0000,
+        exstyle=0x00040100, zoomed=False, work_w=WORK_W, work_h=WORK_H,
+        monitor_w=MON_W, monitor_h=MON_H, pid=OTHER_PID, own_pid=OWN_PID,
+        image_path=GAME_PATH)
+    check("a captioned window larger than the monitor is a game",
+          (got, why) == (True, "larger than the monitor"), f"got {got} ({why})")
+
+    # ...but a CAPTIONED window that merely FILLS the monitor is a maximised
+    # app or a dialog, not a game. This is the row that stops the rule above
+    # from swallowing every full-screen window.
+    got, why = classify_window(
+        class_name="Chrome_WidgetWin_1", width=2560, height=1440,
+        style=0x14CF0000, exstyle=0x00000100, zoomed=False,
+        work_w=WORK_W, work_h=WORK_H, monitor_w=MON_W, monitor_h=MON_H,
+        pid=OTHER_PID, own_pid=OWN_PID,
+        image_path=r"C:\Program Files\Brave\brave.exe")
+    check("a captioned window exactly the monitor size is not",
+          got is False, f"got {got} ({why})")
+
+    # The overshoot rule comes AFTER the shell rule, and it has to: `Progman`
+    # and the cursor overlay BOTH overshoot this monitor. If the order were
+    # reversed, the desktop would be called a game.
+    for cls in ("Progman", "Cua.AgentCursorOverlay"):
+        got, why = classify_window(
+            class_name=cls, width=3640, height=1920, style=0x96000000,
+            exstyle=0x00200080, zoomed=False, work_w=WORK_W, work_h=WORK_H,
+            monitor_w=MON_W, monitor_h=MON_H, pid=OTHER_PID, own_pid=OWN_PID,
+            image_path=r"C:\Windows\explorer.exe")
+        check(f"overshoot does not rescue {cls}",
+              (got, why) == (False, "shell class"), f"got {got} ({why})")
 
     # The no-activate rule has no specimen on this machine - nothing observed
     # carries WS_EX_NOACTIVATE AND passes every other rule - so it is pinned by
