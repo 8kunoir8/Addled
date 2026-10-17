@@ -1476,7 +1476,13 @@ async def _speak_reply(text: str, voice: str | None = None) -> dict:
             pass
     try:
         from backend.voice.tts import speak
-        return await speak(spoken, voice)
+        outcome = await speak(spoken, voice)
+        # Carry what was actually said back to the caller's log line, so the
+        # count answers "did the voice get clean text?" rather than "how long
+        # was the markdown?".
+        if isinstance(outcome, dict):
+            outcome.setdefault("spoken_length", len(spoken))
+        return outcome
     finally:
         if _engine_ref is not None:
             _engine_ref._voice_busy = False
@@ -1507,12 +1513,18 @@ async def _auto_speak(text: str, length: int) -> None:
     result = await _speak_reply(text)
     if result.get("success"):
         engine = result.get("engine") or "?"
+        # Report what was SPOKEN, not what was passed in. The caller hands over
+        # the raw markdown and `length` is its length, so logging that said
+        # "150 chars" whether the voice got the reply or the reply with its
+        # markup stripped - which made the log useless for the one question it
+        # is read to answer. `spoken_length` comes back from `_speak_reply`.
+        spoken_len = result.get("spoken_length", length)
         if result.get("fell_back_from"):
             log.info("Auto-TTS: spoke the reply with %s (%d chars) after %s "
-                     "failed", engine, length, result["fell_back_from"][:60])
+                     "failed", engine, spoken_len, result["fell_back_from"][:60])
         else:
             log.info("Auto-TTS: spoke the reply with %s (%d chars)",
-                     engine, length)
+                     engine, spoken_len)
         return
     log.warning("Auto-TTS: could not speak the reply (%d chars): %s",
                 length, result.get("error"))
