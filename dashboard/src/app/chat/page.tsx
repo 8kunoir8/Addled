@@ -109,7 +109,25 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
 
+  // Keep the shared store in step with what is on screen - but never let a
+  // greeting overwrite a real thread.
+  //
+  // On mount `messages` is the greeting, and this effect runs before the
+  // history fetch returns, so the store was briefly set to `[GREETING]`. That
+  // was harmless while it lasted, but it is not free: the history effect
+  // below reads the store to decide whether there is anything worth keeping,
+  // and the recovery effect reads it for a stuck placeholder. Once the fetch
+  // returned nothing, the greeting stayed, and the page held a "conversation"
+  // that was really an empty one. The guard makes the store only ever move
+  // forwards - from the greeting to real turns - which is the only direction
+  // it has any business moving.
   useEffect(() => {
+    const onlyGreeting = messages.length === 1 &&
+      messages[0].role === 'assistant' &&
+      messages[0].content === GREETING.content;
+    const storeHasReal = getChatMessages().some(
+      (m) => m.content && m.content !== GREETING.content);
+    if (onlyGreeting && storeHasReal) return;
     setChatMessages(messages);
   }, [messages]);
 
@@ -145,12 +163,28 @@ export default function ChatPage() {
             content: String(m.content ?? ''),
             timestamp: Number(m.timestamp || 0) * 1000,
           }));
-        setMessages(msgs.length ? msgs : [GREETING]);
+        // An EMPTY answer must never replace a thread we already have.
+        //
+        // It used to call `setMessages([GREETING])` here, which the sync
+        // effect above then wrote into the shared store - so a history fetch
+        // that happened to return nothing (a fresh launch, a race with
+        // startup, a conversation that had not been created yet) DELETED the
+        // conversation from the page's memory. Navigating away and back, or
+        // loading the page while the backend was still starting, then showed
+        // an empty chat with older messages sitting in the store untouched.
+        // The empty case now leaves whatever is on screen alone: a stale
+        // thread is recoverable by reloading, a wiped one is not, because
+        // nothing knows it should come back.
+        if (!msgs.length) return;
+        setMessages(msgs);
       } catch {
         /* keep what we already have */
       }
     })();
+    // `hadReal` is deliberately not a dependency: it is a fact about the
+    // mount, not something that should re-run the fetch when it changes.
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsState, send]);
 
   // Apply replies that landed in the store after this component (re)mounted —
