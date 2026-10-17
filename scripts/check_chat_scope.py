@@ -307,12 +307,91 @@ async def main() -> int:
           "chat.history" in page_src and "setMessages(msgs.length" in page_src,
           "the screen and the model can disagree again")
 
+    # ---- 7b. ...and that loading it returns something to load --------------
+    #
+    # The assertion above is a string match and passed the whole time the page
+    # was wiping itself. `chat.history` answered `[]` whenever there was no
+    # current conversation, which is the normal state after a launch, because
+    # `start_session` clears that pointer on purpose. The page then replaced
+    # its message list with an empty one, so a reply pushed from a bot or from
+    # voice - the only copy of that turn it had - disappeared on the next
+    # mount, while the user's own bubble stayed. Reading the source proved
+    # nothing; this runs the real object.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        store = Path(tmp) / "chat_history.json"
+        store.write_text(json.dumps({
+            "current_conversation": None,  # exactly what a launch leaves
+            "conversations": {
+                "conv_old": {"id": "conv_old", "created": 1, "updated": 1,
+                             "title": "old", "messages": [
+                                 {"role": "user", "content": "ZZOLD",
+                                  "timestamp": 1.0},
+                                 {"role": "assistant", "content": "ZZOLD-REPLY",
+                                  "timestamp": 2.0}]},
+                "conv_new": {"id": "conv_new", "created": 3, "updated": 9,
+                             "title": "new", "messages": [
+                                 {"role": "user", "content": "ZZNEW",
+                                  "timestamp": 8.0},
+                                 {"role": "assistant", "content": "ZZNEW-REPLY",
+                                  "timestamp": 9.0}]},
+                "conv_empty": {"id": "conv_empty", "created": 10, "updated": 10,
+                               "title": "empty", "messages": []},
+            },
+        }), encoding="utf-8")
+
+        import backend.memory.chat_history as ch_mod
+        saved_path = ch_mod.HISTORY_PATH
+        ch_mod.HISTORY_PATH = store
+        ch_mod.chat_history = ch_mod.ChatHistory()
+        try:
+            # What the chat page reads (`latest_context`), and, separately,
+            # what the model reads (`get_context`) — the two must disagree in
+            # exactly this case.
+            got = ch_mod.chat_history.latest_context(max_messages=60)
+            check("chat.history is not empty just because the run is new",
+                  len(got) > 0,
+                  "the chat page wipes itself on every mount again")
+            check("it falls back to the conversation last spoken in",
+                  got and got[-1].get("content") == "ZZNEW-REPLY",
+                  f"got {got!r}")
+            check("an empty conversation is not preferred over a real one",
+                  got and all("ZZNEW" in str(m.get("content")) for m in got),
+                  f"got {got!r}")
+            # Asking for a named conversation must never substitute another.
+            check("a named conversation that is gone yields nothing",
+                  ch_mod.chat_history.get_context(
+                      conversation_id="conv_gone") == [],
+                  "a caller asking for one thread was given a different one")
+            check("a named conversation that exists is honoured exactly",
+                  len(ch_mod.chat_history.get_context(
+                      conversation_id="conv_old")) == 2,
+                  "the explicit path stopped reading the named thread")
+            # ...and the model must STILL see nothing. This is the assertion
+            # that caught a first version of this fix, which put the fallback
+            # in `get_context` and so fed a fresh session last week's thread.
+            # The dashboard wanting history is not a reason for the model to
+            # get it, and the two readers are separate functions for that
+            # reason - a later "simplification" that merges them must fail
+            # here rather than in production.
+            check("the model still starts a fresh session with no history",
+                  ch_mod.chat_history.get_context(max_messages=60) == [],
+                  "a new run would continue the old thread again: "
+                  f"{ch_mod.chat_history.get_context(max_messages=60)!r}")
+            check("latest_context honours a current conversation over the "
+                  "fallback",
+                  len(ch_mod.chat_history.latest_context(max_messages=60)) > 0,
+                  "the reader the page uses returned nothing")
+        finally:
+            ch_mod.HISTORY_PATH = saved_path
+            ch_mod.chat_history = ch_mod.ChatHistory()
+
     if fails:
         print(f"FAIL: {len(fails)} problem(s)")
         for f in fails:
             print(f"  - {f}")
         return 1
-    print("PASS: session scope, rolling scope, relevance gate, profile dedup")
+    print("PASS: session scope, rolling scope, relevance gate, profile dedup, "
+          "history recovery")
     return 0
 
 

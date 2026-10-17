@@ -90,7 +90,21 @@ class ChatHistory:
 
     def get_context(self, conversation_id: str | None = None,
                     max_messages: int = 20) -> list[dict]:
-        """Get recent messages for LLM context."""
+        """Get recent messages for LLM context.
+
+        Deliberately answers `[]` when there is no current conversation.
+
+        `start_session` clears `current_conversation` on every launch so a new
+        run does not silently continue a thread from weeks ago, and this
+        function is what the MODEL is fed through - `check_chat_scope` asserts
+        that a fresh session sees no history, because leaking the old thread
+        back into the prompt is exactly the bug that clearing prevents.
+
+        The dashboard needs the opposite answer ("show me the last thing we
+        said"), and it asks through `chat.history`. That handler does the
+        falling back; a fallback here would feed last week's conversation to a
+        brand-new session to make a UI feel better.
+        """
         self._load()
         conv_id = conversation_id or self._data.get("current_conversation")
         if not conv_id or conv_id not in self._data["conversations"]:
@@ -98,6 +112,40 @@ class ChatHistory:
 
         messages = self._data["conversations"][conv_id]["messages"]
         return messages[-max_messages:]
+
+    def latest_context(self, max_messages: int = 60) -> list[dict]:
+        """Recent turns for a reader that wants to SEE the conversation.
+
+        The counterpart to `get_context`, and separate from it on purpose.
+
+        `get_context` answers the model and must be empty for a session that
+        has said nothing yet; this answers the chat page, which wants the last
+        thread it was in. Collapsing the two into one function means either the
+        model gets fed a stale conversation or the page shows nothing, and the
+        page showing nothing is the bug being fixed: it loads this at mount and
+        REPLACES its whole message list with the result, so an empty answer
+        deleted every reply that had arrived by push - a bot's or voice's
+        reply, the only copy the page had, since the page did not send that
+        turn. The user's own bubble survived (the page keeps its own list) and
+        the answer did not, which is the "I heard it speak but there is no
+        reply in the chat" report.
+
+        Ordered by `updated`, the field `add_message` maintains, so this is the
+        thread the user last spoke in rather than the newest file on disk. A
+        conversation with no messages is skipped: an empty thread is not
+        something to fall back to.
+        """
+        self._load()
+        current = self._data.get("current_conversation")
+        conv = self._data["conversations"].get(current) if current else None
+        if conv is None or not conv.get("messages"):
+            candidates = [c for c in self._data["conversations"].values()
+                          if c.get("messages")]
+            conv = max(candidates, key=lambda c: c.get("updated") or 0) \
+                if candidates else None
+        if conv is None:
+            return []
+        return conv["messages"][-max_messages:]
 
     def list_conversations(self) -> list[dict]:
         """List all conversations, newest first."""

@@ -3731,10 +3731,25 @@ def _register_default_handlers():
 
     async def chat_get_history(params: dict, ws) -> dict:
         """Recent conversation turns — used by the chat page to recover a
-        reply that was generated while the dashboard was on another tab."""
+        reply that was generated while the dashboard was on another tab.
+
+        Reads `latest_context`, not `get_context`. The latter is what the model
+        is fed and is deliberately empty for a session that has not spoken yet
+        (see `start_session`); answering the dashboard with it meant the page
+        loaded no history, replaced its message list with nothing, and erased
+        every reply that had arrived by push — a bot's or voice's turn, which
+        the page never held a copy of. An explicit `conversation` is still
+        honoured exactly, so a caller naming a thread gets that thread.
+        """
         from backend.memory.chat_history import chat_history
         max_messages = int(params.get("max", 60))
-        return {"messages": chat_history.get_context(max_messages=max_messages)}
+        named = (params.get("conversation") or params.get("conversationId")
+                 or "").strip()
+        if named:
+            return {"messages": chat_history.get_context(
+                conversation_id=named, max_messages=max_messages)}
+        return {"messages": chat_history.latest_context(
+            max_messages=max_messages)}
 
     # ---- Memory relations ----------------------------------------------------
 
