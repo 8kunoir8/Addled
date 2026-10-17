@@ -301,11 +301,21 @@ async def main() -> int:
           "a new run would carry on the old thread again")
 
     # ---- 7. the dashboard adopts the backend's view ----------------------
+    #
+    # This used to require the exact expression `setMessages(msgs.length`, which
+    # pinned the implementation rather than the behaviour - and that expression
+    # was itself the wipe bug (empty answer replaced the conversation with the
+    # greeting), so fixing the bug broke a check that was guarding the bug.
+    # What matters is that the page asks for history and applies what comes
+    # back; how it maps the result is the page's business.
     page_src = (Path(ROOT) / "dashboard" / "src" / "app" / "chat" /
                 "page.tsx").read_text(encoding="utf-8", errors="replace")
     check("the chat page loads the conversation the model is using",
-          "chat.history" in page_src and "setMessages(msgs.length" in page_src,
+          "chat.history" in page_src and "setMessages(msgs)" in page_src,
           "the screen and the model can disagree again")
+    check("an empty history answer does not erase the conversation",
+          "if (!msgs.length) return;" in page_src,
+          "a history fetch that returns nothing wipes the page again")
 
     # ---- 7b. ...and that loading it returns something to load --------------
     #

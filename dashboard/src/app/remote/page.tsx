@@ -73,25 +73,25 @@ interface RemoteStatus {
 }
 
 const DOT = (tone: 'ok' | 'warn' | 'off') =>
-  tone === 'ok' ? 'bg-[#3fb950]' : tone === 'warn' ? 'bg-[#d29922]' : 'bg-[#484f58]';
+  tone === 'ok' ? 'bg-[var(--success)]' : tone === 'warn' ? 'bg-[var(--warning)]' : 'bg-[var(--text-muted)]';
 
 function Row({ label, children, description }: any) {
   return (
-    <div className="flex items-start justify-between gap-6 py-2.5 border-b border-[#21262d] last:border-0">
+    <div className="flex items-start justify-between gap-6 py-2.5 border-b border-[var(--bg-tertiary)] last:border-0">
       <div className="min-w-0">
-        <div className="text-sm text-[#e8eaed]">{label}</div>
-        {description && <div className="text-xs text-[#8b949e] mt-0.5">{description}</div>}
+        <div className="text-sm text-[var(--text-primary)]">{label}</div>
+        {description && <div className="text-xs text-[var(--text-secondary)] mt-0.5">{description}</div>}
       </div>
-      <div className="text-sm text-[#8b949e] shrink-0 text-right">{children}</div>
+      <div className="text-sm text-[var(--text-secondary)] shrink-0 text-right">{children}</div>
     </div>
   );
 }
 
 function Card({ title, children, right }: any) {
   return (
-    <div className="rounded-lg border border-[#30363d] bg-[#161b22] mb-4">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
-        <h2 className="text-sm font-semibold text-[#e8eaed]">{title}</h2>
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] mb-4">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
+        <h2 className="text-sm font-semibold text-[var(--text-primary)]">{title}</h2>
         {right}
       </div>
       <div className="px-4 py-1">{children}</div>
@@ -240,21 +240,21 @@ export default function RemotePage() {
     return (
       <div className="p-6 max-w-3xl">
         <h1 className="text-lg font-semibold mb-1">Remote access</h1>
-        <p className="text-sm text-[#8b949e] mb-6">
+        <p className="text-sm text-[var(--text-secondary)] mb-6">
           Reach this Addled from your phone or another machine, in a browser,
           over Tailscale.
         </p>
-        <div className="rounded-lg border border-[#30363d] bg-[#161b22] px-4 py-4">
-          <div className="text-sm text-[#e8eaed] mb-1">
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-4 py-4">
+          <div className="text-sm text-[var(--text-primary)] mb-1">
             {wsState === 'connected'
               ? 'Reading remote status…'
               : 'Waiting for Addled to connect…'}
           </div>
-          <div className="text-xs text-[#8b949e]">
+          <div className="text-xs text-[var(--text-secondary)]">
             {error || 'This page fills in once Addled answers.'}
           </div>
           <button onClick={load}
-            className="mt-3 px-3 py-1.5 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">
+            className="mt-3 px-3 py-1.5 rounded bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
             Try again
           </button>
         </div>
@@ -268,25 +268,25 @@ export default function RemotePage() {
         <span className={`w-2.5 h-2.5 rounded-full ${DOT(stateTone)}`} />
         <h1 className="text-lg font-semibold">Remote access</h1>
       </div>
-      <p className="text-sm text-[#8b949e] mb-6">
+      <p className="text-sm text-[var(--text-secondary)] mb-6">
         Reach this Addled from your phone or another machine, in a browser, over
         Tailscale. Nothing is on the public internet unless you turn that on.
       </p>
 
-      {error && <div className="mb-4 text-sm text-[#f85149] bg-[#2d1113] border border-[#5a1d1d] rounded px-3 py-2">{error}</div>}
-      {note && <div className="mb-4 text-sm text-[#3fb950] bg-[#0f2a17] border border-[#1d5a2d] rounded px-3 py-2">{note}</div>}
+      {error && <div className="mb-4 text-sm text-[var(--danger)] bg-[#2d1113] border border-[#5a1d1d] rounded px-3 py-2">{error}</div>}
+      {note && <div className="mb-4 text-sm text-[var(--success)] bg-[#0f2a17] border border-[#1d5a2d] rounded px-3 py-2">{note}</div>}
 
       {blockers.length > 0 && (
         <div className="mb-4 rounded-lg border border-[#5a4a1d] bg-[#2a2410] px-4 py-3">
-          <div className="text-xs font-semibold text-[#d29922] mb-1">
+          <div className="text-xs font-semibold text-[var(--warning)] mb-1">
             {ts.needs_enablement ? 'One thing left, and it needs you' : 'Not reachable yet'}
           </div>
-          <ul className="text-xs text-[#d29922] list-disc pl-4 space-y-0.5">
+          <ul className="text-xs text-[var(--warning)] list-disc pl-4 space-y-0.5">
             {blockers.map((b, i) => <li key={i}>{b}</li>)}
           </ul>
           {ts.needs_enablement && (
             <div className="mt-3 pt-3 border-t border-[#5a4a1d]">
-              <div className="text-xs text-[#8b949e] mb-2">
+              <div className="text-xs text-[var(--text-secondary)] mb-2">
                 Sharing to a tailnet is a one-time switch that only the tailnet
                 owner can accept, in a browser. Addled cannot press it for you —
                 but once you have, it finishes the rest on its own within a
@@ -294,11 +294,11 @@ export default function RemotePage() {
               </div>
               {ts.enable_url ? (
                 <a href={ts.enable_url} target="_blank" rel="noreferrer"
-                   className="inline-block px-3 py-1.5 rounded bg-[#1f6feb] text-white text-xs">
+                   className="inline-block px-3 py-1.5 rounded bg-[var(--accent)] text-white text-xs">
                   Enable Tailscale Serve
                 </a>
               ) : (
-                <span className="text-xs text-[#8b949e]">
+                <span className="text-xs text-[var(--text-secondary)]">
                   Open the Tailscale admin console and enable Serve / HTTPS for
                   this tailnet.
                 </span>
@@ -310,12 +310,12 @@ export default function RemotePage() {
 
       {url && (
         <div className="mb-4 rounded-lg border border-[#1d5a2d] bg-[#0f2a17] px-4 py-3">
-          <div className="text-xs text-[#3fb950] mb-1">Open this on any device on your tailnet</div>
+          <div className="text-xs text-[var(--success)] mb-1">Open this on any device on your tailnet</div>
           <div className="flex items-center gap-3">
             <a href={url} target="_blank" rel="noreferrer"
-               className="text-sm text-[#3380FF] hover:underline break-all">{url}</a>
+               className="text-sm text-[var(--accent)] hover:underline break-all">{url}</a>
             <button onClick={() => navigator.clipboard?.writeText(url)}
-                    className="shrink-0 px-2 py-1 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">Copy</button>
+                    className="shrink-0 px-2 py-1 rounded bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Copy</button>
           </div>
         </div>
       )}
@@ -324,24 +324,24 @@ export default function RemotePage() {
       <Card title="1. Password">
         <Row label="Status" description="Remote access refuses to open without one">
           {status?.password_set
-            ? <span className="text-[#3fb950]">Set</span>
-            : <span className="text-[#d29922]">Not set</span>}
+            ? <span className="text-[var(--success)]">Set</span>
+            : <span className="text-[var(--warning)]">Not set</span>}
         </Row>
         <Row label="Generate a new one" description="Replaces the current password and signs every device out">
           <button onClick={generate} disabled={busy === 'gen'}
-            className="px-3 py-1.5 rounded bg-[#1f6feb] text-white text-xs">
+            className="px-3 py-1.5 rounded bg-[var(--accent)] text-white text-xs">
             {busy === 'gen' ? '…' : 'Generate'}
           </button>
         </Row>
         {freshPassword && (
           <div className="py-3">
-            <div className="text-xs text-[#d29922] mb-1">
+            <div className="text-xs text-[var(--warning)] mb-1">
               Copy this now — it is stored only as a hash and cannot be shown again.
             </div>
             <div className="flex items-center gap-2">
-              <code className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-[#e8eaed] break-all">{freshPassword}</code>
+              <code className="flex-1 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-2 text-sm text-[var(--text-primary)] break-all">{freshPassword}</code>
               <button onClick={() => navigator.clipboard?.writeText(freshPassword)}
-                className="px-2 py-2 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">Copy</button>
+                className="px-2 py-2 rounded bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Copy</button>
             </div>
           </div>
         )}
@@ -351,15 +351,15 @@ export default function RemotePage() {
       <Card title="2. Gateway">
         <Row label="Listening" description={status?.bind ? `Loopback only: ${status.bind}` : undefined}>
           {status?.running
-            ? <span className="text-[#3fb950]">Yes</span>
-            : status?.enabled ? <span className="text-[#d29922]">No</span>
-              : <span className="text-[#8b949e]">Off</span>}
+            ? <span className="text-[var(--success)]">Yes</span>
+            : status?.enabled ? <span className="text-[var(--warning)]">No</span>
+              : <span className="text-[var(--text-secondary)]">Off</span>}
         </Row>
         <Row label="Dashboard build"
              description={status?.dashboard_found ? undefined : 'Run the dashboard build first'}>
           {status?.dashboard_found
-            ? <span className="text-[#3fb950]">Found</span>
-            : <span className="text-[#f85149]">Missing</span>}
+            ? <span className="text-[var(--success)]">Found</span>
+            : <span className="text-[var(--danger)]">Missing</span>}
         </Row>
         <Row label="Connected devices">
           <span>{status?.session_count ?? 0}</span>
@@ -368,7 +368,7 @@ export default function RemotePage() {
           <button
             onClick={() => toggle('remote', 'enabled', !status?.enabled)}
             disabled={busy === 'remote.enabled'}
-            className={`w-10 h-5 rounded-full transition-colors ${status?.enabled ? 'bg-[#3380FF]' : 'bg-[#30363d]'}`}>
+            className={`w-10 h-5 rounded-full transition-colors ${status?.enabled ? 'bg-[var(--accent)]' : 'bg-[var(--border)]'}`}>
             <div className={`w-4 h-4 bg-white rounded-full transition-transform ${status?.enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
           </button>
         </Row>
@@ -378,14 +378,14 @@ export default function RemotePage() {
       <Card title="3. Tailscale" right={
         <button onClick={() => act('refresh', 'tailscale.status', { refresh: true })}
           disabled={busy === 'refresh'}
-          className="px-2 py-1 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">
+          className="px-2 py-1 rounded bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
           {busy === 'refresh' ? '…' : 'Refresh'}
         </button>
       }>
         <Row label="Installed">
           {ts.installed
-            ? <span className="text-[#3fb950]">{ts.version || 'Yes'}</span>
-            : <span className="text-[#f85149]">Not installed</span>}
+            ? <span className="text-[var(--success)]">{ts.version || 'Yes'}</span>
+            : <span className="text-[var(--danger)]">Not installed</span>}
         </Row>
         {ts.installed && (
           <>
@@ -400,43 +400,43 @@ export default function RemotePage() {
         {ts.installed && !ts.logged_in && (
           <>
             <div className="py-3">
-              <div className="text-xs text-[#8b949e] mb-2">
+              <div className="text-xs text-[var(--text-secondary)] mb-2">
                 Sign in to join this machine to your tailnet. Addled opens a
                 sign-in URL; you finish it in a browser.
               </div>
               {loginUrl ? (
-                <div className="text-xs text-[#8b949e]">
+                <div className="text-xs text-[var(--text-secondary)]">
                   Waiting for sign-in.{' '}
                   <a href={loginUrl} target="_blank" rel="noreferrer"
-                     className="text-[#3380FF] hover:underline break-all">{loginUrl}</a>
+                     className="text-[var(--accent)] hover:underline break-all">{loginUrl}</a>
                 </div>
               ) : (
                 <>
                   <button onClick={() => act('login', 'tailscale.login')}
                     disabled={busy === 'login'}
-                    className="px-3 py-1.5 rounded bg-[#1f6feb] text-white text-xs">
+                    className="px-3 py-1.5 rounded bg-[var(--accent)] text-white text-xs">
                     {busy === 'login' ? 'Starting…' : 'Sign in to Tailscale'}
                   </button>
                   <div className="mt-3">
                     <button onClick={() => setShowKey(!showKey)}
-                      className="text-xs text-[#8b949e] hover:text-[#e8eaed]">
+                      className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
                       {showKey ? '− Hide' : '+ Use an auth key instead'}
                     </button>
                     {showKey && (
                       <div className="flex items-center gap-2 mt-2">
                         <input value={authKey} onChange={e => setAuthKey(e.target.value)}
                           placeholder="tskey-auth-…" type="password"
-                          className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-xs text-[#e8eaed] font-mono" />
+                          className="flex-1 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-xs text-[var(--text-primary)] font-mono" />
                         <button onClick={() => act('login', 'tailscale.login', { authKey })}
                           disabled={!authKey || busy === 'login'}
-                          className="px-3 py-1.5 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">Connect</button>
+                          className="px-3 py-1.5 rounded bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Connect</button>
                       </div>
                     )}
                   </div>
                 </>
               )}
             </div>
-            {ts.login?.error && <div className="pb-3 text-xs text-[#f85149]">{ts.login.error}</div>}
+            {ts.login?.error && <div className="pb-3 text-xs text-[var(--danger)]">{ts.login.error}</div>}
           </>
         )}
 
@@ -444,7 +444,7 @@ export default function RemotePage() {
           <Row label="Sign out" description="Leaves the tailnet. Remote access stops working.">
             <button onClick={() => act('logout', 'tailscale.logout')}
               disabled={busy === 'logout'}
-              className="px-3 py-1.5 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">
+              className="px-3 py-1.5 rounded bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
               {busy === 'logout' ? '…' : 'Sign out'}
             </button>
           </Row>
@@ -454,12 +454,12 @@ export default function RemotePage() {
           <div className="py-3">
             {installing ? (
               <>
-                <div className="text-xs text-[#8b949e] mb-2">{installDetail || 'Working…'}</div>
-                <div className="h-1.5 w-full bg-[#21262d] rounded overflow-hidden">
-                  <div className="h-full bg-[#1f6feb] transition-all"
+                <div className="text-xs text-[var(--text-secondary)] mb-2">{installDetail || 'Working…'}</div>
+                <div className="h-1.5 w-full bg-[var(--bg-tertiary)] rounded overflow-hidden">
+                  <div className="h-full bg-[var(--accent)] transition-all"
                        style={{ width: `${installPct}%` }} />
                 </div>
-                <div className="text-xs text-[#8b949e] mt-2">
+                <div className="text-xs text-[var(--text-secondary)] mt-2">
                   {installPhase === 'launching'
                     ? 'A Windows administrator prompt has appeared on the machine — accept it to continue.'
                     : installPhase === 'waiting'
@@ -469,55 +469,55 @@ export default function RemotePage() {
               </>
             ) : !confirmInstall ? (
               <>
-                <div className="text-xs text-[#8b949e] mb-2">
+                <div className="text-xs text-[var(--text-secondary)] mb-2">
                   Tailscale is not installed on this machine, so there is nothing
                   for Addled to connect to yet.
                 </div>
                 {isRemoteSession ? (
-                  <div className="text-xs text-[#d29922]">
+                  <div className="text-xs text-[var(--warning)]">
                     Installing has to be done on the machine itself — it raises a
                     Windows administrator prompt there.
                   </div>
                 ) : (
                   <button onClick={() => setConfirmInstall(true)}
-                    className="px-3 py-1.5 rounded bg-[#1f6feb] text-white text-xs">
+                    className="px-3 py-1.5 rounded bg-[var(--accent)] text-white text-xs">
                     Install Tailscale
                   </button>
                 )}
               </>
             ) : (
-              <div className="rounded border border-[#30363d] bg-[#0d1117] p-3">
-                <div className="text-xs text-[#e8eaed] mb-2">
+              <div className="rounded border border-[var(--border)] bg-[var(--bg-primary)] p-3">
+                <div className="text-xs text-[var(--text-primary)] mb-2">
                   Addled will {installUsesWinget ? (
-                    <>run <code className="text-[#8b949e]">winget install Tailscale.Tailscale</code></>
+                    <>run <code className="text-[var(--text-secondary)]">winget install Tailscale.Tailscale</code></>
                   ) : (
-                    <>download the installer from <code className="text-[#8b949e]">pkgs.tailscale.com</code> and check its signature</>
+                    <>download the installer from <code className="text-[var(--text-secondary)]">pkgs.tailscale.com</code> and check its signature</>
                   )}, then hand it to Windows.
                 </div>
-                <div className="text-xs text-[#8b949e] mb-3">
+                <div className="text-xs text-[var(--text-secondary)] mb-3">
                   A Windows administrator prompt will appear on this machine and
                   you will complete the Tailscale setup window yourself.
                 </div>
                 <div className="flex gap-2">
                   <button onClick={startInstall}
-                    className="px-3 py-1.5 rounded bg-[#1f6feb] text-white text-xs">
+                    className="px-3 py-1.5 rounded bg-[var(--accent)] text-white text-xs">
                     Yes, install it
                   </button>
                   <button onClick={() => setConfirmInstall(false)}
-                    className="px-3 py-1.5 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">
+                    className="px-3 py-1.5 rounded bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
                     Cancel
                   </button>
                 </div>
               </div>
             )}
             {installError && (
-              <div className="mt-2 text-xs text-[#f85149]">{installError}</div>
+              <div className="mt-2 text-xs text-[var(--danger)]">{installError}</div>
             )}
             {!installError && !installing && (
-              <div className="mt-3 text-xs text-[#8b949e]">
+              <div className="mt-3 text-xs text-[var(--text-secondary)]">
                 Prefer to do it yourself?{' '}
                 <a href="https://tailscale.com/download/windows" target="_blank" rel="noreferrer"
-                   className="text-[#3380FF] hover:underline">Download Tailscale</a>
+                   className="text-[var(--accent)] hover:underline">Download Tailscale</a>
                 {' '}and reopen this page.
               </div>
             )}
@@ -533,7 +533,7 @@ export default function RemotePage() {
             onClick={() => act('serve', serve.configured
               ? 'tailscale.disableServe' : 'tailscale.enableServe')}
             disabled={!!busy || !ts.logged_in}
-            className={`w-10 h-5 rounded-full transition-colors ${serve.configured ? 'bg-[#3380FF]' : 'bg-[#30363d]'} ${!ts.logged_in ? 'opacity-40' : ''}`}>
+            className={`w-10 h-5 rounded-full transition-colors ${serve.configured ? 'bg-[var(--accent)]' : 'bg-[var(--border)]'} ${!ts.logged_in ? 'opacity-40' : ''}`}>
             <div className={`w-4 h-4 bg-white rounded-full transition-transform ${serve.configured ? 'translate-x-5' : 'translate-x-0.5'}`} />
           </button>
         </Row>
@@ -543,7 +543,7 @@ export default function RemotePage() {
             onClick={() => act('funnel', serve.funnel
               ? 'tailscale.disableServe' : 'tailscale.enableServe', { funnel: true })}
             disabled={!!busy || !ts.logged_in}
-            className={`w-10 h-5 rounded-full transition-colors ${serve.funnel ? 'bg-[#d29922]' : 'bg-[#30363d]'} ${!ts.logged_in ? 'opacity-40' : ''}`}>
+            className={`w-10 h-5 rounded-full transition-colors ${serve.funnel ? 'bg-[var(--warning)]' : 'bg-[var(--border)]'} ${!ts.logged_in ? 'opacity-40' : ''}`}>
             <div className={`w-4 h-4 bg-white rounded-full transition-transform ${serve.funnel ? 'translate-x-5' : 'translate-x-0.5'}`} />
           </button>
         </Row>
@@ -554,21 +554,21 @@ export default function RemotePage() {
         (status?.session_count ?? 0) > 0 ? (
           <button onClick={() => act('revokeAll', 'remote.revokeAll')}
             disabled={busy === 'revokeAll'}
-            className="px-2 py-1 rounded bg-[#21262d] text-xs text-[#8b949e] hover:text-[#e8eaed]">
+            className="px-2 py-1 rounded bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
             {busy === 'revokeAll' ? '…' : 'Sign all out'}
           </button>
         ) : null
       }>
         {(status?.sessions || []).length === 0 && (
-          <div className="py-3 text-xs text-[#8b949e]">No devices are signed in.</div>
+          <div className="py-3 text-xs text-[var(--text-secondary)]">No devices are signed in.</div>
         )}
         {(status?.sessions || []).map(s => (
-          <div key={s.id} className="flex items-center justify-between py-2.5 border-b border-[#21262d] last:border-0">
+          <div key={s.id} className="flex items-center justify-between py-2.5 border-b border-[var(--bg-tertiary)] last:border-0">
             <div className="min-w-0">
-              <div className="text-sm text-[#e8eaed] truncate">
+              <div className="text-sm text-[var(--text-primary)] truncate">
                 {s.browser || 'Unknown browser'}
               </div>
-              <div className="text-xs text-[#8b949e]">
+              <div className="text-xs text-[var(--text-secondary)]">
                 {s.tailscale_user || s.remote_addr || 'local'}
                 {s.tailscale_device ? ` · ${s.tailscale_device}` : ''}
                 {typeof s.idle_s === 'number' ? ` · idle ${Math.round(s.idle_s / 60)}m` : ''}
@@ -577,14 +577,14 @@ export default function RemotePage() {
             </div>
             <button onClick={() => act(s.id, 'remote.revoke', { id: s.id })}
               disabled={busy === s.id}
-              className="shrink-0 px-2 py-1 rounded bg-[#3d1d1d] text-xs text-[#f85149]">
+              className="shrink-0 px-2 py-1 rounded bg-[#3d1d1d] text-xs text-[var(--danger)]">
               {busy === s.id ? '…' : 'Revoke'}
             </button>
           </div>
         ))}
       </Card>
 
-      <p className="text-xs text-[#8b949e] mt-4">
+      <p className="text-xs text-[var(--text-secondary)] mt-4">
         Commands and mouse/keyboard control stay blocked for remote sessions by
         default. Change that in Settings → Remote on this machine.
       </p>

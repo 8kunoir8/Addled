@@ -132,59 +132,59 @@ export default function SopPage() {
     setBusy('');
   };
 
-  const field = 'w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]';
+  const field = 'w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]';
 
   return (
     <div className="flex h-full">
       {/* categories */}
-      <div className="w-48 border-r border-[#30363d] p-2 space-y-0.5 overflow-y-auto">
+      <div className="w-48 border-r border-[var(--border)] p-2 space-y-0.5 overflow-y-auto">
         <button onClick={() => setFilter('')}
-          className={`w-full text-left px-3 py-2 rounded-md text-sm ${!filter ? 'bg-[#1f6feb] text-white' : 'text-[#8b949e] hover:bg-[#21262d] hover:text-[#e8eaed]'}`}>
+          className={`w-full text-left px-3 py-2 rounded-md text-sm ${!filter ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'}`}>
           All <span className="float-right text-xs opacity-70">{procedures.length && !filter ? procedures.length : ''}</span>
         </button>
         {categories.map(c => (
           <button key={c.category} onClick={() => setFilter(c.category)}
-            className={`w-full text-left px-3 py-2 rounded-md text-sm ${filter === c.category ? 'bg-[#1f6feb] text-white' : 'text-[#8b949e] hover:bg-[#21262d] hover:text-[#e8eaed]'}`}>
+            className={`w-full text-left px-3 py-2 rounded-md text-sm ${filter === c.category ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'}`}>
             {c.category}<span className="float-right text-xs opacity-70">{c.count}</span>
           </button>
         ))}
       </div>
 
       {/* list */}
-      <div className="w-72 border-r border-[#30363d] overflow-y-auto">
-        <div className="p-3 border-b border-[#30363d] flex items-center gap-2">
-          <button onClick={startNew} className="px-3 py-1.5 rounded bg-[#1f6feb] text-white text-sm">+ New</button>
+      <div className="w-72 border-r border-[var(--border)] overflow-y-auto">
+        <div className="p-3 border-b border-[var(--border)] flex items-center gap-2">
+          <button onClick={startNew} className="px-3 py-1.5 rounded bg-[var(--accent)] text-white text-sm">+ New</button>
           <button onClick={restoreSeeds} disabled={busy === 'seed'}
-            className="px-3 py-1.5 rounded bg-[#21262d] text-[#8b949e] hover:text-[#e8eaed] text-sm">
+            className="px-3 py-1.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] text-sm">
             {busy === 'seed' ? '…' : 'Restore built-ins'}
           </button>
         </div>
         {info && (
-          <div className="px-3 py-2 text-xs text-[#8b949e] border-b border-[#30363d]">
+          <div className="px-3 py-2 text-xs text-[var(--text-secondary)] border-b border-[var(--border)]">
             {info.enabled
               ? <>{info.count} stored · {info.learned} learned · learning {info.learn ? 'on' : 'off'}</>
-              : <span className="text-[#d29922]">Procedures are turned off in Settings.</span>}
+              : <span className="text-[var(--warning)]">Procedures are turned off in Settings.</span>}
           </div>
         )}
-        {loading && <div className="p-4 text-sm text-[#8b949e]">Loading…</div>}
+        {loading && <div className="p-4 text-sm text-[var(--text-secondary)]">Loading…</div>}
         {!loading && procedures.length === 0 && (
-          <div className="p-4 text-sm text-[#8b949e]">
+          <div className="p-4 text-sm text-[var(--text-secondary)]">
             Nothing recorded yet. Procedures are added automatically after a task
-            that used tools and worked, or by hand with <span className="text-[#e8eaed]">+ New</span>.
+            that used tools and worked, or by hand with <span className="text-[var(--text-primary)]">+ New</span>.
           </div>
         )}
         {procedures.map(p => (
           <button key={p.id} onClick={() => openProcedure(p)}
-            className={`w-full text-left px-3 py-2.5 border-b border-[#21262d] ${selected?.id === p.id ? 'bg-[#161b22]' : 'hover:bg-[#161b22]'}`}>
-            <div className="text-sm text-[#e8eaed] truncate">{p.title}</div>
+            className={`w-full text-left px-3 py-2.5 border-b border-[var(--bg-tertiary)] ${selected?.id === p.id ? 'bg-[var(--bg-secondary)]' : 'hover:bg-[var(--bg-secondary)]'}`}>
+            <div className="text-sm text-[var(--text-primary)] truncate">{p.title}</div>
             <div className="mt-1 flex items-center gap-2 text-xs">
               <span className={`px-1.5 py-0.5 rounded ${SOURCE_BADGE[p.source || 'manual'] || SOURCE_BADGE.manual}`}>
                 {p.source || 'manual'}
               </span>
-              <span className="text-[#8b949e]">{p.category}</span>
-              <span className="text-[#8b949e]">· {(p.steps || []).length} steps</span>
+              <span className="text-[var(--text-secondary)]">{p.category}</span>
+              <span className="text-[var(--text-secondary)]">· {(p.steps || []).length} steps</span>
               {(p.uses || 0) > 0 && (
-                <span className="text-[#8b949e]">· {p.successes || 0}/{p.uses} ok</span>
+                <span className="text-[var(--text-secondary)]">· {p.successes || 0}/{p.uses} ok</span>
               )}
             </div>
           </button>
@@ -200,41 +200,41 @@ export default function SopPage() {
           <div className="flex gap-2">
             {selected && (
               <button onClick={remove} disabled={busy === 'delete'}
-                className="px-3 py-1.5 rounded bg-[#3d1d1d] text-[#f85149] text-sm">
+                className="px-3 py-1.5 rounded bg-[#3d1d1d] text-[var(--danger)] text-sm">
                 {busy === 'delete' ? '…' : 'Delete'}
               </button>
             )}
             <button onClick={save} disabled={busy === 'save'}
-              className="px-4 py-1.5 rounded bg-[#1f6feb] text-white text-sm">
+              className="px-4 py-1.5 rounded bg-[var(--accent)] text-white text-sm">
               {busy === 'save' ? 'Saving…' : 'Save'}
             </button>
           </div>
         </div>
 
-        {error && <div className="mb-3 text-sm text-[#f85149]">{error}</div>}
-        {notice && <div className="mb-3 text-sm text-[#3fb950]">{notice}</div>}
+        {error && <div className="mb-3 text-sm text-[var(--danger)]">{error}</div>}
+        {notice && <div className="mb-3 text-sm text-[var(--success)]">{notice}</div>}
 
-        <label className="block text-xs text-[#8b949e] mb-1">Title</label>
+        <label className="block text-xs text-[var(--text-secondary)] mb-1">Title</label>
         <input value={draftTitle} onChange={e => setDraftTitle(e.target.value)}
           placeholder="Inspect before overwriting" className={`${field} mb-4`} />
 
-        <label className="block text-xs text-[#8b949e] mb-1">
+        <label className="block text-xs text-[var(--text-secondary)] mb-1">
           Category — similar tasks share one, so this decides which procedure is offered
         </label>
         <input value={draftCategory} onChange={e => setDraftCategory(e.target.value)}
           placeholder="files" className={`${field} mb-4`} />
 
-        <label className="block text-xs text-[#8b949e] mb-1">Steps — one per line, in order</label>
+        <label className="block text-xs text-[var(--text-secondary)] mb-1">Steps — one per line, in order</label>
         <textarea value={draftSteps} onChange={e => setDraftSteps(e.target.value)} rows={10}
           placeholder={'Read the existing file first\nWrite the change\nRead it back to confirm'}
           className={`${field} mb-4 font-mono`} />
 
-        <label className="block text-xs text-[#8b949e] mb-1">Tools — comma separated</label>
+        <label className="block text-xs text-[var(--text-secondary)] mb-1">Tools — comma separated</label>
         <input value={draftTools} onChange={e => setDraftTools(e.target.value)}
           placeholder="read_file, write_file" className={`${field} mb-4 font-mono`} />
 
         {selected && (
-          <div className="mt-4 text-xs text-[#8b949e] font-mono space-y-1">
+          <div className="mt-4 text-xs text-[var(--text-secondary)] font-mono space-y-1">
             <div>id: {selected.id}</div>
             <div>applied {selected.uses || 0} time(s), {selected.successes || 0} successful</div>
             {selected.updated && <div>updated: {selected.updated}</div>}

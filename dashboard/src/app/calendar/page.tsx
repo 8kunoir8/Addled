@@ -175,17 +175,17 @@ export default function CalendarPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <header className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+      <header className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
         <h1 className="text-sm font-semibold">Calendar & Tasks</h1>
         <div className="flex items-center gap-2">
-          <button onClick={prevMonth} className="text-sm px-2 py-1 text-[#8b949e] hover:text-[#e8eaed]">◀</button>
-          <span className="text-sm font-medium text-[#e8eaed]">{MONTHS[month]} {year}</span>
-          <button onClick={nextMonth} className="text-sm px-2 py-1 text-[#8b949e] hover:text-[#e8eaed]">▶</button>
-          <button onClick={goToday} className="text-xs px-2 py-1 bg-[#21262d] text-[#e8eaed] rounded hover:bg-[#30363d]">Today</button>
+          <button onClick={prevMonth} className="text-sm px-2 py-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)]">◀</button>
+          <span className="text-sm font-medium text-[var(--text-primary)]">{MONTHS[month]} {year}</span>
+          <button onClick={nextMonth} className="text-sm px-2 py-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)]">▶</button>
+          <button onClick={goToday} className="text-xs px-2 py-1 bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded hover:bg-[var(--border)]">Today</button>
           {gcal.connected ? (
             <button onClick={handleDisconnect}
               title="Google Calendar is connected"
-              className="text-xs px-2 py-1 bg-[#21262d] text-[#3fb950] rounded hover:bg-[#30363d]">
+              className="text-xs px-2 py-1 bg-[var(--bg-tertiary)] text-[var(--success)] rounded hover:bg-[var(--border)]">
               ● Google
             </button>
           ) : (
@@ -194,7 +194,7 @@ export default function CalendarPage() {
               title={gcal.configured
                 ? 'Connect Google Calendar'
                 : 'Add a Google client id in Settings first'}
-              className="text-xs px-2 py-1 bg-[#21262d] text-[#e8eaed] rounded hover:bg-[#30363d] disabled:opacity-50 disabled:cursor-not-allowed">
+              className="text-xs px-2 py-1 bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded hover:bg-[var(--border)] disabled:opacity-50 disabled:cursor-not-allowed">
               {gcalBusy ? 'Waiting for browser…' : 'Connect Google'}
             </button>
           )}
@@ -202,51 +202,51 @@ export default function CalendarPage() {
       </header>
       <div className="flex-1 flex">
         <div className="flex-1 p-4">
-          <div className="grid grid-cols-7 gap-px bg-[#30363d] rounded-lg overflow-hidden">
-            {DAYS.map(d=><div key={d} className="bg-[#161b22] text-center py-2 text-xs font-medium text-[#8b949e]">{d}</div>)}
-            {cells.map((cell,i)=>(<div key={i} onClick={()=>cell&&setSelectedDate(cell.dateStr)} className={`bg-[#161b22] min-h-[80px] p-1.5 ${cell?'cursor-pointer hover:bg-[#21262d]':''} transition-colors`}>
+          <div className="grid grid-cols-7 gap-px bg-[var(--border)] rounded-lg overflow-hidden">
+            {DAYS.map(d=><div key={d} className="bg-[var(--bg-secondary)] text-center py-2 text-xs font-medium text-[var(--text-secondary)]">{d}</div>)}
+            {cells.map((cell,i)=>(<div key={i} onClick={()=>cell&&setSelectedDate(cell.dateStr)} className={`bg-[var(--bg-secondary)] min-h-[80px] p-1.5 ${cell?'cursor-pointer hover:bg-[var(--bg-tertiary)]':''} transition-colors`}>
               {cell&&<>
-                <span className={`text-xs ${cell.dateStr===todayStr?'bg-[#3380FF] text-white rounded-full w-5 h-5 inline-flex items-center justify-center':'text-[#e8eaed]'}`}>{cell.day}</span>
-                {events.filter(e=>(e.start||'').startsWith(cell.dateStr)).map(e=><div key={e.id} className="text-[10px] mt-0.5 px-1 py-0.5 bg-[#1f6feb33] text-[#58a6ff] rounded truncate">{e.title}</div>)}
-                {taskRows.filter(r=>r.date===cell.dateStr).map(r=><div key={r.task_id} className={`text-[10px] mt-0.5 px-1 py-0.5 rounded truncate ${r.action==='chat'?'bg-[#2ea04322] text-[#3fb950]':'bg-[#9e6a0322] text-[#d29922]'}`}>⏰ {r.time} {r.title}</div>)}
+                <span className={`text-xs ${cell.dateStr===todayStr?'bg-[var(--accent)] text-white rounded-full w-5 h-5 inline-flex items-center justify-center':'text-[var(--text-primary)]'}`}>{cell.day}</span>
+                {events.filter(e=>(e.start||'').startsWith(cell.dateStr)).map(e=><div key={e.id} className="text-[10px] mt-0.5 px-1 py-0.5 bg-[#1f6feb33] text-[var(--accent-hover)] rounded truncate">{e.title}</div>)}
+                {taskRows.filter(r=>r.date===cell.dateStr).map(r=><div key={r.task_id} className={`text-[10px] mt-0.5 px-1 py-0.5 rounded truncate ${r.action==='chat'?'bg-[#2ea04322] text-[var(--success)]':'bg-[#9e6a0322] text-[var(--warning)]'}`}>⏰ {r.time} {r.title}</div>)}
               </>}
             </div>))}
           </div>
         </div>
-        <div className="w-72 border-l border-[#30363d] p-4 flex flex-col overflow-y-auto">
-          <h3 className="text-xs font-medium text-[#8b949e] mb-3">{selectedDate||'Select a date'}</h3>
+        <div className="w-72 border-l border-[var(--border)] p-4 flex flex-col overflow-y-auto">
+          <h3 className="text-xs font-medium text-[var(--text-secondary)] mb-3">{selectedDate||'Select a date'}</h3>
 
           {selectedDate && (<>
-            <p className="text-[10px] uppercase tracking-wide text-[#484f58] mb-1">Events</p>
+            <p className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Events</p>
             <div className="mb-3 flex gap-1">
               <input value={newTitle} onChange={e=>setNewTitle(e.target.value)} placeholder="New event..."
-                className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"/>
+                className="flex-1 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"/>
               <button onClick={handleAddEvent} disabled={!newTitle.trim()||adding||wsState!=='connected'}
-                className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-2 py-1 text-xs">+</button>
+                className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded px-2 py-1 text-xs">+</button>
             </div>
-            {selectedEvents.length===0?<p className="text-xs text-[#484f58] mb-3">No events</p>:selectedEvents.map(e=><div key={e.id} className="mb-2 p-2 bg-[#161b22] rounded border border-[#21262d] group">
+            {selectedEvents.length===0?<p className="text-xs text-[var(--text-muted)] mb-3">No events</p>:selectedEvents.map(e=><div key={e.id} className="mb-2 p-2 bg-[var(--bg-secondary)] rounded border border-[var(--bg-tertiary)] group">
               <div className="flex items-start justify-between">
-                <p className="text-xs text-[#e8eaed] flex-1">{e.title}</p>
-                <button onClick={()=>handleDeleteEvent(e.id)} className="text-[10px] text-[#484f58] hover:text-[#f85149] opacity-0 group-hover:opacity-100 transition-opacity ml-1">×</button>
+                <p className="text-xs text-[var(--text-primary)] flex-1">{e.title}</p>
+                <button onClick={()=>handleDeleteEvent(e.id)} className="text-[10px] text-[var(--text-muted)] hover:text-[var(--danger)] opacity-0 group-hover:opacity-100 transition-opacity ml-1">×</button>
               </div>
-              <p className="text-[10px] text-[#8b949e]">{((e.start||'').slice(11))||'all day'}{e.end ? ` – ${(e.end||'').slice(11)}` : ''}</p>
+              <p className="text-[10px] text-[var(--text-secondary)]">{((e.start||'').slice(11))||'all day'}{e.end ? ` – ${(e.end||'').slice(11)}` : ''}</p>
             </div>)}
 
-            <p className="text-[10px] uppercase tracking-wide text-[#484f58] mb-1">Scheduled tasks</p>
+            <p className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Scheduled tasks</p>
             <div className="mb-3 flex flex-col gap-1">
               <div className="flex gap-1">
                 <input value={newTaskTitle} onChange={e=>setNewTaskTitle(e.target.value)} placeholder="Task title..."
-                  className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"/>
+                  className="flex-1 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"/>
               </div>
               <div className="flex gap-1">
                 <input type="time" value={newTaskTime} onChange={e=>setNewTaskTime(e.target.value)}
-                  className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]"/>
+                  className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]"/>
                 <select value={newTaskAction} onChange={e=>setNewTaskAction(e.target.value)}
-                  className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]">
+                  className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]">
                   <option value="notify">🔔 notify</option><option value="chat">💬 chat</option>
                 </select>
                 <select value={newTaskRule} onChange={e=>setNewTaskRule(e.target.value)}
-                  className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]">
+                  className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]">
                   <option value="none">once</option><option value="daily">daily</option>
                   <option value="weekly">weekly</option><option value="monthly">monthly</option>
                 </select>
@@ -254,36 +254,36 @@ export default function CalendarPage() {
                   className="bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white rounded px-2 py-1 text-xs">+</button>
               </div>
             </div>
-            {selectedTasks.length===0?<p className="text-xs text-[#484f58] flex-1">No tasks on this date</p>:selectedTasks.map(r=>{
+            {selectedTasks.length===0?<p className="text-xs text-[var(--text-muted)] flex-1">No tasks on this date</p>:selectedTasks.map(r=>{
               const t=taskById(r.task_id);
               const ed=editing[r.task_id];
-              return <div key={r.task_id} className="mb-2 p-2 bg-[#161b22] rounded border border-[#21262d] group">
+              return <div key={r.task_id} className="mb-2 p-2 bg-[var(--bg-secondary)] rounded border border-[var(--bg-tertiary)] group">
                 {ed ? (
                   <div className="flex flex-col gap-1">
-                    <input value={ed.title} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,title:e.target.value}}))} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]"/>
+                    <input value={ed.title} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,title:e.target.value}}))} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]"/>
                     <div className="flex gap-1">
-                      <input type="time" value={ed.time} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,time:e.target.value}}))} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]"/>
-                      <select value={ed.action} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,action:e.target.value}}))} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]"><option value="notify">🔔</option><option value="chat">💬</option></select>
-                      <select value={ed.rule} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,rule:e.target.value}}))} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]"><option value="none">once</option><option value="daily">daily</option><option value="weekly">weekly</option><option value="monthly">monthly</option></select>
+                      <input type="time" value={ed.time} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,time:e.target.value}}))} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]"/>
+                      <select value={ed.action} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,action:e.target.value}}))} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]"><option value="notify">🔔</option><option value="chat">💬</option></select>
+                      <select value={ed.rule} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,rule:e.target.value}}))} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]"><option value="none">once</option><option value="daily">daily</option><option value="weekly">weekly</option><option value="monthly">monthly</option></select>
                     </div>
-                    <input value={ed.payload} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,payload:e.target.value}}))} placeholder="payload (reminder text / prompt)" className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] placeholder-[#484f58]"/>
+                    <input value={ed.payload} onChange={e=>setEditing(p=>({...p,[r.task_id]:{...ed,payload:e.target.value}}))} placeholder="payload (reminder text / prompt)" className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)]"/>
                     <div className="flex gap-1">
                       <button onClick={()=>t&&saveEdit(t)} className="flex-1 bg-[#238636] hover:bg-[#2ea043] text-white rounded px-2 py-1 text-[10px]">Save</button>
-                      <button onClick={()=>setEditing(p=>{const n={...p};delete n[r.task_id];return n;})} className="flex-1 bg-[#30363d] hover:bg-[#484f58] text-[#e8eaed] rounded px-2 py-1 text-[10px]">Cancel</button>
+                      <button onClick={()=>setEditing(p=>{const n={...p};delete n[r.task_id];return n;})} className="flex-1 bg-[var(--border)] hover:bg-[var(--text-muted)] text-[var(--text-primary)] rounded px-2 py-1 text-[10px]">Cancel</button>
                     </div>
                   </div>
                 ) : (
                   <div>
                     <div className="flex items-start justify-between">
-                      <p className="text-xs text-[#e8eaed] flex-1">{r.action==='chat'?'💬':'🔔'} {r.title}</p>
+                      <p className="text-xs text-[var(--text-primary)] flex-1">{r.action==='chat'?'💬':'🔔'} {r.title}</p>
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={()=>t&&startEdit(t)} className="text-[10px] text-[#8b949e] hover:text-[#3380FF]">✎</button>
-                        <button onClick={()=>t&&handleToggleTask(t)} className={`text-[10px] ${t?.enabled?'text-[#3fb950]':'text-[#484f58]'}`}>{t?.enabled?'⏸':'▶'}</button>
-                        <button onClick={()=>handleDeleteTask(r.task_id)} className="text-[10px] text-[#484f58] hover:text-[#f85149]">×</button>
+                        <button onClick={()=>t&&startEdit(t)} className="text-[10px] text-[var(--text-secondary)] hover:text-[var(--accent)]">✎</button>
+                        <button onClick={()=>t&&handleToggleTask(t)} className={`text-[10px] ${t?.enabled?'text-[var(--success)]':'text-[var(--text-muted)]'}`}>{t?.enabled?'⏸':'▶'}</button>
+                        <button onClick={()=>handleDeleteTask(r.task_id)} className="text-[10px] text-[var(--text-muted)] hover:text-[var(--danger)]">×</button>
                       </div>
                     </div>
-                    <p className="text-[10px] text-[#8b949e]">⏰ {r.time} · {r.rule}{(t&&!t.enabled)?' · paused':''}</p>
-                    {t?.payload && <p className="text-[10px] text-[#484f58] truncate">{t.payload}</p>}
+                    <p className="text-[10px] text-[var(--text-secondary)]">⏰ {r.time} · {r.rule}{(t&&!t.enabled)?' · paused':''}</p>
+                    {t?.payload && <p className="text-[10px] text-[var(--text-muted)] truncate">{t.payload}</p>}
                   </div>
                 )}
               </div>;

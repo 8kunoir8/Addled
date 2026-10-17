@@ -234,9 +234,9 @@ export default function SkillsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <header className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+      <header className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
         <h1 className="text-sm font-semibold">Skills</h1>
-        <span className="text-xs text-[#8b949e]">
+        <span className="text-xs text-[var(--text-secondary)]">
           {wsState === 'connected' ? `${skills.length} skills · ${skills.filter(s => s.enabled).length} enabled` : 'Connecting…'}
         </span>
       </header>
@@ -244,9 +244,9 @@ export default function SkillsPage() {
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
         {/* Install + market search */}
         <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-4">
-            <h2 className="text-sm font-semibold text-[#e8eaed] mb-1">📥 Install a skill</h2>
-            <p className="text-xs text-[#8b949e] mb-3">
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
+            <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-1">📥 Install a skill</h2>
+            <p className="text-xs text-[var(--text-secondary)] mb-3">
               Paste a raw SKILL.md URL or a GitHub repo like <span className="font-mono">owner/repo</span>. Skills with scripts need opt-in before they can run.
             </p>
             <div className="flex gap-2">
@@ -255,10 +255,10 @@ export default function SkillsPage() {
                 onChange={(e) => setInstallInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') install(); }}
                 placeholder="https://…/SKILL.md  or  owner/repo"
-                className="flex-1 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF] font-mono text-xs"
+                className="flex-1 bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] font-mono text-xs"
               />
               <button onClick={install} disabled={!installInput.trim()}
-                className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium">
+                className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium">
                 Install
               </button>
             </div>
@@ -266,9 +266,9 @@ export default function SkillsPage() {
                 because it is the same job by a different route, not a
                 separate feature — a divider makes that visible without a
                 second heading competing for attention. */}
-            <div className="mt-3 pt-3 border-t border-[#21262d]">
+            <div className="mt-3 pt-3 border-t border-[var(--bg-tertiary)]">
               <div className="flex items-center gap-2">
-                <label className={`cursor-pointer bg-[#21262d] hover:bg-[#30363d] text-[#e8eaed] rounded-lg px-3 py-2 text-xs font-medium ${uploading ? 'opacity-50 cursor-wait' : ''}`}>
+                <label className={`cursor-pointer bg-[var(--bg-tertiary)] hover:bg-[var(--border)] text-[var(--text-primary)] rounded-lg px-3 py-2 text-xs font-medium ${uploading ? 'opacity-50 cursor-wait' : ''}`}>
                   {uploading ? 'Reading…' : '📦 Upload a .zip'}
                   <input
                     type="file"
@@ -285,14 +285,14 @@ export default function SkillsPage() {
                     }}
                   />
                 </label>
-                <span className="text-[10px] text-[#8b949e]">
+                <span className="text-[10px] text-[var(--text-secondary)]">
                   a skill folder zipped up — SKILL.md, plus any scripts or references
                 </span>
               </div>
 
               {clash && (
                 <div className="mt-3 rounded-md border border-[#9e6a03] bg-[#2d2305] px-3 py-2">
-                  <p className="text-xs text-[#d29922]">
+                  <p className="text-xs text-[var(--warning)]">
                     A skill named <span className="font-mono">{clash.name}</span> is already installed.
                     {' '}Its files will be replaced.
                   </p>
@@ -302,7 +302,7 @@ export default function SkillsPage() {
                       Replace it
                     </button>
                     <button onClick={() => setClash(null)}
-                      className="text-xs px-3 py-1 rounded bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9]">
+                      className="text-xs px-3 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border)] text-[var(--text-primary)]">
                       Keep the existing one
                     </button>
                   </div>
@@ -311,9 +311,9 @@ export default function SkillsPage() {
             </div>
           </div>
 
-          <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-4">
-            <h2 className="text-sm font-semibold text-[#e8eaed] mb-1">🔎 Search skill markets</h2>
-            <p className="text-xs text-[#8b949e] mb-3">
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
+            <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-1">🔎 Search skill markets</h2>
+            <p className="text-xs text-[var(--text-secondary)] mb-3">
               Finds SKILL.md skills in public GitHub markets (topic: claude-skills) and ranks them locally.
             </p>
             <div className="flex gap-2">
@@ -322,25 +322,25 @@ export default function SkillsPage() {
                 onChange={(e) => setMarketQuery(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') searchMarket(); }}
                 placeholder="e.g. pdf processing, image compression"
-                className="flex-1 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"
+                className="flex-1 bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
               />
               <button onClick={searchMarket} disabled={!marketQuery.trim() || searching}
-                className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium">
+                className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium">
                 {searching ? '⟳' : 'Search'}
               </button>
             </div>
             {candidates.length > 0 && (
               <div className="mt-3 space-y-1.5">
                 {candidates.map((c) => (
-                  <div key={c.repo} className="flex items-center justify-between gap-2 bg-[#0d1117] border border-[#21262d] rounded-md px-3 py-2">
+                  <div key={c.repo} className="flex items-center justify-between gap-2 bg-[var(--bg-primary)] border border-[var(--bg-tertiary)] rounded-md px-3 py-2">
                     <div className="min-w-0">
-                      <p className="text-xs text-[#e8eaed] truncate">{c.name} <span className="text-[#484f58] font-mono">({c.repo})</span></p>
-                      {c.description && <p className="text-[10px] text-[#8b949e] truncate">{c.description}</p>}
+                      <p className="text-xs text-[var(--text-primary)] truncate">{c.name} <span className="text-[var(--text-muted)] font-mono">({c.repo})</span></p>
+                      {c.description && <p className="text-[10px] text-[var(--text-secondary)] truncate">{c.description}</p>}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-[10px] text-[#d29922]">{Math.round((c.similarity || 0) * 100)}%</span>
+                      <span className="text-[10px] text-[var(--warning)]">{Math.round((c.similarity || 0) * 100)}%</span>
                       <button onClick={() => installCandidate(c)}
-                        className="text-xs px-2 py-1 rounded bg-[#21262d] hover:bg-[#30363d] text-[#3380FF]">
+                        className="text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border)] text-[var(--accent)]">
                         Install
                       </button>
                     </div>
@@ -351,49 +351,49 @@ export default function SkillsPage() {
           </div>
         </section>
 
-        {msg && <p className={`text-xs ${msg.ok ? 'text-[#3fb950]' : 'text-[#f85149]'}`}>{msg.text}</p>}
+        {msg && <p className={`text-xs ${msg.ok ? 'text-[var(--success)]' : 'text-[var(--danger)]'}`}>{msg.text}</p>}
 
-        {loading && <p className="text-sm text-[#8b949e]">Loading skills…</p>}
+        {loading && <p className="text-sm text-[var(--text-secondary)]">Loading skills…</p>}
 
         {/* Skill groups */}
         {Object.entries(groups).map(([category, list]) => (
           <section key={category}>
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-[#8b949e] mb-2">
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-2">
               {category} ({list.length})
             </h2>
             <div className="space-y-1.5">
               {list.map((s) => (
                 <div key={s.name}
-                  className={`flex items-start gap-3 rounded-lg border p-3 ${s.enabled ? 'border-[#30363d] bg-[#161b22]' : 'border-[#21262d] bg-[#0d1117] opacity-70'}`}>
+                  className={`flex items-start gap-3 rounded-lg border p-3 ${s.enabled ? 'border-[var(--border)] bg-[var(--bg-secondary)]' : 'border-[var(--bg-tertiary)] bg-[var(--bg-primary)] opacity-70'}`}>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium text-[#e8eaed] font-mono">{s.name}</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#1f2937] text-[#58a6ff]">
+                      <span className="text-sm font-medium text-[var(--text-primary)] font-mono">{s.name}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#1f2937] text-[var(--accent-hover)]">
                         {SOURCE_LABELS[s.source] || s.source}
                       </span>
                       {s.requires_approval && !s.always_allowed && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#2d1f1f] text-[#f0883e]">⚠ approval</span>
                       )}
                       {s.always_allowed && s.requires_approval && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#12261e] text-[#3fb950]">✓ always allowed</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#12261e] text-[var(--success)]">✓ always allowed</span>
                       )}
                       {s.session_allowed && !s.always_allowed && s.requires_approval && (
                         <span
                           title="Allowed until Addled restarts. It is not written to disk, so the prompt comes back when the app does."
-                          className="text-[10px] px-1.5 py-0.5 rounded bg-[#2d2416] text-[#d29922] cursor-help">
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-[#2d2416] text-[var(--warning)] cursor-help">
                           ✓ allowed this session
                         </span>
                       )}
                       {s.code_changed && (
                         <span
                           title="You allowed this skill, but its files are not the ones you allowed — reinstalling or editing a skill clears its permission on purpose."
-                          className="text-[10px] px-1.5 py-0.5 rounded bg-[#2d2416] text-[#d29922] cursor-help">
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-[#2d2416] text-[var(--warning)] cursor-help">
                           ⚠ code changed
                         </span>
                       )}
-                      {!s.enabled && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#30363d] text-[#8b949e]">off</span>}
+                      {!s.enabled && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--border)] text-[var(--text-secondary)]">off</span>}
                     </div>
-                    {s.description && <p className="text-xs text-[#8b949e] mt-1 break-words">{s.description}</p>}
+                    {s.description && <p className="text-xs text-[var(--text-secondary)] mt-1 break-words">{s.description}</p>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {/* Only shown for a skill that actually asks. A switch on
@@ -411,8 +411,8 @@ export default function SkillsPage() {
                             : `Always allow ${s.name}`}
                           className={`text-[10px] px-2 py-1 rounded border transition-colors ${
                             s.always_allowed
-                              ? 'border-[#3fb95055] bg-[#12261e] text-[#3fb950]'
-                              : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58]'
+                              ? 'border-[#3fb95055] bg-[#12261e] text-[var(--success)]'
+                              : 'border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)]'
                           }`}>
                           {s.always_allowed ? '✓ Always' : 'Always allow'}
                         </button>
@@ -431,8 +431,8 @@ export default function SkillsPage() {
                             : `Allow ${s.name} for this session`}
                           className={`text-[10px] px-2 py-1 rounded border transition-colors ${
                             s.session_allowed
-                              ? 'border-[#d2992255] bg-[#2d2416] text-[#d29922]'
-                              : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58]'
+                              ? 'border-[#d2992255] bg-[#2d2416] text-[var(--warning)]'
+                              : 'border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)]'
                           }`}>
                           {s.session_allowed ? '✓ Session' : 'Allow session'}
                         </button>
@@ -440,12 +440,12 @@ export default function SkillsPage() {
                     )}
                     <button onClick={() => toggle(s.name, !s.enabled)}
                       title={s.enabled ? 'Turn off' : 'Turn on'}
-                      className={`w-9 h-5 rounded-full transition-colors ${s.enabled ? 'bg-[#3380FF]' : 'bg-[#30363d]'}`}>
+                      className={`w-9 h-5 rounded-full transition-colors ${s.enabled ? 'bg-[var(--accent)]' : 'bg-[var(--border)]'}`}>
                       <div className={`w-4 h-4 bg-white rounded-full transition-transform ${s.enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
                     </button>
                     {s.deletable && (
                       <button onClick={() => remove(s.name)} title="Delete skill"
-                        className="text-[#8b949e] hover:text-[#f85149] text-sm px-1">✕</button>
+                        className="text-[var(--text-secondary)] hover:text-[var(--danger)] text-sm px-1">✕</button>
                     )}
                   </div>
                 </div>

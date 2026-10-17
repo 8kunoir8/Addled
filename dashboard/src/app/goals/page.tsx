@@ -45,38 +45,38 @@ interface Agent {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  pending: 'bg-[#30363d] text-[#8b949e]',
-  in_progress: 'bg-[#1f6feb22] text-[#58a6ff]',
-  completed: 'bg-[#3fb95022] text-[#3fb950]',
-  failed: 'bg-[#f8514922] text-[#f85149]',
-  cancelled: 'bg-[#f8514922] text-[#f85149]',
+  pending: 'bg-[var(--border)] text-[var(--text-secondary)]',
+  in_progress: 'bg-[var(--accent-soft)] text-[var(--accent-hover)]',
+  completed: 'bg-[#3fb95022] text-[var(--success)]',
+  failed: 'bg-[#f8514922] text-[var(--danger)]',
+  cancelled: 'bg-[#f8514922] text-[var(--danger)]',
 };
 
 const PRIORITY_COLORS: Record<string, string> = {
-  low: 'text-[#8b949e]',
-  normal: 'text-[#e8eaed]',
-  high: 'text-[#d29922]',
-  urgent: 'text-[#f85149]',
+  low: 'text-[var(--text-secondary)]',
+  normal: 'text-[var(--text-primary)]',
+  high: 'text-[var(--warning)]',
+  urgent: 'text-[var(--danger)]',
 };
 
 // Mirrors the swarm page's dot colours, so an agent reads the same here as it
 // does on the Agents tab.
 const STATUS_DOT: Record<string, string> = {
-  offline: 'bg-[#484f58]',
-  ready: 'bg-[#3fb950]',
-  running: 'bg-[#d29922] animate-pulse',
-  error: 'bg-[#f85149]',
+  offline: 'bg-[var(--text-muted)]',
+  ready: 'bg-[var(--success)]',
+  running: 'bg-[var(--warning)] animate-pulse',
+  error: 'bg-[var(--danger)]',
 };
 
 // A step's status is not the same scale as an agent's. Kept separate so a
 // completed step cannot be read as a running agent.
 const STEP_COLORS: Record<string, string> = {
-  pending: 'text-[#8b949e] bg-[#21262d]',
-  in_progress: 'text-[#58a6ff] bg-[#1f6feb22]',
-  completed: 'text-[#3fb950] bg-[#3fb95022]',
-  failed: 'text-[#f85149] bg-[#f8514922]',
-  blocked: 'text-[#d29922] bg-[#d2992222]',
-  skipped: 'text-[#8b949e] bg-[#21262d]',
+  pending: 'text-[var(--text-secondary)] bg-[var(--bg-tertiary)]',
+  in_progress: 'text-[var(--accent-hover)] bg-[var(--accent-soft)]',
+  completed: 'text-[var(--success)] bg-[#3fb95022]',
+  failed: 'text-[var(--danger)] bg-[#f8514922]',
+  blocked: 'text-[var(--warning)] bg-[#d2992222]',
+  skipped: 'text-[var(--text-secondary)] bg-[var(--bg-tertiary)]',
 };
 
 function ProgressBar({ steps }: { steps: PlanStep[] }) {
@@ -89,11 +89,11 @@ function ProgressBar({ steps }: { steps: PlanStep[] }) {
   return (
     <div className="w-full">
       <div className="flex items-center justify-between mb-1">
-        <span className="text-xs text-[#8b949e]">{done} / {total} steps</span>
-        <span className="text-xs text-[#8b949e]">{pct}%</span>
+        <span className="text-xs text-[var(--text-secondary)]">{done} / {total} steps</span>
+        <span className="text-xs text-[var(--text-secondary)]">{pct}%</span>
       </div>
-      <div className="w-full h-2 bg-[#21262d] rounded-full overflow-hidden">
-        <div className="h-full bg-[#3380FF] transition-all duration-500" style={{ width: `${pct}%` }} />
+      <div className="w-full h-2 bg-[var(--bg-tertiary)] rounded-full overflow-hidden">
+        <div className="h-full bg-[var(--accent)] transition-all duration-500" style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
@@ -101,27 +101,27 @@ function ProgressBar({ steps }: { steps: PlanStep[] }) {
 
 function StepRow({ step, agent }: { step: PlanStep; agent?: Agent }) {
   return (
-    <div className="bg-[#0d1117] rounded-md px-2 py-1.5">
+    <div className="bg-[var(--bg-primary)] rounded-md px-2 py-1.5">
       <div className="flex items-start gap-2">
-        <span className="text-xs text-[#484f58] w-4 shrink-0 pt-0.5">{step.index}</span>
+        <span className="text-xs text-[var(--text-muted)] w-4 shrink-0 pt-0.5">{step.index}</span>
         <span className={`text-xs px-1.5 py-0.5 rounded shrink-0 ${STEP_COLORS[step.status] || STEP_COLORS.pending}`}>
           {step.status.replace('_', ' ')}
         </span>
         <div className="flex-1 min-w-0">
-          <p className="text-xs text-[#e8eaed] break-words">{step.description}</p>
+          <p className="text-xs text-[var(--text-primary)] break-words">{step.description}</p>
           <div className="flex items-center gap-1.5 mt-1 flex-wrap">
             {step.agent && (<span className={`w-2 h-2 rounded-full shrink-0 ${STATUS_DOT[agent?.status || 'ready'] || STATUS_DOT.ready}`} />)}
-            <span className="text-xs text-[#8b949e]">
+            <span className="text-xs text-[var(--text-secondary)]">
               {step.kind === 'action' ? '[action]' : (step.agent ? `[agent] ${step.agent}` : `[agent] role: ${step.role || 'general'}`)}
             </span>
             {/* The desk's live state: the difference between "assigned to a
                 researcher" and "the researcher is working on it now". */}
-            {step.agent && agent && <span className="text-xs text-[#484f58]">· {agent.status}</span>}
+            {step.agent && agent && <span className="text-xs text-[var(--text-muted)]">· {agent.status}</span>}
           </div>
           {step.agent && agent?.currentTask && (
-            <p className="text-xs text-[#58a6ff] mt-1 truncate">📋 {agent.currentTask}</p>
+            <p className="text-xs text-[var(--accent-hover)] mt-1 truncate">📋 {agent.currentTask}</p>
           )}
-          {step.error && <p className="text-xs text-[#f85149] mt-1 break-words">⚠ {step.error}</p>}
+          {step.error && <p className="text-xs text-[var(--danger)] mt-1 break-words">⚠ {step.error}</p>}
         </div>
       </div>
     </div>
@@ -286,12 +286,12 @@ export default function GoalsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <header className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+      <header className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
         <h1 className="text-sm font-semibold">Goals</h1>
         <div className="flex gap-2">
           {['all','pending','in_progress','completed','failed'].map(f => (
             <button key={f} onClick={() => setFilter(f)}
-              className={`text-xs px-2 py-1 rounded-md transition-colors ${filter===f ? 'bg-[#1f6feb] text-white' : 'text-[#8b949e] hover:bg-[#21262d]'}`}>
+              className={`text-xs px-2 py-1 rounded-md transition-colors ${filter===f ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]'}`}>
               {f.replace('_',' ')}
             </button>
           ))}
@@ -300,18 +300,18 @@ export default function GoalsPage() {
 
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {/* Create goal */}
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+        <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg p-4">
           <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Goal title..."
-            className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] mb-2 focus:outline-none focus:border-[#3380FF]"/>
+            className="w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] mb-2 focus:outline-none focus:border-[var(--accent)]"/>
           <textarea value={description} onChange={e=>setDescription(e.target.value)} placeholder="Describe what you want to accomplish..." rows={2}
-            className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] mb-3 focus:outline-none focus:border-[#3380FF] resize-none"/>
+            className="w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] mb-3 focus:outline-none focus:border-[var(--accent)] resize-none"/>
           <div className="flex items-center justify-between">
             <select value={priority} onChange={e=>setPriority(e.target.value)}
-              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]">
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]">
               <option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option>
             </select>
             <button onClick={handleCreate} disabled={!title.trim()||creating||wsState!=='connected'}
-              className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-lg px-4 py-1.5 text-sm font-medium transition-colors">
+              className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded-lg px-4 py-1.5 text-sm font-medium transition-colors">
               {creating ? 'Creating...' : 'Create Goal'}
             </button>
           </div>
@@ -319,7 +319,7 @@ export default function GoalsPage() {
 
         {/* Goal list */}
         {filtered.length === 0 ? (
-          <div className="text-center py-12 text-[#8b949e]">
+          <div className="text-center py-12 text-[var(--text-secondary)]">
             <span className="text-4xl mb-3 block">🎯</span>
             <p className="text-sm">{goals.length === 0 ? 'No goals yet. Create one above!' : 'No goals match this filter.'}</p>
           </div>
@@ -328,21 +328,21 @@ export default function GoalsPage() {
             const open = expandedId === goal.id;
             return (
               <div key={goal.id}
-                className={`bg-[#161b22] border border-[#30363d] rounded-lg p-4 cursor-pointer transition-colors hover:border-[#484f58] ${open ? 'border-[#3380FF]' : ''}`}
+                className={`bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg p-4 cursor-pointer transition-colors hover:border-[var(--text-muted)] ${open ? 'border-[var(--accent)]' : ''}`}
                 onClick={() => setExpandedId(open ? null : goal.id)}>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_COLORS[goal.status] || STATUS_COLORS.pending}`}>{goal.status.replace('_',' ')}</span>
                     <span className={`text-xs font-medium ${PRIORITY_COLORS[goal.priority]}`}>- {goal.priority}</span>
                     {goal.rounds > 1 && (
-                      <span className="text-xs text-[#d29922]" title="The plan was rewritten this many times">
+                      <span className="text-xs text-[var(--warning)]" title="The plan was rewritten this many times">
                         round {goal.rounds} of 3
                       </span>
                     )}
                   </div>
-                  <span className="text-xs text-[#484f58]">{new Date(goal.createdAt).toLocaleDateString()}</span>
+                  <span className="text-xs text-[var(--text-muted)]">{new Date(goal.createdAt).toLocaleDateString()}</span>
                 </div>
-                <h3 className="text-sm font-medium text-[#e8eaed] mt-2">{goal.title}</h3>
+                <h3 className="text-sm font-medium text-[var(--text-primary)] mt-2">{goal.title}</h3>
 
                 {/* Shown collapsed too, so a running goal is legible from the
                     list without opening it. */}
@@ -353,23 +353,23 @@ export default function GoalsPage() {
                 )}
 
                 {open && goal.description && (
-                  <p className="text-xs text-[#8b949e] mt-3">{goal.description}</p>
+                  <p className="text-xs text-[var(--text-secondary)] mt-3">{goal.description}</p>
                 )}
 
                 {open && (
-                  <div className="mt-3 pt-3 border-t border-[#21262d] space-y-3">
+                  <div className="mt-3 pt-3 border-t border-[var(--bg-tertiary)] space-y-3">
                     {/* Plan, and who is running each step */}
                     <div>
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-semibold text-[#8b949e] uppercase tracking-wide">Plan</span>
-                        <span className="text-xs text-[#484f58]">
+                        <span className="text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wide">Plan</span>
+                        <span className="text-xs text-[var(--text-muted)]">
                           {goal.planKind === 'fallback'
                             ? 'fallback - no usable plan was produced'
                             : `${goal.steps.length} steps`}
                         </span>
                       </div>
                       {goal.steps.length === 0 ? (
-                        <p className="text-xs text-[#484f58]">No plan yet.</p>
+                        <p className="text-xs text-[var(--text-muted)]">No plan yet.</p>
                       ) : (
                         <div className="space-y-1.5">
                           {goal.steps.map(step => (
@@ -385,18 +385,18 @@ export default function GoalsPage() {
                         nothing, so the output is surfaced, not just the status. */}
                     {goal.findings.length > 0 && (
                       <div>
-                        <span className="text-xs font-semibold text-[#8b949e] uppercase tracking-wide">Findings</span>
+                        <span className="text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wide">Findings</span>
                         <div className="space-y-1.5 mt-2">
                           {goal.findings.map((f, i) => (
-                            <div key={i} className="bg-[#0d1117] rounded-md px-2 py-1.5">
+                            <div key={i} className="bg-[var(--bg-primary)] rounded-md px-2 py-1.5">
                               <div className="flex items-center gap-2">
-                                <span className="text-xs text-[#484f58]">step {f.step ?? '?'}</span>
-                                <span className="text-xs text-[#8b949e]">{f.role}</span>
+                                <span className="text-xs text-[var(--text-muted)]">step {f.step ?? '?'}</span>
+                                <span className="text-xs text-[var(--text-secondary)]">{f.role}</span>
                                 {typeof f.round === 'number' && f.round > 1 && (
-                                  <span className="text-xs text-[#d29922]">round {f.round}</span>
+                                  <span className="text-xs text-[var(--warning)]">round {f.round}</span>
                                 )}
                               </div>
-                              <p className="text-xs text-[#e8eaed] mt-1 whitespace-pre-wrap break-words">{f.output}</p>
+                              <p className="text-xs text-[var(--text-primary)] mt-1 whitespace-pre-wrap break-words">{f.output}</p>
                             </div>
                           ))}
                         </div>
@@ -405,11 +405,11 @@ export default function GoalsPage() {
 
                     <div className="flex gap-2 pt-1">
                       {goal.status === 'pending' && <button onClick={(e) => handleStart(goal.id, e)}
-                        className="text-xs px-3 py-1 bg-[#1f6feb] text-white rounded hover:bg-[#388bfd]">Start</button>}
+                        className="text-xs px-3 py-1 bg-[var(--accent)] text-white rounded hover:bg-[#388bfd]">Start</button>}
                       {goal.status === 'in_progress' && <button onClick={(e) => handleCancel(goal.id, e)}
-                        className="text-xs px-3 py-1 bg-[#d29922] text-black rounded hover:bg-[#e2a93b]">Pause</button>}
+                        className="text-xs px-3 py-1 bg-[var(--warning)] text-black rounded hover:bg-[#e2a93b]">Pause</button>}
                       {(goal.status === 'pending' || goal.status === 'in_progress') && <button onClick={(e) => handleCancel(goal.id, e)}
-                        className="text-xs px-3 py-1 bg-[#f85149] text-white rounded hover:bg-[#ff6a63]">Cancel</button>}
+                        className="text-xs px-3 py-1 bg-[var(--danger)] text-white rounded hover:bg-[#ff6a63]">Cancel</button>}
                     </div>
                   </div>
                 )}

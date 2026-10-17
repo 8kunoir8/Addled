@@ -27,7 +27,7 @@ interface SkillInfo {
   source: string;
 }
 
-const CARD = 'rounded-lg border border-[#30363d] bg-[#161b22] p-4';
+const CARD = 'rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-4';
 
 export default function GuideSection(
   { send, connected }: { send: (m: string, p?: any) => Promise<any>; connected: boolean },
@@ -155,8 +155,8 @@ export default function GuideSection(
     return (
       <div key={need.flag}
         className="mt-3 flex items-start gap-2 rounded-md border border-[#5a4a1d] bg-[#2a2410] px-3 py-2">
-        <span className="text-[#d29922] text-xs shrink-0">⚠</span>
-        <p className="text-xs text-[#d29922]">{need.label}</p>
+        <span className="text-[var(--warning)] text-xs shrink-0">⚠</span>
+        <p className="text-xs text-[var(--warning)]">{need.label}</p>
       </div>
     );
   };
@@ -169,8 +169,8 @@ export default function GuideSection(
         title={live?.description || 'Not in the current catalogue'}
         className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
           live
-            ? (live.enabled ? 'bg-[#1f2937] text-[#58a6ff]' : 'bg-[#30363d] text-[#8b949e]')
-            : 'bg-[#30363d] text-[#484f58]'
+            ? (live.enabled ? 'bg-[#1f2937] text-[var(--accent-hover)]' : 'bg-[var(--border)] text-[var(--text-secondary)]')
+            : 'bg-[var(--border)] text-[var(--text-muted)]'
         }`}
       >
         {name}{live && !live.enabled ? ' · off' : ''}
@@ -182,7 +182,7 @@ export default function GuideSection(
     <div className="space-y-4">
       {/* ---- header ---- */}
       <div className="max-w-3xl">
-        <p className="text-xs text-[#8b949e] px-1">
+        <p className="text-xs text-[var(--text-secondary)] px-1">
           What Addled can do, and how to use each part of it. Every feature here links to the
           page you use it from or the Settings tab that changes it, so this page explains
           rather than duplicates. Version {APP_VERSION}.
@@ -193,24 +193,24 @@ export default function GuideSection(
         value={query}
         onChange={e => setQuery(e.target.value)}
         placeholder="Search the guide — a feature, a setting, or a skill name…"
-        className="w-full max-w-3xl bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"
+        className="w-full max-w-3xl bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
       />
 
       {/* ---- this machine ---- */}
       {status && (
         <div className={`${CARD} max-w-3xl`}>
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-[#8b949e] mb-3">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-3">
             On this machine
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
             {machineRows.map(row => (
               <div key={row.label}
-                className="flex items-start gap-2 py-1.5 border-b border-[#21262d] last:border-0">
+                className="flex items-start gap-2 py-1.5 border-b border-[var(--bg-tertiary)] last:border-0">
                 <span className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${
-                  row.ok ? 'bg-[#3fb950]' : 'bg-[#d29922]'}`} />
+                  row.ok ? 'bg-[var(--success)]' : 'bg-[var(--warning)]'}`} />
                 <div className="min-w-0">
-                  <p className="text-xs text-[#e8eaed]">{row.label}</p>
-                  <p className="text-[11px] text-[#8b949e] truncate">{row.detail}</p>
+                  <p className="text-xs text-[var(--text-primary)]">{row.label}</p>
+                  <p className="text-[11px] text-[var(--text-secondary)] truncate">{row.detail}</p>
                 </div>
               </div>
             ))}
@@ -218,7 +218,7 @@ export default function GuideSection(
         </div>
       )}
       {!status && (
-        <p className="max-w-3xl text-xs text-[#d29922]">
+        <p className="max-w-3xl text-xs text-[var(--warning)]">
           {!connected
             ? 'Live status is unavailable because the backend is not connected. The explanations below are unaffected.'
             : statusMissing
@@ -237,14 +237,14 @@ export default function GuideSection(
                 onClick={() => goTo(entry.id)}
                 className={`w-full text-left px-2 py-1.5 rounded-md text-xs transition-colors ${
                   activeId === entry.id
-                    ? 'bg-[#1f6feb] text-white'
-                    : 'text-[#8b949e] hover:bg-[#21262d] hover:text-[#e8eaed]'}`}
+                    ? 'bg-[var(--accent)] text-white'
+                    : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'}`}
               >
                 <span className="mr-1.5">{entry.icon}</span>{entry.title}
               </button>
             ))}
             {!shown.length && (
-              <p className="px-2 text-[11px] text-[#484f58]">Nothing matches.</p>
+              <p className="px-2 text-[11px] text-[var(--text-muted)]">Nothing matches.</p>
             )}
           </div>
         </nav>
@@ -253,24 +253,24 @@ export default function GuideSection(
         <div className="flex-1 min-w-0 max-w-3xl space-y-5">
           {skillHits.length > 0 && (
             <div className={CARD}>
-              <h2 className="text-xs font-semibold uppercase tracking-wide text-[#8b949e] mb-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-2">
                 Skills matching “{query.trim()}”
               </h2>
               {skillHits.map(skill => (
-                <div key={skill.name} className="py-1.5 border-b border-[#21262d] last:border-0">
+                <div key={skill.name} className="py-1.5 border-b border-[var(--bg-tertiary)] last:border-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono text-[#e8eaed]">{skill.name}</span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#1f2937] text-[#58a6ff]">
+                    <span className="text-xs font-mono text-[var(--text-primary)]">{skill.name}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#1f2937] text-[var(--accent-hover)]">
                       {skill.category}
                     </span>
                     {!skill.enabled && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#30363d] text-[#8b949e]">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--border)] text-[var(--text-secondary)]">
                         off
                       </span>
                     )}
                   </div>
                   {skill.description && (
-                    <p className="text-xs text-[#8b949e] mt-0.5 break-words">{skill.description}</p>
+                    <p className="text-xs text-[var(--text-secondary)] mt-0.5 break-words">{skill.description}</p>
                   )}
                 </div>
               ))}
@@ -278,7 +278,7 @@ export default function GuideSection(
           )}
 
           {!shown.length && (
-            <p className="text-sm text-[#8b949e]">
+            <p className="text-sm text-[var(--text-secondary)]">
               No feature matches “{query.trim()}”. Try a shorter word, or clear the box to see
               everything.
             </p>
@@ -291,20 +291,20 @@ export default function GuideSection(
               ref={node => { refs.current[entry.id] = node; }}
               className={`${CARD} scroll-mt-4`}
             >
-              <h2 className="text-sm font-semibold text-[#e8eaed]">
+              <h2 className="text-sm font-semibold text-[var(--text-primary)]">
                 <span className="mr-2">{entry.icon}</span>{entry.title}
               </h2>
-              <p className="text-xs text-[#8b949e] mt-0.5">{entry.summary}</p>
+              <p className="text-xs text-[var(--text-secondary)] mt-0.5">{entry.summary}</p>
 
-              <p className="text-sm text-[#c9d1d9] mt-3">{entry.what}</p>
+              <p className="text-sm text-[var(--text-primary)] mt-3">{entry.what}</p>
 
-              <h3 className="text-[10px] font-semibold uppercase tracking-wide text-[#8b949e] mt-4 mb-1.5">
+              <h3 className="text-[10px] font-semibold uppercase tracking-wide text-[var(--text-secondary)] mt-4 mb-1.5">
                 How to use it
               </h3>
               <ol className="space-y-1.5">
                 {entry.how.map((step, index) => (
-                  <li key={index} className="flex gap-2 text-sm text-[#c9d1d9]">
-                    <span className="text-[#484f58] shrink-0 w-4 text-right">{index + 1}.</span>
+                  <li key={index} className="flex gap-2 text-sm text-[var(--text-primary)]">
+                    <span className="text-[var(--text-muted)] shrink-0 w-4 text-right">{index + 1}.</span>
                     <span>{step}</span>
                   </li>
                 ))}
@@ -314,16 +314,16 @@ export default function GuideSection(
 
               {(entry.routes || entry.settingsTabs) && (
                 <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <span className="text-[10px] uppercase tracking-wide text-[#484f58]">Where</span>
+                  <span className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Where</span>
                   {(entry.routes || []).map(route => (
                     <Link key={route.href} href={route.href}
-                      className="text-[11px] px-2 py-1 rounded border border-[#30363d] text-[#58a6ff] hover:border-[#484f58]">
+                      className="text-[11px] px-2 py-1 rounded border border-[var(--border)] text-[var(--accent-hover)] hover:border-[var(--text-muted)]">
                       Open {route.label} →
                     </Link>
                   ))}
                   {(entry.settingsTabs || []).map(tab => (
                     <Link key={tab} href={`/settings?section=${tab}`}
-                      className="text-[11px] px-2 py-1 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58]">
+                      className="text-[11px] px-2 py-1 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)]">
                       Settings → {tab.charAt(0).toUpperCase() + tab.slice(1)}
                     </Link>
                   ))}
@@ -332,45 +332,45 @@ export default function GuideSection(
 
               {(entry.skills || []).length > 0 && (
                 <div className="mt-3 flex flex-wrap items-center gap-1.5">
-                  <span className="text-[10px] uppercase tracking-wide text-[#484f58]">Skills</span>
+                  <span className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Skills</span>
                   {(entry.skills || []).map(skillChip)}
                 </div>
               )}
 
               {entry.showSkillCatalogue && (
                 <div className="mt-4">
-                  <h3 className="text-[10px] font-semibold uppercase tracking-wide text-[#8b949e] mb-2">
+                  <h3 className="text-[10px] font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-2">
                     Everything installed
                     {skills.length > 0 && (
-                      <span className="ml-2 normal-case tracking-normal text-[#484f58]">
+                      <span className="ml-2 normal-case tracking-normal text-[var(--text-muted)]">
                         {skills.length} skills · {skills.filter(s => s.enabled).length} enabled
                       </span>
                     )}
                   </h3>
                   {!skills.length && (
-                    <p className="text-xs text-[#8b949e]">
+                    <p className="text-xs text-[var(--text-secondary)]">
                       The catalogue needs the backend. Open the Skills page to see it, or reconnect.
                     </p>
                   )}
                   <div className="space-y-3">
                     {skillsByCategory.map(([category, list]) => (
                       <div key={category}>
-                        <p className="text-[11px] text-[#58a6ff] mb-1">
-                          {category} <span className="text-[#484f58]">({list.length})</span>
+                        <p className="text-[11px] text-[var(--accent-hover)] mb-1">
+                          {category} <span className="text-[var(--text-muted)]">({list.length})</span>
                         </p>
                         {list.map(skill => (
                           <div key={skill.name}
-                            className="py-1 border-b border-[#21262d] last:border-0">
+                            className="py-1 border-b border-[var(--bg-tertiary)] last:border-0">
                             <div className="flex items-center gap-2">
-                              <span className="text-xs font-mono text-[#e8eaed]">{skill.name}</span>
+                              <span className="text-xs font-mono text-[var(--text-primary)]">{skill.name}</span>
                               {!skill.enabled && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#30363d] text-[#8b949e]">
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--border)] text-[var(--text-secondary)]">
                                   off
                                 </span>
                               )}
                             </div>
                             {skill.description && (
-                              <p className="text-[11px] text-[#8b949e] break-words">
+                              <p className="text-[11px] text-[var(--text-secondary)] break-words">
                                 {skill.description}
                               </p>
                             )}
@@ -386,15 +386,15 @@ export default function GuideSection(
 
           {/* ---- honest limits ---- */}
           {!needle && (
-            <section className={`${CARD} border-[#30363d]`}>
-              <h2 className="text-sm font-semibold text-[#e8eaed]">Known limits</h2>
-              <p className="text-xs text-[#8b949e] mt-0.5">
+            <section className={`${CARD} border-[var(--border)]`}>
+              <h2 className="text-sm font-semibold text-[var(--text-primary)]">Known limits</h2>
+              <p className="text-xs text-[var(--text-secondary)] mt-0.5">
                 Worth knowing before you plan around any of the above.
               </p>
               <ul className="mt-3 space-y-2">
                 {LIMITS.map((limit, index) => (
-                  <li key={index} className="flex gap-2 text-sm text-[#c9d1d9]">
-                    <span className="text-[#484f58] shrink-0">•</span>
+                  <li key={index} className="flex gap-2 text-sm text-[var(--text-primary)]">
+                    <span className="text-[var(--text-muted)] shrink-0">•</span>
                     <span>{limit}</span>
                   </li>
                 ))}

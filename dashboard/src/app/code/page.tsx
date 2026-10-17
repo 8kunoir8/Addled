@@ -169,11 +169,12 @@ function extensionsFor(language: string) {
   }
 }
 
-// The dashboard is dark already; oneDark supplies the token colours and this
-// overrides the chrome so the editor sits on the same #0d1117 as the rest of
-// the page instead of oneDark's own grey.
+// oneDark supplies the token colours; this overrides the chrome so the editor
+// sits on the theme background rather than oneDark's own grey. The values are
+// CSS variables, not literals, so Settings -> Appearance recolours the editor
+// along with the rest of the page.
 const chrome = EditorView.theme({
-  '&': { backgroundColor: '#0d1117', color: '#e8eaed', height: '100%' },
+  '&': { backgroundColor: 'var(--bg-primary)', color: 'var(--text-primary)', height: '100%' },
   '.cm-scroller': {
     // `overflow: auto` on the scroller is what gives the editor its scrollbars.
     // Without it a long file could not be scrolled at all, and `.cm-content`
@@ -184,21 +185,21 @@ const chrome = EditorView.theme({
     fontSize: '12.5px',
     lineHeight: '1.6',
   },
-  '.cm-gutters': { backgroundColor: '#0d1117', color: '#484f58', border: 'none' },
-  '.cm-activeLine': { backgroundColor: '#161b2255' },
-  '.cm-activeLineGutter': { backgroundColor: '#161b22', color: '#8b949e' },
-  '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#58a6ff' },
+  '.cm-gutters': { backgroundColor: 'var(--bg-primary)', color: 'var(--text-muted)', border: 'none' },
+  '.cm-activeLine': { backgroundColor: 'var(--bg-secondary)' },
+  '.cm-activeLineGutter': { backgroundColor: 'var(--bg-secondary)', color: 'var(--text-secondary)' },
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)' },
   '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection': {
-    backgroundColor: '#1f6feb55',
+    backgroundColor: 'var(--accent-soft)',
   },
-  '.cm-panels': { backgroundColor: '#161b22', color: '#e8eaed', borderColor: '#30363d' },
+  '.cm-panels': { backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', borderColor: 'var(--border)' },
   '.cm-panel input, .cm-panel button': {
-    backgroundColor: '#0d1117', color: '#e8eaed',
-    border: '1px solid #30363d', borderRadius: '4px', padding: '2px 6px',
+    backgroundColor: 'var(--bg-primary)', color: 'var(--text-primary)',
+    border: '1px solid var(--border)', borderRadius: '4px', padding: '2px 6px',
   },
-  '.cm-searchMatch': { backgroundColor: '#f2cc6022', outline: '1px solid #f2cc6044' },
-  '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: '#3380ff55' },
-  '.cm-tooltip': { backgroundColor: '#161b22', border: '1px solid #30363d' },
+  '.cm-searchMatch': { backgroundColor: 'rgba(210,153,34,0.13)', outline: '1px solid rgba(210,153,34,0.27)' },
+  '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: 'var(--accent)' },
+  '.cm-tooltip': { backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border)' },
 }, { dark: true });
 
 // ---------------------------------------------------------------------------
@@ -1581,12 +1582,12 @@ export default function CodePage() {
               onContextMenu={e => openMenu(e, node)}
               title={`${node.path}  (right-click for options)`}
               style={pad}
-              className="w-full text-left py-[3px] pr-2 text-xs flex items-center gap-1 text-[#8b949e] hover:text-[#e8eaed] hover:bg-[#21262d]"
+              className="w-full text-left py-[3px] pr-2 text-xs flex items-center gap-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
             >
               <span className="w-3 text-[10px]">{isOpen ? '▾' : '▸'}</span>
               <span className="truncate">{node.name}</span>
               {aiContextFolders.includes(node.path) && (
-                <span className="ml-auto shrink-0 text-[10px] text-[#58a6ff]"
+                <span className="ml-auto shrink-0 text-[10px] text-[var(--accent-hover)]"
                   title="Pinned as AI context">§</span>
               )}
             </button>
@@ -1604,14 +1605,14 @@ export default function CodePage() {
           onContextMenu={e => openMenu(e, node)}
           style={pad}
           title={node.path}
-          className={`w-full text-left py-[3px] pr-2 text-xs flex items-center gap-2 hover:bg-[#21262d] ${
-            isActive ? 'bg-[#1f6feb22] text-[#58a6ff]' : 'text-[#c9d1d9]'
+          className={`w-full text-left py-[3px] pr-2 text-xs flex items-center gap-2 hover:bg-[var(--bg-tertiary)] ${
+            isActive ? 'bg-[var(--accent-soft)] text-[var(--accent-hover)]' : 'text-[var(--text-primary)]'
           }`}
         >
           <span className="w-[6px] h-[6px] rounded-full shrink-0"
             style={{ background: langColor(node.language || '') }} />
           <span className="truncate">{node.name}</span>
-          {isDirty && <span className="ml-auto text-[#d29922] shrink-0">●</span>}
+          {isDirty && <span className="ml-auto text-[var(--warning)] shrink-0">●</span>}
         </button>
       );
     });
@@ -1630,10 +1631,10 @@ export default function CodePage() {
     setActivePath(rel);
   };
 
-  const status = error ? <span className="text-[#f85149]">{error}</span>
-    : busy ? <span className="text-[#8b949e]">{busy}…</span>
-    : notice ? <span className="text-[#3fb950]">{notice}</span>
-    : <span className="text-[#484f58]">Mod+S saves · Mod+F finds inside the file</span>;
+  const status = error ? <span className="text-[var(--danger)]">{error}</span>
+    : busy ? <span className="text-[var(--text-secondary)]">{busy}…</span>
+    : notice ? <span className="text-[var(--success)]">{notice}</span>
+    : <span className="text-[var(--text-muted)]">Mod+S saves · Mod+F finds inside the file</span>;
 
   /**
    * The standing hint, including where to build a tool the agent lacks.
@@ -1645,7 +1646,7 @@ export default function CodePage() {
    * rides with it.
    */
   const toolPointer = (
-    <Link href="/settings?section=cli-tools" className="text-[#58a6ff] hover:underline">
+    <Link href="/settings?section=cli-tools" className="text-[var(--accent-hover)] hover:underline">
       Build a tool
     </Link>
   );
@@ -1665,7 +1666,7 @@ export default function CodePage() {
     if (!v) return null;
     if (!v.ran) {
       return (
-        <span className="text-[#8b949e]"
+        <span className="text-[var(--text-secondary)]"
           title={v.reason || 'No test or verify command was found in this workspace.'}>
           not verified — {v.reason || 'no check found'}
         </span>
@@ -1674,7 +1675,7 @@ export default function CodePage() {
     const where = v.command ? ` (${v.command})` : '';
     if (v.ok) {
       return (
-        <span className="text-[#3fb950]" title={v.verdict || `${v.command} passed`}>
+        <span className="text-[var(--success)]" title={v.verdict || `${v.command} passed`}>
           ✓ verified{where}
         </span>
       );
@@ -1684,14 +1685,14 @@ export default function CodePage() {
     // the tests when the project simply has none that match.
     if (v.noTests) {
       return (
-        <span className="text-[#8b949e]"
+        <span className="text-[var(--text-secondary)]"
           title={v.verdict || 'The check ran but found no tests.'}>
           no tests found{where}
         </span>
       );
     }
     return (
-      <span className="text-[#d29922]"
+      <span className="text-[var(--warning)]"
         title={v.verdict || `${v.command || 'check'} did not pass`}>
         ⚠ written, but the check did not pass{where}
       </span>
@@ -1717,13 +1718,13 @@ export default function CodePage() {
   const changesPanel = (
     <div className="p-3 space-y-2">
       {!gitStatus ? (
-        <p className="text-[11px] text-[#484f58]">
+        <p className="text-[11px] text-[var(--text-muted)]">
           {gitBusy ? 'Checking the workspace…' : 'Bind a workspace to see changes.'}
         </p>
       ) : !gitStatus.isRepo ? (
         <div className="space-y-1">
-          <p className="text-[11px] text-[#8b949e]">Not a git repository.</p>
-          <p className="text-[10px] text-[#484f58]">
+          <p className="text-[11px] text-[var(--text-secondary)]">Not a git repository.</p>
+          <p className="text-[10px] text-[var(--text-muted)]">
             {gitStatus.available === false
               ? 'No git binary was found on this machine. '
               : ''}
@@ -1734,36 +1735,36 @@ export default function CodePage() {
       ) : (
         <>
           <div className="flex items-center gap-2 text-[11px]">
-            <span className="text-[#e8eaed]">
+            <span className="text-[var(--text-primary)]">
               {gitStatus.branch ? `on ${gitStatus.branch}` : 'detached HEAD'}
             </span>
             <button
               onClick={runCheck}
               disabled={checking}
-              className="ml-auto px-1.5 py-0.5 rounded border border-[#30363d] text-[10px] text-[#8b949e] hover:text-[#58a6ff] disabled:opacity-40"
+              className="ml-auto px-1.5 py-0.5 rounded border border-[var(--border)] text-[10px] text-[var(--text-secondary)] hover:text-[var(--accent-hover)] disabled:opacity-40"
               title="Run this project's own test or verify command"
             >{checking ? 'Running…' : 'Run check'}</button>
             <button
               onClick={() => refreshGit()}
               disabled={gitBusy}
-              className="text-[#8b949e] hover:text-[#58a6ff] disabled:opacity-40"
+              className="text-[var(--text-secondary)] hover:text-[var(--accent-hover)] disabled:opacity-40"
               title="Re-read the workspace"
             >{gitBusy ? '…' : '⟳'}</button>
           </div>
           {checkResult && <p className="text-[10px]">{verifyBadge(checkResult)}</p>}
           {gitStatus.clean ? (
-            <p className="text-[11px] text-[#3fb950]">Clean — nothing uncommitted.</p>
+            <p className="text-[11px] text-[var(--success)]">Clean — nothing uncommitted.</p>
           ) : (
             <>
               {gitStatus.changed?.length ? (
                 <div>
-                  <p className="text-[10px] text-[#8b949e]">
+                  <p className="text-[10px] text-[var(--text-secondary)]">
                     Modified ({gitStatus.changed.length})
                   </p>
                   <div className="max-h-24 overflow-y-auto">
                     {gitStatus.changed.map(f => (
                       <button key={f} onClick={() => { open(f); setView('editor'); }}
-                        className="w-full text-left px-1.5 py-0.5 text-[10px] font-mono text-[#d29922] hover:bg-[#21262d] truncate"
+                        className="w-full text-left px-1.5 py-0.5 text-[10px] font-mono text-[var(--warning)] hover:bg-[var(--bg-tertiary)] truncate"
                         title={f}>{f}</button>
                     ))}
                   </div>
@@ -1771,13 +1772,13 @@ export default function CodePage() {
               ) : null}
               {gitStatus.untracked?.length ? (
                 <div>
-                  <p className="text-[10px] text-[#8b949e]">
+                  <p className="text-[10px] text-[var(--text-secondary)]">
                     Untracked ({gitStatus.untracked.length})
                   </p>
                   <div className="max-h-24 overflow-y-auto">
                     {gitStatus.untracked.map(f => (
                       <button key={f} onClick={() => { open(f); setView('editor'); }}
-                        className="w-full text-left px-1.5 py-0.5 text-[10px] font-mono text-[#484f58] hover:bg-[#21262d] truncate"
+                        className="w-full text-left px-1.5 py-0.5 text-[10px] font-mono text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] truncate"
                         title={f}>{f}</button>
                     ))}
                   </div>
@@ -1786,17 +1787,17 @@ export default function CodePage() {
             </>
           )}
           {gitDiffText ? (
-            <details className="border border-[#30363d] rounded">
-              <summary className="px-2 py-1 text-[10px] text-[#8b949e] cursor-pointer">
+            <details className="border border-[var(--border)] rounded">
+              <summary className="px-2 py-1 text-[10px] text-[var(--text-secondary)] cursor-pointer">
                 Uncommitted diff
               </summary>
-              <pre className="p-2 text-[10px] font-mono whitespace-pre-wrap max-h-56 overflow-y-auto border-t border-[#21262d]">
+              <pre className="p-2 text-[10px] font-mono whitespace-pre-wrap max-h-56 overflow-y-auto border-t border-[var(--bg-tertiary)]">
                 {gitDiffText.split('\n').map((line, i) => (
                   <div key={i} className={
-                    line.startsWith('+++') || line.startsWith('---') ? 'text-[#8b949e]'
-                    : line.startsWith('+') ? 'text-[#3fb950]'
-                    : line.startsWith('-') ? 'text-[#f85149]'
-                    : line.startsWith('@@') ? 'text-[#58a6ff]' : 'text-[#8b949e]'}>{line}</div>
+                    line.startsWith('+++') || line.startsWith('---') ? 'text-[var(--text-secondary)]'
+                    : line.startsWith('+') ? 'text-[var(--success)]'
+                    : line.startsWith('-') ? 'text-[var(--danger)]'
+                    : line.startsWith('@@') ? 'text-[var(--accent-hover)]' : 'text-[var(--text-secondary)]'}>{line}</div>
                 ))}
               </pre>
             </details>
@@ -1822,29 +1823,29 @@ export default function CodePage() {
           onChange={e => setQuery(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') search(); }}
           placeholder="Find in the workspace…"
-          className="flex-1 min-w-0 bg-[#161b22] border border-[#30363d] rounded px-3 py-1.5 text-xs text-[#e8eaed] placeholder-[#484f58]"
+          className="flex-1 min-w-0 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)]"
         />
         <button
           onClick={search}
           disabled={query.trim().length < 2 || Boolean(busy)}
-          className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1.5 text-xs font-medium"
+          className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded px-3 py-1.5 text-xs font-medium"
         >Search</button>
       </div>
       {scanned !== null && (
-        <p className="text-[11px] text-[#484f58]">
+        <p className="text-[11px] text-[var(--text-muted)]">
           {hits.length} match{hits.length === 1 ? '' : 'es'} in {scanned} file{scanned === 1 ? '' : 's'}
         </p>
       )}
       {hits.length > 0 && (
-        <div className="max-h-[calc(100vh-220px)] overflow-y-auto border border-[#30363d] rounded">
+        <div className="max-h-[calc(100vh-220px)] overflow-y-auto border border-[var(--border)] rounded">
           {hits.map((hit, i) => (
             <button
               key={`${hit.filePath}:${hit.line}:${i}`}
               onClick={() => { open(hit.filePath, hit.line); setView('editor'); }}
-              className="w-full text-left px-2 py-1 text-[11px] hover:bg-[#21262d] border-b border-[#21262d] last:border-0"
+              className="w-full text-left px-2 py-1 text-[11px] hover:bg-[var(--bg-tertiary)] border-b border-[var(--bg-tertiary)] last:border-0"
             >
-              <span className="text-[#58a6ff]">{hit.filePath}:{hit.line}</span>
-              <span className="text-[#8b949e] ml-2 font-mono">{hit.text}</span>
+              <span className="text-[var(--accent-hover)]">{hit.filePath}:{hit.line}</span>
+              <span className="text-[var(--text-secondary)] ml-2 font-mono">{hit.text}</span>
             </button>
           ))}
         </div>
@@ -1861,7 +1862,7 @@ export default function CodePage() {
     <div
       key={s.id}
       className={`group flex items-center gap-2 px-3 py-1.5 cursor-pointer ${
-        active ? 'bg-[#1f6feb22] text-[#58a6ff]' : 'text-[#c9d1d9] hover:bg-[#161b22]'}`}
+        active ? 'bg-[var(--accent-soft)] text-[var(--accent-hover)]' : 'text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'}`}
       onClick={() => setActiveSession(s.id)}
       title={`${s.title} · ${s.messages.length} message(s)`}
     >
@@ -1884,7 +1885,7 @@ export default function CodePage() {
             const next = window.prompt('Rename session', s.title);
             if (next !== null) renameSession(s.id, next);
           }}
-          className="text-[#8b949e] hover:text-[#e8eaed] px-0.5"
+          className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] px-0.5"
           title="Rename"
         >
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -1893,7 +1894,7 @@ export default function CodePage() {
         </button>
         <button
           onClick={e => { e.stopPropagation(); togglePinned(s.id); }}
-          className="text-[#8b949e] hover:text-[#e8eaed] px-0.5"
+          className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] px-0.5"
           title={s.pinned ? 'Unpin' : 'Pin to the top'}
         >
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -1907,7 +1908,7 @@ export default function CodePage() {
               deleteSession(s.id);
             }
           }}
-          className="text-[#8b949e] hover:text-[#f85149] px-0.5"
+          className="text-[var(--text-secondary)] hover:text-[var(--danger)] px-0.5"
           title="Delete"
         >X</button>
       </div>
@@ -1927,7 +1928,7 @@ export default function CodePage() {
     <div className="flex flex-wrap items-center gap-1.5">
       <button
         onClick={() => { drawerToggled.current = true; setDrawerOpen(true); setDrawerTab('files'); }}
-        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[#30363d] bg-[#161b22] text-[11px] text-[#c9d1d9] hover:border-[#484f58]"
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-primary)] hover:border-[var(--text-muted)]"
         title={workspacePath || 'No workspace bound'}
       >
         {/* A drawn glyph, not a word. An earlier version used the literal text
@@ -1943,7 +1944,7 @@ export default function CodePage() {
       </button>
       {gitStatus?.isRepo && gitStatus.branch && (
         <span
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[#30363d] bg-[#161b22] text-[11px] text-[#c9d1d9]"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-primary)]"
           title={`git branch ${gitStatus.branch}`}
         >
           <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"
@@ -1955,13 +1956,13 @@ export default function CodePage() {
       )}
       {gitStatus && !gitStatus.isRepo && (
         <span
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[#30363d] bg-[#161b22] text-[11px] text-[#8b949e]"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-secondary)]"
           title="Not a git repository — undo falls back to the per-file backups"
         >no git</span>
       )}
       {activeSession && (
         <span
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[#30363d] bg-[#161b22] text-[11px] text-[#8b949e] max-w-[220px]"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-secondary)] max-w-[220px]"
           title={activeSession.title}
         >
           <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"
@@ -1972,7 +1973,7 @@ export default function CodePage() {
         </span>
       )}
       {attachments.length > 0 && (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[#1f6feb55] bg-[#1f6feb22] text-[11px] text-[#58a6ff]">
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[var(--accent-soft)] bg-[var(--accent-soft)] text-[11px] text-[var(--accent-hover)]">
           {attachments.length} attached
         </span>
       )}
@@ -1988,10 +1989,10 @@ export default function CodePage() {
       onDrop={onDrop}
     >
       {dragActive && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#0d1117]/85 border-2 border-dashed border-[#3380FF] pointer-events-none">
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-[var(--bg-primary)]/85 border-2 border-dashed border-[var(--accent)] pointer-events-none">
           <div className="text-center">
-            <p className="text-sm font-medium text-[#e8eaed]">Drop to attach</p>
-            <p className="text-xs text-[#8b949e] mt-1">
+            <p className="text-sm font-medium text-[var(--text-primary)]">Drop to attach</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-1">
               Screenshots, text, PDFs and documents — up to {MAX_ATTACHMENTS}
             </p>
           </div>
@@ -2001,23 +2002,23 @@ export default function CodePage() {
       {/* ---------------- tree node menu ---------------- */}
       {menu && (
         <div
-          className="fixed z-50 min-w-[230px] py-1 bg-[#161b22] border border-[#30363d] rounded shadow-lg text-xs"
+          className="fixed z-50 min-w-[230px] py-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded shadow-lg text-xs"
           style={{ left: menu.x, top: menu.y }}
           onClick={e => e.stopPropagation()}
         >
-          <div className="px-3 py-1 text-[10px] text-[#484f58] truncate border-b border-[#21262d] mb-1"
+          <div className="px-3 py-1 text-[10px] text-[var(--text-muted)] truncate border-b border-[var(--bg-tertiary)] mb-1"
             title={menu.node.path}>
             {menu.node.name}
           </div>
           {menu.node.type === 'dir' && !isRemote && (
             <button
               onClick={() => useAsWorkspace(menu.node.path)}
-              className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+              className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
               title="Rebind the editor (and Addled's workspace) to this folder"
             >Use as workspace</button>
           )}
           {menu.node.type === 'dir' && isRemote && (
-            <div className="px-3 py-1.5 text-[#484f58]"
+            <div className="px-3 py-1.5 text-[var(--text-muted)]"
               title="Binding a workspace is done on the machine running Addled">
               Use as workspace — unavailable remotely
             </div>
@@ -2029,13 +2030,13 @@ export default function CodePage() {
                   const p = menu.node.path;
                   setMenu(null); setDrawerTab('files'); setFilter(p + '/');
                 }}
-                className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+                className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
                 title="Filter the tree down to this folder"
               >Search inside this folder</button>
               <button
                 onClick={() => addAiContext(menu.node.path)}
                 disabled={aiContextFolders.includes(menu.node.path)}
-                className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d] disabled:opacity-40 disabled:hover:bg-transparent"
+                className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-40 disabled:hover:bg-transparent"
               >
                 {aiContextFolders.includes(menu.node.path)
                   ? 'Already pinned as AI context' : 'Add as AI context'}
@@ -2046,20 +2047,20 @@ export default function CodePage() {
             <>
               <button
                 onClick={() => { setMenu(null); open(menu.node.path); }}
-                className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+                className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
               >Open file</button>
               <button
                 onClick={() => { setMenu(null); attachFileToPrompt(menu.node.path); }}
-                className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+                className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
                 title="Add this file to the next request as a mention"
               >Attach to prompt</button>
               <button
                 onClick={() => { setMenu(null); copyPath(menu.node.path); }}
-                className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+                className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
               >Copy path</button>
               <button
                 onClick={() => { setMenu(null); revealPath(menu.node.path); }}
-                className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+                className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
                 title="Copy the full path so it can be opened in your file manager"
               >Reveal in file manager</button>
               <button
@@ -2067,7 +2068,7 @@ export default function CodePage() {
                   const dir = menu.node.path.split('/').slice(0, -1).join('/');
                   addAiContext(dir || '.');
                 }}
-                className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+                className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
               >Add its folder as AI context</button>
             </>
           )}
@@ -2077,35 +2078,35 @@ export default function CodePage() {
       {/* ---------------- selection menu (editor right-click) ---------------- */}
       {selMenu && (
         <div
-          className="fixed z-50 min-w-[210px] py-1 bg-[#161b22] border border-[#30363d] rounded shadow-lg text-xs"
+          className="fixed z-50 min-w-[210px] py-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded shadow-lg text-xs"
           style={{ left: selMenu.x, top: selMenu.y }}
           onClick={e => e.stopPropagation()}
         >
-          <div className="px-3 py-1 text-[10px] text-[#484f58] border-b border-[#21262d] mb-1">
+          <div className="px-3 py-1 text-[10px] text-[var(--text-muted)] border-b border-[var(--bg-tertiary)] mb-1">
             {(() => {
               const s = currentSelection();
               return s ? `Lines ${s.from}-${s.to} of ${activeTab?.name}` : 'Selection';
             })()}
           </div>
           <button onClick={() => askAboutSelection('explain')}
-            className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]">Explain this</button>
+            className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]">Explain this</button>
           <button onClick={() => askAboutSelection('refactor')}
-            className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]">Refactor this</button>
+            className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]">Refactor this</button>
           <button onClick={() => askAboutSelection('test')}
-            className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]">Write tests for this</button>
+            className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]">Write tests for this</button>
           <button onClick={() => askAboutSelection('fix')}
-            className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]">Find the bug in this</button>
+            className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]">Find the bug in this</button>
           <button onClick={() => askAboutSelection('document')}
-            className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]">Document this</button>
-          <div className="border-t border-[#21262d] mt-1 pt-1">
+            className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]">Document this</button>
+          <div className="border-t border-[var(--bg-tertiary)] mt-1 pt-1">
             <button
               onClick={() => { setSelMenu(null); setPullFrom(currentSelection()); }}
-              className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+              className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
               title="Attach these lines to the next request"
             >Attach to prompt</button>
             <button
               onClick={async () => { setSelMenu(null); await copyPath(selectedText().slice(0, 4000)); }}
-              className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+              className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
             >Copy selection</button>
           </div>
         </div>
@@ -2114,26 +2115,26 @@ export default function CodePage() {
       {/* ---------------- tree background menu ---------------- */}
       {treeMenu && (
         <div
-          className="fixed z-50 min-w-[200px] py-1 bg-[#161b22] border border-[#30363d] rounded shadow-lg text-xs"
+          className="fixed z-50 min-w-[200px] py-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded shadow-lg text-xs"
           style={{ left: treeMenu.x, top: treeMenu.y }}
           onClick={e => e.stopPropagation()}
         >
           <button
             onClick={() => { setTreeMenu(null); rebind(); }}
-            className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+            className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
           >Refresh</button>
           <button
             onClick={() => { setTreeMenu(null); setDrawerTab('files'); }}
-            className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+            className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
             title="Create a file — type its path in the box at the top of the tree"
           >New file...</button>
           <button
             onClick={() => { setTreeMenu(null); setCollapsed(new Set()); }}
-            className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+            className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
           >Collapse all folders</button>
           <button
             onClick={() => { setTreeMenu(null); setFilter(''); }}
-            className="w-full text-left px-3 py-1.5 text-[#e8eaed] hover:bg-[#21262d]"
+            className="w-full text-left px-3 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
           >Clear the filter</button>
         </div>
       )}
@@ -2145,13 +2146,13 @@ export default function CodePage() {
            leave the composer cramped if the drawer always took its full 248px.
            Capping it means the working column always has room, whether or not
            the drawer is showing. */
-        <div className="w-[248px] max-w-[60vw] border-r border-[#30363d] flex flex-col shrink-0 bg-[#0d1117]">
-          <div className="p-3 border-b border-[#30363d] space-y-2">
+        <div className="w-[248px] max-w-[60vw] border-r border-[var(--border)] flex flex-col shrink-0 bg-[var(--bg-primary)]">
+          <div className="p-3 border-b border-[var(--border)] space-y-2">
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-[#e8eaed]">Code</span>
+              <span className="text-xs font-semibold text-[var(--text-primary)]">Code</span>
               <button
                 onClick={() => { drawerToggled.current = true; setDrawerOpen(false); }}
-                className="ml-auto text-[#8b949e] hover:text-[#e8eaed]"
+                className="ml-auto text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                 title="Hide the sidebar"
               >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -2165,22 +2166,22 @@ export default function CodePage() {
                   value={workspacePath}
                   onChange={e => { touched.current = true; setWorkspacePath(e.target.value); }}
                   placeholder="Folder path..."
-                  className="w-full bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-xs text-[#e8eaed] placeholder-[#484f58]"
+                  className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)]"
                 />
                 <button
                   onClick={() => rebind()}
                   disabled={!workspacePath.trim() || binding || wsState !== 'connected'}
-                  className="w-full bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-2 py-1.5 text-xs font-medium"
+                  className="w-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded px-2 py-1.5 text-xs font-medium"
                 >{binding ? 'Binding...' : 'Bind Workspace'}</button>
               </>
             ) : (
               <>
                 <div className="flex items-center gap-1.5 text-xs">
-                  <span className="text-[#8b949e] truncate" title={workspacePath}>
+                  <span className="text-[var(--text-secondary)] truncate" title={workspacePath}>
                     {workspacePath.split(/[\\/]/).filter(Boolean).pop()}
                   </span>
                   <button onClick={() => rebind()}
-                    className="ml-auto text-[#8b949e] hover:text-[#58a6ff]"
+                    className="ml-auto text-[var(--text-secondary)] hover:text-[var(--accent-hover)]"
                     title="Reload the file list">
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                       <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z" />
@@ -2188,7 +2189,7 @@ export default function CodePage() {
                   </button>
                   <button
                     onClick={() => { setBound(false); setFiles([]); setTabs([]); setActivePath(''); }}
-                    className="text-[#8b949e] hover:text-[#f85149]" title="Unbind">
+                    className="text-[var(--text-secondary)] hover:text-[var(--danger)]" title="Unbind">
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                       <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-3.22 3.22a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
                     </svg>
@@ -2196,39 +2197,39 @@ export default function CodePage() {
                 </div>
                 <button
                   onClick={startSession}
-                  className="w-full flex items-center gap-2 border border-[#30363d] hover:border-[#484f58] rounded px-2 py-1.5 text-xs text-[#c9d1d9]"
+                  className="w-full flex items-center gap-2 border border-[var(--border)] hover:border-[var(--text-muted)] rounded px-2 py-1.5 text-xs text-[var(--text-primary)]"
                   title="Start a new session in this workspace"
                 >+ New session</button>
               </>
             )}
-            {bindError && <p className="text-[11px] text-[#f85149]">{bindError}</p>}
+            {bindError && <p className="text-[11px] text-[var(--danger)]">{bindError}</p>}
           </div>
 
-          <div className="flex border-b border-[#30363d] text-xs">
+          <div className="flex border-b border-[var(--border)] text-xs">
             <button
               onClick={() => setDrawerTab('sessions')}
               className={`flex-1 py-2 ${drawerTab === 'sessions'
-                ? 'text-[#e8eaed] border-b-2 border-[#3380FF]'
-                : 'text-[#8b949e] hover:text-[#e8eaed]'}`}
+                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent)]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
             >Sessions</button>
             <button
               onClick={() => setDrawerTab('files')}
               className={`flex-1 py-2 ${drawerTab === 'files'
-                ? 'text-[#e8eaed] border-b-2 border-[#3380FF]'
-                : 'text-[#8b949e] hover:text-[#e8eaed]'}`}
+                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent)]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
             >Files{files.length ? ` (${files.length})` : ''}</button>
             <button
               onClick={() => setDrawerTab('search')}
               className={`px-2 py-2 ${drawerTab === 'search'
-                ? 'text-[#e8eaed] border-b-2 border-[#3380FF]'
-                : 'text-[#8b949e] hover:text-[#e8eaed]'}`}
+                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent)]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
               title="Search the workspace"
             >Find</button>
             <button
               onClick={() => { setDrawerTab('changes'); refreshGit(); }}
               className={`px-2 py-2 ${drawerTab === 'changes'
-                ? 'text-[#e8eaed] border-b-2 border-[#3380FF]'
-                : 'text-[#8b949e] hover:text-[#e8eaed]'}`}
+                ? 'text-[var(--text-primary)] border-b-2 border-[var(--accent)]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
               title={gitStatus?.isRepo
                 ? `git${gitStatus.branch ? ` on ${gitStatus.branch}` : ''} — what Addled changed`
                 : 'What Addled changed in the workspace'}
@@ -2240,13 +2241,13 @@ export default function CodePage() {
             <div className="flex-1 overflow-y-auto py-1">
               {sessionList.pinned.length > 0 && (
                 <>
-                  <p className="px-3 py-1 text-[10px] text-[#484f58] uppercase tracking-wide">Pinned</p>
+                  <p className="px-3 py-1 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">Pinned</p>
                   {sessionList.pinned.map(s => sessionRow(s, s.id === getActiveId()))}
                 </>
               )}
-              <p className="px-3 py-1 text-[10px] text-[#484f58] uppercase tracking-wide">Recents</p>
+              <p className="px-3 py-1 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">Recents</p>
               {sessionList.recent.length === 0 && sessionList.pinned.length === 0 && (
-                <p className="px-3 py-2 text-[11px] text-[#484f58]">
+                <p className="px-3 py-2 text-[11px] text-[var(--text-muted)]">
                   {bound
                     ? 'No sessions yet. Describe a change below and one is created for you.'
                     : 'Bind a workspace to start.'}
@@ -2256,12 +2257,12 @@ export default function CodePage() {
             </div>
           ) : drawerTab === 'files' ? (
             <>
-              <div className="p-2 border-b border-[#30363d] space-y-2">
+              <div className="p-2 border-b border-[var(--border)] space-y-2">
                 <input
                   value={filter}
                   onChange={e => setFilter(e.target.value)}
                   placeholder="Filter files..."
-                  className="w-full bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] placeholder-[#484f58]"
+                  className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)]"
                 />
                 <div className="flex gap-1">
                   <input
@@ -2269,23 +2270,23 @@ export default function CodePage() {
                     onChange={e => setNewFile(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') startNewFile(); }}
                     placeholder="new/file.py"
-                    className="flex-1 min-w-0 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] placeholder-[#484f58]"
+                    className="flex-1 min-w-0 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)]"
                   />
                   <button
                     onClick={startNewFile}
                     disabled={!newFile.trim()}
-                    className="text-xs px-2 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] disabled:opacity-40"
+                    className="text-xs px-2 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-40"
                     title="Create a file in the workspace"
                   >+</button>
                 </div>
                 {bound && !showAll && hiddenDirs.length > 0 && (
-                  <p className="text-[10px] text-[#484f58]">
+                  <p className="text-[10px] text-[var(--text-muted)]">
                     Hiding {hiddenDirs.length} folder{hiddenDirs.length === 1 ? '' : 's'}
                     {' ('}<span className="font-mono">{hiddenDirs.slice(0, 3).join(', ')}</span>
                     {hiddenDirs.length > 3 ? ', ...' : ''}{') — '}
                     <button
                       onClick={() => { setShowAll(true); rebind(true); }}
-                      className="text-[#58a6ff] hover:underline"
+                      className="text-[var(--accent-hover)] hover:underline"
                     >show all</button>
                   </p>
                 )}
@@ -2305,8 +2306,8 @@ export default function CodePage() {
                 {matches
                   ? matches.map(f => (
                       <button key={f.path} onClick={() => open(f.path)} title={f.path}
-                        className={`w-full text-left py-[3px] pr-2 pl-3 text-xs flex items-center gap-2 hover:bg-[#21262d] ${
-                          f.path === activePath ? 'bg-[#1f6feb22] text-[#58a6ff]' : 'text-[#c9d1d9]'}`}>
+                        className={`w-full text-left py-[3px] pr-2 pl-3 text-xs flex items-center gap-2 hover:bg-[var(--bg-tertiary)] ${
+                          f.path === activePath ? 'bg-[var(--accent-soft)] text-[var(--accent-hover)]' : 'text-[var(--text-primary)]'}`}>
                         <span className="w-[6px] h-[6px] rounded-full shrink-0"
                           style={{ background: langColor(f.language) }} />
                         <span className="truncate">{f.path}</span>
@@ -2314,19 +2315,19 @@ export default function CodePage() {
                     ))
                   : renderNodes(tree, 0)}
                 {!files.length && (
-                  <p className="px-3 py-2 text-[11px] text-[#484f58]">
+                  <p className="px-3 py-2 text-[11px] text-[var(--text-muted)]">
                     No files. The folder may be empty, or everything in it is ignored.
                   </p>
                 )}
               </div>
 
-              <div className="border-t border-[#30363d] px-3 py-2 flex items-center justify-between text-[11px] text-[#484f58]">
+              <div className="border-t border-[var(--border)] px-3 py-2 flex items-center justify-between text-[11px] text-[var(--text-muted)]">
                 <span>{files.length} file{files.length === 1 ? '' : 's'}{truncated ? '+' : ''}</span>
                 <label className="flex items-center gap-1 cursor-pointer">
                   <input
                     type="checkbox" checked={showAll}
                     onChange={e => { setShowAll(e.target.checked); rebind(e.target.checked); }}
-                    className="accent-[#3380FF]"
+                    className="accent-[var(--accent)]"
                   />
                   show all
                 </label>
@@ -2339,10 +2340,10 @@ export default function CodePage() {
           )}
         </div>
       ) : (
-        <div className="w-9 border-r border-[#30363d] flex flex-col items-center shrink-0">
+        <div className="w-9 border-r border-[var(--border)] flex flex-col items-center shrink-0">
           <button
             onClick={() => { drawerToggled.current = true; setDrawerOpen(true); }}
-            className="w-9 py-2 text-[#8b949e] hover:text-[#e8eaed]"
+            className="w-9 py-2 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
             title="Show sessions and files"
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="mx-auto">
@@ -2361,7 +2362,7 @@ export default function CodePage() {
             `<<` in its header when open, a `>>` on the rail when closed), and a
             third in this bar rendered directly beneath the header's — two
             identical controls doing the same thing, one above the other. */}
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-[#30363d] shrink-0">
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border)] shrink-0">
           <div className="min-w-0 flex-1">{contextChips}</div>
           {/* The file/chat toggle: the editor is one view of the session, and
               the transcript is the other. Both stay mounted over the same
@@ -2370,12 +2371,12 @@ export default function CodePage() {
             <button
               onClick={() => setView('chat')}
               className={`px-2 py-1 rounded ${view === 'chat'
-                ? 'bg-[#21262d] text-[#e8eaed]' : 'text-[#8b949e] hover:text-[#e8eaed]'}`}
+                ? 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
             >Session</button>
             <button
               onClick={() => setView('editor')}
               className={`px-2 py-1 rounded ${view === 'editor'
-                ? 'bg-[#21262d] text-[#e8eaed]' : 'text-[#8b949e] hover:text-[#e8eaed]'}`}
+                ? 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
               title="The open files"
             >Editor{tabs.length ? ` (${tabs.length})` : ''}</button>
           </div>
@@ -2387,12 +2388,12 @@ export default function CodePage() {
             {!activeSession || activeSession.messages.length === 0 ? (
               <div className="h-full flex items-center justify-center">
                 <div className="text-center max-w-md">
-                  <p className="text-sm text-[#8b949e]">
+                  <p className="text-sm text-[var(--text-secondary)]">
                     {bound
                       ? 'Describe a change. Addled works out which files to touch, then shows you a diff to approve.'
                       : 'Bind a workspace to start.'}
                   </p>
-                  <p className="text-[11px] text-[#484f58] mt-2">
+                  <p className="text-[11px] text-[var(--text-muted)] mt-2">
                     Paste a screenshot, drop a document, or type @ to name a file.
                   </p>
                 </div>
@@ -2421,7 +2422,7 @@ export default function CodePage() {
                       <div className="mt-2 flex flex-wrap gap-1">
                         {msg.files.map(f => (
                           <button key={f} onClick={() => { open(f); setView('editor'); }}
-                            className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-[#30363d] hover:border-[#58a6ff] hover:text-[#58a6ff]"
+                            className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-[var(--border)] hover:border-[var(--accent-hover)] hover:text-[var(--accent-hover)]"
                             title={`Open ${f}`}
                           >{f}</button>
                         ))}
@@ -2439,22 +2440,22 @@ export default function CodePage() {
           /* ---------------- the editor ---------------- */
           <>
             {tabs.length > 0 && (
-              <div className="flex items-stretch border-b border-[#30363d] bg-[#161b22] overflow-x-auto shrink-0">
+              <div className="flex items-stretch border-b border-[var(--border)] bg-[var(--bg-secondary)] overflow-x-auto shrink-0">
                 {tabs.map(tab => (
                   <div
                     key={tab.path}
-                    className={`group flex items-center gap-2 px-3 py-2 text-xs border-r border-[#30363d] cursor-pointer whitespace-nowrap ${
-                      tab.path === activePath ? 'bg-[#0d1117] text-[#e8eaed]' : 'text-[#8b949e] hover:bg-[#21262d]'}`}
+                    className={`group flex items-center gap-2 px-3 py-2 text-xs border-r border-[var(--border)] cursor-pointer whitespace-nowrap ${
+                      tab.path === activePath ? 'bg-[var(--bg-primary)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]'}`}
                     onClick={() => { setActivePath(tab.path); setPending(null); }}
                     title={tab.path}
                   >
                     <span className="w-[6px] h-[6px] rounded-full shrink-0"
                       style={{ background: langColor(tab.language) }} />
                     <span>{tab.name}</span>
-                    {tab.content !== tab.saved && <span className="text-[#d29922]">*</span>}
+                    {tab.content !== tab.saved && <span className="text-[var(--warning)]">*</span>}
                     <button
                       onClick={e => { e.stopPropagation(); closeTab(tab.path); }}
-                      className="opacity-0 group-hover:opacity-100 text-[#8b949e] hover:text-[#f85149]"
+                      className="opacity-0 group-hover:opacity-100 text-[var(--text-secondary)] hover:text-[var(--danger)]"
                     >X</button>
                   </div>
                 ))}
@@ -2463,12 +2464,12 @@ export default function CodePage() {
 
             {activeTab ? (
               <>
-                <div className="flex items-center gap-3 px-4 py-2 border-b border-[#30363d] bg-[#161b22] text-xs shrink-0">
-                  <span className="text-[#e8eaed] truncate">{activeTab.path}</span>
-                  <span className="text-[#8b949e]">{activeTab.language}</span>
-                  {activeTab.isNew && <span className="text-[#d29922]">not saved yet</span>}
+                <div className="flex items-center gap-3 px-4 py-2 border-b border-[var(--border)] bg-[var(--bg-secondary)] text-xs shrink-0">
+                  <span className="text-[var(--text-primary)] truncate">{activeTab.path}</span>
+                  <span className="text-[var(--text-secondary)]">{activeTab.language}</span>
+                  {activeTab.isNew && <span className="text-[var(--warning)]">not saved yet</span>}
                   <div className="ml-auto flex items-center gap-2">
-                    {dirty && <span className="text-[#d29922]">unsaved</span>}
+                    {dirty && <span className="text-[var(--warning)]">unsaved</span>}
                     <button
                       onClick={() => save(activeTab.path)}
                       disabled={!dirty && !activeTab.isNew}
@@ -2509,13 +2510,13 @@ export default function CodePage() {
                 </div>
 
                 {pending && (
-                  <div className="border-t border-[#30363d] bg-[#161b22] max-h-64 overflow-y-auto shrink-0">
-                    <div className="flex items-center justify-between px-3 py-2 border-b border-[#21262d] sticky top-0 bg-[#161b22]">
-                      <span className="text-xs text-[#8b949e]">
+                  <div className="border-t border-[var(--border)] bg-[var(--bg-secondary)] max-h-64 overflow-y-auto shrink-0">
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--bg-tertiary)] sticky top-0 bg-[var(--bg-secondary)]">
+                      <span className="text-xs text-[var(--text-secondary)]">
                         Proposed change to {pending.filePath}
-                        <span className="text-[#3fb950]"> +{pending.diff?.added ?? 0}</span>
-                        <span className="text-[#f85149]"> -{pending.diff?.removed ?? 0}</span>
-                        <span className="text-[#484f58]"> · whole file</span>
+                        <span className="text-[var(--success)]"> +{pending.diff?.added ?? 0}</span>
+                        <span className="text-[var(--danger)]"> -{pending.diff?.removed ?? 0}</span>
+                        <span className="text-[var(--text-muted)]"> · whole file</span>
                       </span>
                       <div className="flex gap-2">
                         <button onClick={applyEdit} disabled={Boolean(busy)}
@@ -2524,7 +2525,7 @@ export default function CodePage() {
                           Apply
                         </button>
                         <button onClick={() => { setPending(null); setApplied(''); }}
-                          className="text-xs px-2 py-1 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed]">
+                          className="text-xs px-2 py-1 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
                           Discard
                         </button>
                       </div>
@@ -2533,19 +2534,19 @@ export default function CodePage() {
                       {String(pending.diff?.raw_diff || '')
                         .split('\n').filter(Boolean).map((line, i) => (
                           <div key={i} className={
-                            line.startsWith('+') && !line.startsWith('+++') ? 'text-[#3fb950]'
-                            : line.startsWith('-') && !line.startsWith('---') ? 'text-[#f85149]'
-                            : line.startsWith('@@') ? 'text-[#58a6ff]' : 'text-[#8b949e]'}>{line}</div>
+                            line.startsWith('+') && !line.startsWith('+++') ? 'text-[var(--success)]'
+                            : line.startsWith('-') && !line.startsWith('---') ? 'text-[var(--danger)]'
+                            : line.startsWith('@@') ? 'text-[var(--accent-hover)]' : 'text-[var(--text-secondary)]'}>{line}</div>
                         ))}
                     </pre>
                   </div>
                 )}
               </>
             ) : (
-              <div className="flex-1 flex items-center justify-center text-[#8b949e]">
+              <div className="flex-1 flex items-center justify-center text-[var(--text-secondary)]">
                 <div className="text-center">
                   <p className="text-sm">No file open.</p>
-                  <p className="text-[11px] text-[#484f58] mt-2">
+                  <p className="text-[11px] text-[var(--text-muted)] mt-2">
                     Pick one from Files, or ask for a change and review its diff.
                   </p>
                 </div>
@@ -2555,9 +2556,9 @@ export default function CodePage() {
         )}
 
         {/* ================= composer ================= */}
-        <div className="border-t border-[#30363d] shrink-0">
+        <div className="border-t border-[var(--border)] shrink-0">
           {bindError && (
-            <p className="px-3 pt-2 text-[11px] text-[#f85149]">
+            <p className="px-3 pt-2 text-[11px] text-[var(--danger)]">
               {bindError} — pick another folder above, then try again.
             </p>
           )}
@@ -2569,7 +2570,7 @@ export default function CodePage() {
             <div className="flex flex-wrap gap-1 px-3 pt-2">
               {attachments.map((a, i) => (
                 <span key={`${a.name}-${i}`}
-                  className="inline-flex items-center gap-1.5 bg-[#21262d] border border-[#30363d] rounded px-2 py-1 text-[11px] text-[#e8eaed]"
+                  className="inline-flex items-center gap-1.5 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-[11px] text-[var(--text-primary)]"
                   title={a.name}>
                   {a.kind === 'image' && a.preview
                     ? <img src={a.preview} alt={a.name} className="h-6 w-6 object-cover rounded" />
@@ -2577,19 +2578,19 @@ export default function CodePage() {
                   <span className="max-w-[130px] truncate">{a.name}</span>
                   <button
                     onClick={() => removeAttachmentAt(i)}
-                    className="text-[#8b949e] hover:text-[#f85149]"
+                    className="text-[var(--text-secondary)] hover:text-[var(--danger)]"
                     title="Remove"
                   >X</button>
                 </span>
               ))}
               {mentions.map(path => (
                 <span key={path}
-                  className="inline-flex items-center gap-1 bg-[#21262d] border border-[#30363d] rounded px-2 py-1 text-[10px] text-[#c9d1d9]"
+                  className="inline-flex items-center gap-1 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-[10px] text-[var(--text-primary)]"
                   title={path}>
                   @{path.split('/').pop()}
                   <button
                     onClick={() => setMentions(prev => prev.filter(p => p !== path))}
-                    className="text-[#8b949e] hover:text-[#f85149]"
+                    className="text-[var(--text-secondary)] hover:text-[var(--danger)]"
                     title="Remove this file"
                   >X</button>
                 </span>
@@ -2599,24 +2600,24 @@ export default function CodePage() {
                   the planner is being told where to look rather than who. */}
               {agentMentions.map(name => (
                 <span key={`agent:${name}`}
-                  className="inline-flex items-center gap-1 bg-[#1f6feb22] border border-[#1f6feb55] rounded px-2 py-1 text-[10px] text-[#58a6ff]"
+                  className="inline-flex items-center gap-1 bg-[var(--accent-soft)] border border-[var(--accent-soft)] rounded px-2 py-1 text-[10px] text-[var(--accent-hover)]"
                   title={`Swarm agent — ${name}`}>
                   🐝 {name}
                   <button
                     onClick={() => setAgentMentions(prev => prev.filter(n => n !== name))}
-                    className="text-[#8b949e] hover:text-[#f85149]"
+                    className="text-[var(--text-secondary)] hover:text-[var(--danger)]"
                     title="Remove this agent"
                   >X</button>
                 </span>
               ))}
               {pullFrom && activePath && (
                 <span
-                  className="inline-flex items-center gap-1 bg-[#1f6feb22] border border-[#1f6feb55] rounded px-2 py-1 text-[10px] text-[#58a6ff]"
+                  className="inline-flex items-center gap-1 bg-[var(--accent-soft)] border border-[var(--accent-soft)] rounded px-2 py-1 text-[10px] text-[var(--accent-hover)]"
                   title={`${activePath} lines ${pullFrom.from}-${pullFrom.to}`}>
                   {activePath.split('/').pop()}:{pullFrom.from}-{pullFrom.to}
                   <button
                     onClick={() => setPullFrom(null)}
-                    className="text-[#8b949e] hover:text-[#f85149]"
+                    className="text-[var(--text-secondary)] hover:text-[var(--danger)]"
                     title="Detach the selection"
                   >X</button>
                 </span>
@@ -2627,7 +2628,7 @@ export default function CodePage() {
           <div className="relative p-3">
             {/* @-mention menu */}
             {mentionQuery !== null && mentionMatches.length > 0 && (
-              <div className="absolute z-20 bottom-full mb-1 w-full max-h-48 overflow-y-auto bg-[#161b22] border border-[#30363d] rounded shadow-lg">
+              <div className="absolute z-20 bottom-full mb-1 w-full max-h-48 overflow-y-auto bg-[var(--bg-secondary)] border border-[var(--border)] rounded shadow-lg">
               {mentionMatches.slice(0, 30).map(h => (
                 <button
                   key={h.kind === 'agent' ? `agent:${h.name}` : h.path}
@@ -2640,20 +2641,20 @@ export default function CodePage() {
                     setInstruction(prev => prev.replace(/@[^\s@]*$/, '').replace(/\s+$/, ''));
                     setMentionQuery(null);
                   }}
-                  className="w-full text-left px-2 py-1 text-[11px] hover:bg-[#21262d] flex items-center gap-2"
+                  className="w-full text-left px-2 py-1 text-[11px] hover:bg-[var(--bg-tertiary)] flex items-center gap-2"
                   title={h.kind === 'agent' ? `Swarm agent — ${h.role || h.name}` : h.path}
                 >
                   {h.kind === 'agent' ? (
                     <>
                       <span className="shrink-0">🐝</span>
-                      <span className="truncate text-[#c9d1d9]">{h.name}</span>
-                      <span className="ml-auto shrink-0 text-[10px] text-[#8b949e]">agent</span>
+                      <span className="truncate text-[var(--text-primary)]">{h.name}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-[var(--text-secondary)]">agent</span>
                     </>
                   ) : (
                     <>
                       <span className="w-[6px] h-[6px] rounded-full shrink-0"
                         style={{ background: langColor(h.language || '') }} />
-                      <span className="truncate text-[#c9d1d9]">{h.path}</span>
+                      <span className="truncate text-[var(--text-primary)]">{h.path}</span>
                     </>
                   )}
                 </button>
@@ -2664,9 +2665,9 @@ export default function CodePage() {
             {/* The plan, when one exists. Shown above the box because it is the
                 thing being reviewed, and it is what the Apply buttons act on. */}
             {plan && (
-              <div className="mb-2 border border-[#30363d] rounded bg-[#0d1117]">
-                <div className="flex items-center justify-between px-2 py-1 border-b border-[#21262d]">
-                  <span className="text-[10px] text-[#8b949e]">
+              <div className="mb-2 border border-[var(--border)] rounded bg-[var(--bg-primary)]">
+                <div className="flex items-center justify-between px-2 py-1 border-b border-[var(--bg-tertiary)]">
+                  <span className="text-[10px] text-[var(--text-secondary)]">
                     Plan — {plan.steps.length} file{plan.steps.length === 1 ? '' : 's'}
                   </span>
                   <div className="flex items-center gap-2">
@@ -2674,21 +2675,21 @@ export default function CodePage() {
                       <button
                         onClick={generateAllDiffs}
                         disabled={Boolean(busy) || plan.steps.every(s => s.status === 'done')}
-                        className="text-[10px] px-1.5 py-0.5 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] disabled:opacity-40"
+                        className="text-[10px] px-1.5 py-0.5 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-40"
                       >Generate all</button>
                     )}
                     <button onClick={cancelPlan}
                       title="Throw this plan away — nothing is written"
-                      className="text-[10px] text-[#8b949e] hover:text-[#f85149]">Discard plan</button>
+                      className="text-[10px] text-[var(--text-secondary)] hover:text-[var(--danger)]">Discard plan</button>
                   </div>
                 </div>
                 {plan.summary && (
-                  <p className="px-2 py-1 text-[10px] text-[#8b949e] border-b border-[#21262d]">
+                  <p className="px-2 py-1 text-[10px] text-[var(--text-secondary)] border-b border-[var(--bg-tertiary)]">
                     {plan.summary}
                   </p>
                 )}
                 {plan.steps.length > MANY_FILES && (
-                  <p className="px-2 py-1.5 text-[10px] text-[#d29922] border-b border-[#21262d]">
+                  <p className="px-2 py-1.5 text-[10px] text-[var(--warning)] border-b border-[var(--bg-tertiary)]">
                     This plan touches {plan.steps.length} files. If that is more than
                     you expected, discard it and describe the change more narrowly.
                   </p>
@@ -2696,17 +2697,17 @@ export default function CodePage() {
                 <div className="max-h-40 overflow-y-auto">
                   {plan.steps.map((step, i) => (
                     <div key={`${step.filePath}:${i}`}
-                      className="px-2 py-1.5 border-b border-[#21262d] last:border-0">
+                      className="px-2 py-1.5 border-b border-[var(--bg-tertiary)] last:border-0">
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => { open(step.filePath); setView('editor'); }}
-                          className="text-[11px] text-[#58a6ff] hover:underline truncate font-mono"
+                          className="text-[11px] text-[var(--accent-hover)] hover:underline truncate font-mono"
                           title={`Open ${step.filePath}`}
                         >{step.filePath}</button>
                         <span className={`ml-auto shrink-0 text-[10px] ${
-                          step.status === 'applied' || step.status === 'done' ? 'text-[#3fb950]'
-                          : step.status === 'failed' ? 'text-[#f85149]'
-                          : step.status === 'running' ? 'text-[#d29922]' : 'text-[#484f58]'}`}>
+                          step.status === 'applied' || step.status === 'done' ? 'text-[var(--success)]'
+                          : step.status === 'failed' ? 'text-[var(--danger)]'
+                          : step.status === 'running' ? 'text-[var(--warning)]' : 'text-[var(--text-muted)]'}`}>
                           {step.status === 'applied' ? 'written'
                             : step.status === 'done' ? 'diff ready'
                             : step.status === 'failed' ? 'failed'
@@ -2717,18 +2718,18 @@ export default function CodePage() {
                           onClick={() => runPlanStep(i)}
                           disabled={Boolean(busy) || step.status === 'done'
                                     || step.status === 'applied'}
-                          className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] disabled:opacity-40"
+                          className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-40"
                         >{step.status === 'applied' ? 'written' : 'diff'}</button>
                       </div>
                       {step.reason && (
-                        <p className="text-[10px] text-[#484f58] mt-0.5">{step.reason}</p>
+                        <p className="text-[10px] text-[var(--text-muted)] mt-0.5">{step.reason}</p>
                       )}
                     </div>
                   ))}
                 </div>
                 {prepared.length > 0 && (
-                  <div className="flex items-center gap-2 px-2 py-1.5 border-t border-[#21262d]">
-                    <span className="text-[10px] text-[#8b949e]">
+                  <div className="flex items-center gap-2 px-2 py-1.5 border-t border-[var(--bg-tertiary)]">
+                    <span className="text-[10px] text-[var(--text-secondary)]">
                       {prepared.length} reviewed change{prepared.length === 1 ? '' : 's'} ready
                     </span>
                     <button
@@ -2780,17 +2781,17 @@ export default function CodePage() {
                 placeholder={bound
                   ? 'Describe the change. Paste an image or drop a file. Type @ to name a file or a swarm agent.'
                   : 'Bind a workspace first...'}
-                className="flex-1 min-w-0 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] resize-none focus:outline-none focus:border-[#3380FF]"
+                className="flex-1 min-w-0 bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] resize-none focus:outline-none focus:border-[var(--accent)]"
               />
               <button
                 onClick={makePlan}
                 disabled={!instruction.trim() || wsState !== 'connected' || !bound || planning}
-                className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium shrink-0"
+                className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium shrink-0"
                 title="Plan first — nothing is written until you approve a diff"
               >{planning ? '...' : 'Plan'}</button>
             </div>
 
-            <div className="flex items-center gap-3 mt-1.5 text-[10px] text-[#484f58]">
+            <div className="flex items-center gap-3 mt-1.5 text-[10px] text-[var(--text-muted)]">
               <label className="flex items-center gap-1 cursor-pointer">
                 <input ref={fileInputRef} type="file" multiple className="hidden"
                   accept="image/*,.txt,.md,.json,.csv,.log,.py,.js,.ts,.tsx,.jsx,.html,.css,.xml,.yaml,.yml,.ini,.cfg,.sh,.bat,.ps1,.toml,.sql,.pdf,.docx,.xlsx,.pptx"
@@ -2799,28 +2800,28 @@ export default function CodePage() {
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={wsState !== 'connected' || !bound}
-                  className="hover:text-[#58a6ff] disabled:opacity-40"
+                  className="hover:text-[var(--accent-hover)] disabled:opacity-40"
                   title="Attach an image, text file or document"
                 >Attach</button>
               </label>
               {activeTab && selectionAvailable && !pullFrom && (
                 <button
                   onClick={() => setPullFrom(currentSelection())}
-                  className="hover:text-[#58a6ff]"
+                  className="hover:text-[var(--accent-hover)]"
                   title={`Attach the selected lines from ${activeTab.name}`}
                 >Attach selection</button>
               )}
               {busy && !planning && plan && (
                 <button
                   onClick={() => { cancelRef.current = true; setBusy('Cancelling...'); }}
-                  className="hover:text-[#f85149]"
+                  className="hover:text-[var(--danger)]"
                   title="Stop after the diff in flight finishes — nothing is written"
                 >Stop</button>
               )}
               <span className="ml-auto">
                 Reads and searches the workspace and proposes edits as a diff you apply.
                 It cannot run other tools — for those, use{' '}
-                <a href="/chat" className="text-[#58a6ff] hover:underline">Chat</a>.
+                <a href="/chat" className="text-[var(--accent-hover)] hover:underline">Chat</a>.
               </span>
             </div>
           </div>
@@ -2830,17 +2831,17 @@ export default function CodePage() {
             change is only safe to make if it is reversible, and both the commit
             and the verify verdict already existed and were being thrown away. */}
         {checkpoint && (
-          <div className="flex items-center gap-2 px-3 py-1.5 border-t border-[#30363d] text-[11px] shrink-0 bg-[#161b22]">
-            <span className="text-[#8b949e] min-w-0 truncate">
+          <div className="flex items-center gap-2 px-3 py-1.5 border-t border-[var(--border)] text-[11px] shrink-0 bg-[var(--bg-secondary)]">
+            <span className="text-[var(--text-secondary)] min-w-0 truncate">
               {checkpoint.sha
-                ? <>Committed <code className="text-[#58a6ff]">{checkpoint.sha.slice(0, 8)}</code></>
+                ? <>Committed <code className="text-[var(--accent-hover)]">{checkpoint.sha.slice(0, 8)}</code></>
                 : <>Changed {checkpoint.files.length} file{checkpoint.files.length === 1 ? '' : 's'} (no git — backups kept)</>}
             </span>
             <span className="shrink-0">{verifyBadge(checkpoint.verify)}</span>
             <button
               onClick={undoLastChange}
               disabled={undoing}
-              className="ml-auto shrink-0 px-2 py-0.5 rounded border border-[#30363d] text-[#8b949e] hover:text-[#f85149] hover:border-[#f85149] disabled:opacity-40"
+              className="ml-auto shrink-0 px-2 py-0.5 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--danger)] hover:border-[var(--danger)] disabled:opacity-40"
               title={checkpoint.sha
                 ? 'Undo by reverting that commit — adds an inverse commit, never rewrites history'
                 : 'Undo by restoring the .bak kept beside each file'}
@@ -2848,17 +2849,17 @@ export default function CodePage() {
             <button
               onClick={() => setCheckpoint(null)}
               disabled={undoing}
-              className="shrink-0 text-[#484f58] hover:text-[#8b949e] disabled:opacity-40"
+              className="shrink-0 text-[var(--text-muted)] hover:text-[var(--text-secondary)] disabled:opacity-40"
               title="Dismiss — leaves the change in place"
             >X</button>
           </div>
         )}
 
-        <div className="flex items-center gap-4 px-3 py-1.5 border-t border-[#30363d] text-[11px] shrink-0">
+        <div className="flex items-center gap-4 px-3 py-1.5 border-t border-[var(--border)] text-[11px] shrink-0">
           <span className="min-w-0 truncate">{status}</span>
-          <span className="shrink-0 text-[#484f58]">Need a capability it lacks? {toolPointer}</span>
-          {applied && <span className="text-[#3fb950] ml-auto shrink-0">{applied}</span>}
-          {activeTab && <span className="text-[#8b949e] ml-auto shrink-0">{cursor}</span>}
+          <span className="shrink-0 text-[var(--text-muted)]">Need a capability it lacks? {toolPointer}</span>
+          {applied && <span className="text-[var(--success)] ml-auto shrink-0">{applied}</span>}
+          {activeTab && <span className="text-[var(--text-secondary)] ml-auto shrink-0">{cursor}</span>}
         </div>
       </div>
     </div>

@@ -203,12 +203,12 @@ export default function CliToolsSection({ send, connected }: {
   };
 
   if (!connected) {
-    return <p className="text-sm text-[#8b949e]">Connecting…</p>;
+    return <p className="text-sm text-[var(--text-secondary)]">Connecting…</p>;
   }
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <p className="text-sm text-[#8b949e]">
+      <p className="text-sm text-[var(--text-secondary)]">
         Ask for a tool and Addled will write one. You see the code before it is
         saved, and once saved it is a skill like any other — chat, the Code page
         and your swarm agents all use it. Tools you build are preferred over
@@ -216,12 +216,12 @@ export default function CliToolsSection({ send, connected }: {
       </p>
 
       {error && (
-        <div className="text-sm rounded-md border border-[#f85149] bg-[#3d1a1a] px-3 py-2 text-[#f85149]">
+        <div className="text-sm rounded-md border border-[var(--danger)] bg-[#3d1a1a] px-3 py-2 text-[var(--danger)]">
           {error}
         </div>
       )}
       {notice && (
-        <div className="text-sm rounded-md border border-[#30363d] bg-[#161b22] px-3 py-2 text-[#8b949e]">
+        <div className="text-sm rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-[var(--text-secondary)]">
           {notice}
         </div>
       )}
@@ -236,8 +236,8 @@ export default function CliToolsSection({ send, connected }: {
         <div
           className={`text-sm rounded-md border px-3 py-2 ${
             draft.test_result.success
-              ? 'border-[#238636] bg-[#0f2417] text-[#3fb950]'
-              : 'border-[#9e6a03] bg-[#2a2000] text-[#d29922]'
+              ? 'border-[#238636] bg-[#0f2417] text-[var(--success)]'
+              : 'border-[#9e6a03] bg-[#2a2000] text-[var(--warning)]'
           }`}
         >
           {draft.test_result.success ? (
@@ -261,28 +261,28 @@ export default function CliToolsSection({ send, connected }: {
       )}
 
       {/* ── Ask for one ─────────────────────────────────────────────── */}
-      <div className="border border-[#30363d] rounded-md p-4 space-y-3">
+      <div className="border border-[var(--border)] rounded-md p-4 space-y-3">
         <label className="block text-sm font-medium">What should the tool do?</label>
         <textarea
           value={capability}
           onChange={e => setCapability(e.target.value)}
           rows={3}
           placeholder="e.g. turn a folder of phone photos into resized PNGs"
-          className="w-full bg-[#0d1117] border border-[#30363d] rounded-md px-3 py-2 text-sm"
+          className="w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-md px-3 py-2 text-sm"
         />
         <div className="flex items-center gap-2">
-          <label className="text-xs text-[#8b949e] w-16">Name</label>
+          <label className="text-xs text-[var(--text-secondary)] w-16">Name</label>
           <input
             value={slug}
             onChange={e => { setSlug(e.target.value); setSlugTouched(true); }}
             placeholder="derived from the description"
-            className="flex-1 bg-[#0d1117] border border-[#30363d] rounded-md px-3 py-1.5 text-sm"
+            className="flex-1 bg-[var(--bg-primary)] border border-[var(--border)] rounded-md px-3 py-1.5 text-sm"
           />
         </div>
         <button
           onClick={doDraft}
           disabled={drafting || !capability.trim()}
-          className="px-3 py-1.5 rounded-md bg-[#1f6feb] text-white text-sm disabled:opacity-50"
+          className="px-3 py-1.5 rounded-md bg-[var(--accent)] text-white text-sm disabled:opacity-50"
         >
           {drafting ? 'Writing…' : 'Write the tool'}
         </button>
@@ -292,16 +292,16 @@ export default function CliToolsSection({ send, connected }: {
                 progress, and a number that crawls to 90% and then stops would
                 be worse than saying plainly that it is working. The bar is
                 full-width and translated, which is what reads as motion. */}
-            <div className="h-1 w-full overflow-hidden rounded-full bg-[#21262d]">
+            <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--bg-tertiary)]">
               <div className="cli-progress-bar h-full w-1/3 rounded-full
-                              bg-[#1f6feb]" />
+                              bg-[var(--accent)]" />
             </div>
-            <p className="text-xs text-[#8b949e]">
+            <p className="text-xs text-[var(--text-secondary)]">
               {draftSeconds < 3
                 ? 'Writing the tool…'
                 : `Still writing… ${draftSeconds}s. Larger tools take longer.`}
             </p>
-            <p className="text-xs text-[#8b949e]">
+            <p className="text-xs text-[var(--text-secondary)]">
               Nothing is saved until you review it.
             </p>
           </div>
@@ -310,11 +310,11 @@ export default function CliToolsSection({ send, connected }: {
 
       {/* ── Review what was written ─────────────────────────────────── */}
       {draft && (
-        <div className="border border-[#1f6feb] rounded-md p-4 space-y-3">
+        <div className="border border-[var(--accent)] rounded-md p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-medium">Review before saving</h3>
             {draft.package && (
-              <span className="text-xs text-[#8b949e]">
+              <span className="text-xs text-[var(--text-secondary)]">
                 needs the {draft.package} package
               </span>
             )}
@@ -324,9 +324,9 @@ export default function CliToolsSection({ send, connected }: {
             onChange={e => setSource(e.target.value)}
             rows={18}
             spellCheck={false}
-            className="w-full bg-[#0d1117] border border-[#30363d] rounded-md px-3 py-2 text-xs font-mono"
+            className="w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-md px-3 py-2 text-xs font-mono"
           />
-          <p className="text-xs text-[#8b949e]">
+          <p className="text-xs text-[var(--text-secondary)]">
             This is what will run on your machine. Edit it if you want — your
             version is what gets saved.
           </p>
@@ -340,7 +340,7 @@ export default function CliToolsSection({ send, connected }: {
             </button>
             <button
               onClick={() => { setDraft(null); setSource(''); }}
-              className="px-3 py-1.5 rounded-md border border-[#30363d] text-sm"
+              className="px-3 py-1.5 rounded-md border border-[var(--border)] text-sm"
             >
               Discard
             </button>
@@ -352,30 +352,30 @@ export default function CliToolsSection({ send, connected }: {
       <div>
         <div className="flex items-center justify-between mb-2">
           <h3 className="text-sm font-medium">
-            Your tools {tools.length > 0 && <span className="text-[#8b949e]">({tools.length})</span>}
+            Your tools {tools.length > 0 && <span className="text-[var(--text-secondary)]">({tools.length})</span>}
           </h3>
           {directory && (
-            <span className="text-xs text-[#8b949e] font-mono" title={directory}>
+            <span className="text-xs text-[var(--text-secondary)] font-mono" title={directory}>
               {directory}
             </span>
           )}
         </div>
 
-        {loading && <p className="text-sm text-[#8b949e]">Loading…</p>}
+        {loading && <p className="text-sm text-[var(--text-secondary)]">Loading…</p>}
         {!loading && tools.length === 0 && (
-          <p className="text-sm text-[#8b949e] border border-dashed border-[#30363d] rounded-md px-3 py-6 text-center">
+          <p className="text-sm text-[var(--text-secondary)] border border-dashed border-[var(--border)] rounded-md px-3 py-6 text-center">
             No tools yet. Describe one above and Addled will write it.
           </p>
         )}
 
         <div className="space-y-2">
           {tools.map(t => (
-            <div key={t.slug} className="border border-[#30363d] rounded-md">
+            <div key={t.slug} className="border border-[var(--border)] rounded-md">
               <div className="flex items-start justify-between px-3 py-2">
                 <div className="min-w-0">
                   <div className="text-sm font-medium font-mono">{t.name}</div>
-                  <div className="text-xs text-[#8b949e] truncate">{t.description}</div>
-                  <div className="text-xs text-[#8b949e] mt-0.5">
+                  <div className="text-xs text-[var(--text-secondary)] truncate">{t.description}</div>
+                  <div className="text-xs text-[var(--text-secondary)] mt-0.5">
                     {t.stats?.runs
                       ? `used ${t.stats.runs} time${t.stats.runs === 1 ? '' : 's'}`
                       : 'never used yet'}
@@ -385,21 +385,21 @@ export default function CliToolsSection({ send, connected }: {
                 <div className="flex gap-1 shrink-0 ml-2">
                   <button
                     onClick={() => (openSlug === t.slug ? setOpenSlug(null) : open(t))}
-                    className="px-2 py-1 text-xs rounded-md border border-[#30363d]"
+                    className="px-2 py-1 text-xs rounded-md border border-[var(--border)]"
                   >
                     {openSlug === t.slug ? 'Close' : 'Open'}
                   </button>
                   <button
                     onClick={() => doTest(t.slug)}
                     disabled={testing}
-                    className="px-2 py-1 text-xs rounded-md border border-[#30363d] disabled:opacity-50"
+                    className="px-2 py-1 text-xs rounded-md border border-[var(--border)] disabled:opacity-50"
                   >
                     {testing ? '…' : 'Test'}
                   </button>
                   <button
                     onClick={() => doRemove(t.slug)}
                     disabled={removing === t.slug}
-                    className="px-2 py-1 text-xs rounded-md border border-[#f85149] text-[#f85149] disabled:opacity-50"
+                    className="px-2 py-1 text-xs rounded-md border border-[var(--danger)] text-[var(--danger)] disabled:opacity-50"
                   >
                     {removing === t.slug ? '…' : 'Delete'}
                   </button>
@@ -407,11 +407,11 @@ export default function CliToolsSection({ send, connected }: {
               </div>
 
               {openSlug === t.slug && (
-                <div className="border-t border-[#30363d] px-3 py-2 space-y-2">
-                  <pre className="text-xs font-mono bg-[#0d1117] rounded-md p-2 overflow-auto max-h-80">
+                <div className="border-t border-[var(--border)] px-3 py-2 space-y-2">
+                  <pre className="text-xs font-mono bg-[var(--bg-primary)] rounded-md p-2 overflow-auto max-h-80">
                     {openSource || 'Reading…'}
                   </pre>
-                  <p className="text-xs text-[#8b949e]">
+                  <p className="text-xs text-[var(--text-secondary)]">
                     You can also run it yourself: <span className="font-mono">
                       python {directory ? directory + '\\' + t.slug + '\\tool.py' : 'tool.py'} --help
                     </span>
@@ -425,8 +425,8 @@ export default function CliToolsSection({ send, connected }: {
         {testResult && (
           <div className={`mt-2 text-xs rounded-md border px-3 py-2 font-mono whitespace-pre-wrap ${
             testResult.success
-              ? 'border-[#238636] bg-[#0d1117] text-[#3fb950]'
-              : 'border-[#f85149] bg-[#0d1117] text-[#f85149]'
+              ? 'border-[#238636] bg-[var(--bg-primary)] text-[var(--success)]'
+              : 'border-[var(--danger)] bg-[var(--bg-primary)] text-[var(--danger)]'
           }`}>
             {testResult.success
               ? `It works.\n${(testResult.stdout || '').slice(0, 1500)}`

@@ -1,28 +1,81 @@
 @import "tailwindcss";
 
+/* ── Theme tokens ───────────────────────────────────────────────────────────
+   Every surface colour in the app is a token, so Settings -> Appearance can
+   change the app by rewriting these variables on <html> at runtime. The
+   dashboard used to hardcode its colours in Tailwind arbitrary values
+   (`bg-[#0d1117]`, and 1,500 others), which is why the Theme control had
+   nothing to change even after its value was wired up: the classes named a
+   literal, and a literal cannot be themed. Whatever the palette, it is
+   written here once.
+
+   `--accent` is also the glow colour, so picking an accent recolours the
+   frame as well as the buttons. */
 :root {
+  /* Dark, the default. */
   --bg-primary: #0d1117;
   --bg-secondary: #161b22;
   --bg-tertiary: #21262d;
+  --bg-hover: #1f242c;
   --text-primary: #e8eaed;
   --text-secondary: #8b949e;
+  --text-muted: #484f58;
   --accent: #3380FF;
   --accent-hover: #4d94ff;
+  --accent-soft: rgba(51, 128, 255, 0.15);
   --danger: #f85149;
   --success: #3fb950;
   --warning: #d29922;
   --border: #30363d;
 
+  /* The accent glow. A ring that is solid at the window edge and fades to
+     nothing toward the middle: the four shadows are inset, so they paint
+     inward from each edge, and two of them stacked per side gives the falloff
+     rather than one flat band. `--accent-rgb` is the same colour split into
+     components because an rgba() cannot be built from a hex token. */
+  --accent-rgb: 51, 128, 255;
+  --glow-width: 90px;
+  --glow-strength: 0.55;
+
   /* Bubble shell. The window is frameless (`frame: false` in electron/main.js),
-     so this file is what gives it its shape: the OS no longer draws the
-     rounded corners, the border or the shadow, and a square frameless window
-     reads as a broken title bar rather than as a bubble. Kept as tokens
-     because the shell, the header and the rail all need to agree on them. */
+    so this file is what gives it its shape: the OS no longer draws the
+    rounded corners, the border or the shadow, and a square frameless window
+    reads as a broken title bar rather than as a bubble. Kept as tokens
+    because the shell, the header and the rail all need to agree on them. */
   --bubble-radius: 14px;
   --bubble-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
   --header-height: 38px;
   --rail-width: 52px;
   --rail-width-expanded: 168px;
+}
+
+/* Light. Not an inversion - an inversion produces a washed-out dark theme,
+   because the dark palette's midtones are chosen to sit on black. These are
+   picked to sit on white: text darker than the dark theme's text is light,
+   borders lighter, and the accent darkened so that white-on-accent stays
+   readable. The glow drops to a shadowless pale tint because a saturated
+   halo on white reads as a rendering fault rather than a frame. */
+html.theme-light {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f6f8fa;
+  --bg-tertiary: #eaeef2;
+  --bg-hover: #eef1f4;
+  --text-primary: #1f2328;
+  --text-secondary: #59636e;
+  --text-muted: #818b98;
+  --accent: #0969da;
+  --accent-hover: #0550ae;
+  --danger: #cf222e;
+  --success: #1a7f37;
+  --warning: #9a6700;
+  --border: #d1d9e0;
+  --bubble-shadow: 0 18px 50px rgba(31, 35, 40, 0.18);
+  --glow-strength: 0.18;
+  /* A fallback only: JS overwrites this from the chosen accent once the
+     appearance script runs. Stated so that a light theme is still readable if
+     that script never executes - inheriting the dark theme's blue wash on
+     white looks broken rather than unthemed. */
+  --accent-soft: rgba(9, 105, 218, 0.12);
 }
 
 /* Nothing in a frameless window may rely on the OS for chrome. The page must
@@ -46,11 +99,43 @@ body {
    trimmed by this overflow, which is what keeps the rail's full-height
    background from squaring off the rounded corner underneath it. */
 .bubble-shell {
+  position: relative;   /* the glow below is positioned against this */
   border-radius: var(--bubble-radius);
   border: 1px solid var(--border);
   box-shadow: var(--bubble-shadow);
   background: var(--bg-primary);
   overflow: hidden;
+}
+
+/* ── The accent glow ────────────────────────────────────────────────────────
+   A ring of the accent colour, solid at the window edge and fading to nothing
+   toward the middle - "like a frame", per the request. The colours are chosen
+   in Settings -> Appearance.
+
+   Drawn as an overlay rather than an inset box-shadow on `.bubble-shell`,
+   because the shell clips to its rounded corner (`overflow: hidden` above) and
+   would cut an inset shadow off at the radius. The overlay inherits that same
+   clip, so it rounds with the window.
+
+   Two shadows per side, not one: a `%` stop is not available in box-shadow, so
+   a single inset shadow ends in a hard edge at its blur radius. Stacking a
+   wide faint shadow under a narrow stronger one approximates the falloff.
+   `pointer-events: none` is essential - this covers the entire app. */
+.bubble-shell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 calc(var(--glow-width) * 2)
+      rgba(var(--accent-rgb), calc(var(--glow-strength) * 0.30)),
+    inset 0 0 var(--glow-width)
+      rgba(var(--accent-rgb), calc(var(--glow-strength) * 0.65));
+  /* Above the page, below anything the page raises deliberately (modals and
+     toasts use z-index 50+). A frame that painted over a dialog would look
+     like a bug. */
+  z-index: 10;
 }
 
 /* ── Draggable header ───────────────────────────────────────────────────────

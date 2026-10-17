@@ -15,12 +15,12 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="flex h-full items-center justify-center text-[#8b949e]">
+    <div className="flex h-full items-center justify-center text-[var(--text-secondary)]">
       <div className="text-center">
         <div className="animate-spin text-2xl mb-3">⟳</div>
         <p>Opening the dashboard…</p>
         <p className="mt-3 text-sm">
-          <Link href="/chat" className="text-[#3380FF] hover:underline">
+          <Link href="/chat" className="text-[var(--accent)] hover:underline">
             Go to chat
           </Link>
         </p>

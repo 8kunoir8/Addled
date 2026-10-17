@@ -535,25 +535,25 @@ export default function ChatPage() {
       onDrop={handleDrop}>
       {/* Drop overlay */}
       {dragActive && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#0d1117]/85 border-2 border-dashed border-[#3380FF] rounded-lg pointer-events-none">
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-[var(--bg-primary)]/85 border-2 border-dashed border-[var(--accent)] rounded-lg pointer-events-none">
           <div className="text-center">
             <div className="text-3xl mb-2">⬇</div>
-            <p className="text-sm font-medium text-[#e8eaed]">Drop to attach</p>
-            <p className="text-xs text-[#8b949e] mt-1">Images, text, documents — or paste from the clipboard</p>
+            <p className="text-sm font-medium text-[var(--text-primary)]">Drop to attach</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-1">Images, text, documents — or paste from the clipboard</p>
           </div>
         </div>
       )}
       {/* Header */}
-      <header className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[#30363d]">
+      <header className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border)]">
         <div className="min-w-0">
           <h1 className="text-sm font-semibold">Chat</h1>
           {workScope && (
-            <p className="text-[11px] text-[#8b949e] truncate" title={workScope}>
+            <p className="text-[11px] text-[var(--text-secondary)] truncate" title={workScope}>
               Work scope: {workScope}
             </p>
           )}
         </div>
-        <span className="text-xs text-[#8b949e] shrink-0">
+        <span className="text-xs text-[var(--text-secondary)] shrink-0">
           {wsState === 'connected' ? 'Connected' : wsState === 'connecting' ? 'Connecting...' : 'Disconnected'}
         </span>
       </header>
@@ -567,11 +567,11 @@ export default function ChatPage() {
             told no. */}
         {messages.length === 0 && approvals.length === 0
           && questionsFor('dashboard').length === 0 && (
-          <div className="text-center text-sm text-[#8b949e] pt-10">
+          <div className="text-center text-sm text-[var(--text-secondary)] pt-10">
             <p>Ask anything, or give Addled a task.</p>
             <p className="mt-3">
               Need a capability it does not have?{" "}
-              <Link href="/settings?section=cli-tools" className="text-[#58a6ff] hover:underline">
+              <Link href="/settings?section=cli-tools" className="text-[var(--accent-hover)] hover:underline">
                 Build a tool for it
               </Link>{" "}
               — you review the code before it is saved.
@@ -589,7 +589,7 @@ export default function ChatPage() {
                   to before replying. */}
               {msg.sourceLabel && (
                 <div className={`mb-1.5 -mt-0.5 text-[10px] flex items-center gap-1 ${
-                  msg.role === 'user' ? 'text-blue-200' : 'text-[#8b949e]'
+                  msg.role === 'user' ? 'text-blue-200' : 'text-[var(--text-secondary)]'
                 }`}>
                   <span aria-hidden="true">{msg.sourceIcon}</span>
                   <span className="opacity-90">via {msg.sourceLabel}</span>
@@ -612,7 +612,7 @@ export default function ChatPage() {
                 {msg.content}
                 {msg.streaming && <span className="typing-cursor" />}
               </div>
-              <div className={`text-xs mt-1 ${msg.role === 'user' ? 'text-blue-200' : 'text-[#8b949e]'}`}>
+              <div className={`text-xs mt-1 ${msg.role === 'user' ? 'text-blue-200' : 'text-[var(--text-secondary)]'}`}>
                 {msg.timestamp > 0 &&
                   new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </div>
@@ -658,34 +658,34 @@ export default function ChatPage() {
       </div>
 
       {/* Input */}
-      <div className="border-t border-[#30363d] p-4">
+      <div className="border-t border-[var(--border)] p-4">
         {usage && (
           <div className="flex flex-wrap items-center gap-1.5 mb-2">
             <span title="Skills the assistant can call right now"
-              className="text-[10px] px-2 py-0.5 rounded-full bg-[#21262d] text-[#8b949e] border border-[#30363d]">
+              className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--bg-tertiary)] text-[var(--text-secondary)] border border-[var(--border)]">
               🔧 {usage.skills ?? 0} skills
             </span>
             {(usage.mcpServers || []).map((s: string) => (
               <span key={s} title={`MCP server '${s}' is connected`}
-                className="text-[10px] px-2 py-0.5 rounded-full bg-[#3fb95022] text-[#3fb950] border border-[#3fb95044] max-w-[220px] truncate">
+                className="text-[10px] px-2 py-0.5 rounded-full bg-[#3fb95022] text-[var(--success)] border border-[#3fb95044] max-w-[220px] truncate">
                 🧰 {s}
               </span>
             ))}
             {(usage.mcpTools || 0) > 0 && (
               <span title="Tools contributed by the connected MCP servers"
-                className="text-[10px] px-2 py-0.5 rounded-full bg-[#21262d] text-[#8b949e] border border-[#30363d]">
+                className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--bg-tertiary)] text-[var(--text-secondary)] border border-[var(--border)]">
                 {usage.mcpTools} MCP tools
               </span>
             )}
             {(usage.used || []).length > 0
               ? (usage.used || []).map((u: string) => (
                 <span key={u} title="Called while answering the last message"
-                  className="text-[10px] px-2 py-0.5 rounded-full bg-[#1f6feb22] text-[#58a6ff] border border-[#1f6feb44] max-w-[280px] truncate">
+                  className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent-hover)] border border-[#1f6feb44] max-w-[280px] truncate">
                   ✓ used {u}
                 </span>
               ))
               : <span title="No tool was called for the last message"
-                  className="text-[10px] px-2 py-0.5 rounded-full bg-[#21262d] text-[#8b949e] border border-[#30363d]">
+                  className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--bg-tertiary)] text-[var(--text-secondary)] border border-[var(--border)]">
                   no tool used
                 </span>}
           </div>
@@ -694,18 +694,18 @@ export default function ChatPage() {
           <div className="flex flex-wrap gap-1.5 mb-2">
             {anchors.map((a, i) => (
               <span key={i} title={a.text}
-                className="text-[10px] px-2 py-0.5 rounded-full bg-[#1f6feb22] text-[#58a6ff] border border-[#1f6feb44] max-w-[280px] truncate">
+                className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent-hover)] border border-[#1f6feb44] max-w-[280px] truncate">
                 🧠 {a.type === 'facts' ? 'memory' : a.type === 'timeline' ? 'timeline' : 'recall'} · {a.text.slice(0, 60)}…
               </span>
             ))}
           </div>
         )}
         {activity && (
-          <div className="mb-2 flex items-center gap-2 text-[11px] text-[#d29922]"
+          <div className="mb-2 flex items-center gap-2 text-[11px] text-[var(--warning)]"
             role="status" aria-live="polite">
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#d29922] animate-pulse" />
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--warning)] animate-pulse" />
             <span>{activity}</span>
-            <span className="text-[#8b949e]">
+            <span className="text-[var(--text-secondary)]">
               This can take up to a minute on a local model.
             </span>
           </div>
@@ -713,7 +713,7 @@ export default function ChatPage() {
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {attachments.map((a, i) => (
-              <div key={i} className="flex items-center gap-1.5 bg-[#21262d] border border-[#30363d] rounded-md pl-2 pr-1 py-1 text-xs text-[#e8eaed]">
+              <div key={i} className="flex items-center gap-1.5 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-md pl-2 pr-1 py-1 text-xs text-[var(--text-primary)]">
                 {a.kind === 'image' && a.preview ? (
                   <img src={a.preview} alt={a.name} className="h-8 w-8 object-cover rounded" />
                 ) : (
@@ -721,7 +721,7 @@ export default function ChatPage() {
                 )}
                 <span className="max-w-[140px] truncate">{a.name}</span>
                 <button onClick={() => removeAttachment(i)} title="Remove"
-                  className="text-[#8b949e] hover:text-[#f85149] px-1">✕</button>
+                  className="text-[var(--text-secondary)] hover:text-[var(--danger)] px-1">✕</button>
               </div>
             ))}
           </div>
@@ -733,14 +733,14 @@ export default function ChatPage() {
           <div className="flex flex-wrap gap-2 mb-2">
             {agentMentions.map(name => (
               <div key={name}
-                className="flex items-center gap-1.5 rounded-md pl-2 pr-1 py-1 text-xs text-[#58a6ff]"
+                className="flex items-center gap-1.5 rounded-md pl-2 pr-1 py-1 text-xs text-[var(--accent-hover)]"
                 style={{ background: '#1f6feb22', border: '1px solid #1f6feb55' }}>
                 <span>🐝</span>
                 <span className="max-w-[140px] truncate">{name}</span>
                 <button
                   onClick={() => setAgentMentions(prev => prev.filter(n => n !== name))}
                   title="Remove this agent"
-                  className="text-[#8b949e] hover:text-[#f85149] px-1">✕</button>
+                  className="text-[var(--text-secondary)] hover:text-[var(--danger)] px-1">✕</button>
               </div>
             ))}
           </div>
@@ -757,10 +757,10 @@ export default function ChatPage() {
                 onClick={() => setAgentMenuOpen(o => !o)}
                 disabled={isLoading || wsState !== 'connected'}
                 title="Name a swarm agent for this request"
-                className="bg-[#161b22] border border-[#30363d] hover:border-[#484f58] disabled:opacity-50 rounded-lg px-3 py-2 text-sm text-[#8b949e] transition-colors"
+                className="bg-[var(--bg-secondary)] border border-[var(--border)] hover:border-[var(--text-muted)] disabled:opacity-50 rounded-lg px-3 py-2 text-sm text-[var(--text-secondary)] transition-colors"
               >🐝</button>
               {agentMenuOpen && (
-                <div className="absolute z-20 bottom-full mb-1 left-0 w-56 max-h-56 overflow-y-auto bg-[#161b22] border border-[#30363d] rounded shadow-lg">
+                <div className="absolute z-20 bottom-full mb-1 left-0 w-56 max-h-56 overflow-y-auto bg-[var(--bg-secondary)] border border-[var(--border)] rounded shadow-lg">
                   {swarmAgents.map(a => (
                     <button
                       key={a.name}
@@ -768,12 +768,12 @@ export default function ChatPage() {
                         setAgentMentions(prev => prev.includes(a.name) ? prev : [...prev, a.name]);
                         setAgentMenuOpen(false);
                       }}
-                      className="w-full text-left px-3 py-1.5 text-xs hover:bg-[#21262d] flex items-center gap-2"
+                      className="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] flex items-center gap-2"
                       title={a.role || a.name}
                     >
                       <span>{agentMentions.includes(a.name) ? '✓' : '🐝'}</span>
-                      <span className="truncate text-[#c9d1d9]">{a.name}</span>
-                      <span className="ml-auto shrink-0 text-[10px] text-[#8b949e] truncate max-w-[80px]">
+                      <span className="truncate text-[var(--text-primary)]">{a.name}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-[var(--text-secondary)] truncate max-w-[80px]">
                         {a.role}
                       </span>
                     </button>
@@ -786,7 +786,7 @@ export default function ChatPage() {
             onClick={() => fileInputRef.current?.click()}
             disabled={isLoading || wsState !== 'connected' || processingFiles}
             title="Attach an image, text file or document"
-            className="bg-[#161b22] border border-[#30363d] hover:border-[#484f58] disabled:opacity-50 rounded-lg px-3 py-2 text-sm text-[#8b949e] transition-colors"
+            className="bg-[var(--bg-secondary)] border border-[var(--border)] hover:border-[var(--text-muted)] disabled:opacity-50 rounded-lg px-3 py-2 text-sm text-[var(--text-secondary)] transition-colors"
           >
             {processingFiles ? '⟳' : '📎'}
           </button>
@@ -798,17 +798,17 @@ export default function ChatPage() {
             placeholder={wsState === 'connected' ? 'Message Addled...' : 'Connecting to Addled...'}
             disabled={wsState !== 'connected' || isLoading}
             rows={1}
-            className="flex-1 bg-[#161b22] border border-[#30363d] rounded-lg px-4 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] resize-none focus:outline-none focus:border-[#3380FF] disabled:opacity-50"
+            className="flex-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg px-4 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] resize-none focus:outline-none focus:border-[var(--accent)] disabled:opacity-50"
           />
           <button
             onClick={handleSend}
             disabled={(!input.trim() && !attachments.length) || isLoading || wsState !== 'connected'}
-            className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+            className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
           >
             {isLoading ? '...' : 'Send'}
           </button>
         </div>
-        <p className="text-[10px] text-[#484f58] mt-1.5">Paste, drop or attach an image, text file or document. Images are analyzed by the visual model and described to the main model; text is sent as content.</p>
+        <p className="text-[10px] text-[var(--text-muted)] mt-1.5">Paste, drop or attach an image, text file or document. Images are analyzed by the visual model and described to the main model; text is sent as content.</p>
       </div>
     </div>
   );

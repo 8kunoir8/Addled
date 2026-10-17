@@ -18,6 +18,7 @@ import QuestionCard from '@/components/QuestionCard';
 import CommandConsole from '@/components/CommandConsole';
 import { upsertCommand, type CommandEntry } from '@/lib/consoleStore';
 import { upsertStep, type TrajectoryStep } from '@/lib/trajectoryStore';
+import { applyStoredAppearance, watchSystemTheme } from '@/lib/appearance';
 import "./globals.css";
 
 const NAV_ITEMS = [
@@ -129,6 +130,22 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     upsertStep(p as TrajectoryStep);
   }), [onNotification]);
 
+  // Paint with the appearance the user chose, and keep following the OS while
+  // they have chosen "System".
+  //
+  // `applyStoredAppearance` reads the copy Settings -> Appearance mirrored
+  // into localStorage, so this does not wait for the socket or for
+  // `settings.get` - the dashboard opens in the right colours instead of
+  // flashing the dark default first. The small inline script in the page's
+  // <head> has already applied it once before hydration; this re-applies it
+  // for the client-side navigations that follow.
+  useEffect(() => {
+    const current = applyStoredAppearance();
+    return watchSystemTheme(
+      () => current.theme,   // the stored choice, re-read on each OS change
+      () => applyStoredAppearance(),
+    );
+  }, []);
   useEffect(() => subscribeApprovals(setApprovals), []);
   useEffect(() => subscribeApprovalErrors(setApprovalErrors), []);
   useEffect(() => subscribeQuestions(setQuestionsState), []);
@@ -304,8 +321,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   );
                 })}
               </div>
-              <div className="border-t border-[#30363d] px-3 pt-2 pb-1 shrink-0">
-                <div className="flex items-center gap-2 text-xs text-[#8b949e]">
+              <div className="border-t border-[var(--border)] px-3 pt-2 pb-1 shrink-0">
+                <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
                   <span className={`w-2 h-2 rounded-full shrink-0 ${wsStatusColor}`} />
                   <span className="rail-label">
                     {STATE_LABELS[characterState] || characterState || 'Disconnected'}
@@ -340,7 +357,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               />
             ))}
             {approvals.length > 3 && (
-              <p className="text-[10px] text-[#8b949e] text-right">
+              <p className="text-[10px] text-[var(--text-secondary)] text-right">
                 +{approvals.length - 3} more waiting
               </p>
             )}
@@ -365,7 +382,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               />
             ))}
             {questions.length > 2 && (
-              <p className="text-[10px] text-[#8b949e] text-right">
+              <p className="text-[10px] text-[var(--text-secondary)] text-right">
                 +{questions.length - 2} more waiting
               </p>
             )}
@@ -374,21 +391,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
         {/* Desktop-control permission prompt */}
         {desktopPrompt && (
-          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[#d29922] bg-[#161b22] p-4 shadow-xl">
-            <p className="text-sm font-semibold text-[#e8eaed]">🖱 Desktop control requested</p>
-            <p className="text-xs text-[#8b949e] mt-1">
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[var(--warning)] bg-[var(--bg-secondary)] p-4 shadow-xl">
+            <p className="text-sm font-semibold text-[var(--text-primary)]">🖱 Desktop control requested</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-1">
               The agent wants to move the mouse / type on your desktop. Grant access for this session only?
-              <br /><span className="text-[#484f58]">Emergency stop: mouse to top-left corner, or Ctrl+Shift+Alt+K.</span>
+              <br /><span className="text-[var(--text-muted)]">Emergency stop: mouse to top-left corner, or Ctrl+Shift+Alt+K.</span>
             </p>
             <div className="flex gap-2 mt-3">
               <button
                 onClick={() => { send('desktop.grant', {}).catch(() => {}); setDesktopPrompt(false); }}
-                className="flex-1 bg-[#3380FF] hover:bg-[#4d94ff] text-white rounded-md py-1.5 text-sm font-medium">
+                className="flex-1 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white rounded-md py-1.5 text-sm font-medium">
                 Allow this session
               </button>
               <button
                 onClick={() => { send('desktop.revoke', {}).catch(() => {}); setDesktopPrompt(false); }}
-                className="flex-1 bg-[#3d1f1f] hover:bg-[#5a2a2a] text-[#f85149] rounded-md py-1.5 text-sm font-medium">
+                className="flex-1 bg-[#3d1f1f] hover:bg-[#5a2a2a] text-[var(--danger)] rounded-md py-1.5 text-sm font-medium">
                 Deny
               </button>
             </div>
@@ -397,22 +414,22 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
         {/* Browser backend install prompt */}
         {browserPrompt && (
-          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[#3380FF] bg-[#161b22] p-4 shadow-xl">
-            <p className="text-sm font-semibold text-[#e8eaed]">⬇ Install {browserPrompt}?</p>
-            <p className="text-xs text-[#8b949e] mt-1">
-              Addled needs <span className="font-mono text-[#58a6ff]">{browserPrompt}</span> for this task
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[var(--accent)] bg-[var(--bg-secondary)] p-4 shadow-xl">
+            <p className="text-sm font-semibold text-[var(--text-primary)]">⬇ Install {browserPrompt}?</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-1">
+              Addled needs <span className="font-mono text-[var(--accent-hover)]">{browserPrompt}</span> for this task
               {browserPrompt === 'playwright' ? ' (Playwright + Chromium, ~170 MB)' : ' (the browser-use framework)'}.
               Install it now?
             </p>
             <div className="flex gap-2 mt-3">
               <button
                 onClick={() => { send('browser.installApprove', { backend: browserPrompt }).catch(() => {}); setBrowserPrompt(null); }}
-                className="flex-1 bg-[#3380FF] hover:bg-[#4d94ff] text-white rounded-md py-1.5 text-sm font-medium">
+                className="flex-1 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white rounded-md py-1.5 text-sm font-medium">
                 Install
               </button>
               <button
                 onClick={() => setBrowserPrompt(null)}
-                className="flex-1 bg-[#21262d] hover:bg-[#30363d] text-[#8b949e] rounded-md py-1.5 text-sm font-medium">
+                className="flex-1 bg-[var(--bg-tertiary)] hover:bg-[var(--border)] text-[var(--text-secondary)] rounded-md py-1.5 text-sm font-medium">
                 Not now
               </button>
             </div>
@@ -421,23 +438,23 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
         {/* Local model download prompt — nothing downloads without consent */}
         {localPrompt && (
-          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[#8957e5] bg-[#161b22] p-4 shadow-xl">
-            <p className="text-sm font-semibold text-[#e8eaed]">🧠 Download the local AI model?</p>
-            <p className="text-xs text-[#8b949e] mt-1">
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-[#8957e5] bg-[var(--bg-secondary)] p-4 shadow-xl">
+            <p className="text-sm font-semibold text-[var(--text-primary)]">🧠 Download the local AI model?</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-1">
               Addled can run{' '}
-              <span className="font-mono text-[#58a6ff]">{localPrompt.model_file || 'a local model'}</span>{' '}
+              <span className="font-mono text-[var(--accent-hover)]">{localPrompt.model_file || 'a local model'}</span>{' '}
               on this PC with llamafile — no API key and it works offline. About{' '}
               {localPrompt.size_mb ? `${(localPrompt.size_mb / 1024).toFixed(1)} GB` : '5.0 GB'} to download.
             </p>
             <div className="flex gap-2 mt-3">
               <button
                 onClick={() => { send('localLlm.installApprove', {}).catch(() => {}); setLocalPrompt(null); }}
-                className="flex-1 bg-[#3380FF] hover:bg-[#4d94ff] text-white rounded-md py-1.5 text-sm font-medium">
+                className="flex-1 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white rounded-md py-1.5 text-sm font-medium">
                 Download
               </button>
               <button
                 onClick={() => { send('localLlm.installDecline', {}).catch(() => {}); setLocalPrompt(null); }}
-                className="flex-1 bg-[#21262d] hover:bg-[#30363d] text-[#8b949e] rounded-md py-1.5 text-sm font-medium">
+                className="flex-1 bg-[var(--bg-tertiary)] hover:bg-[var(--border)] text-[var(--text-secondary)] rounded-md py-1.5 text-sm font-medium">
                 No thanks
               </button>
             </div>
@@ -447,23 +464,23 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* A delegated swarm task finishing — a toast everywhere except the
             chat, which files the full answer into the conversation itself. */}
         {swarmResult && pathname !== '/chat' && (
-          <div className="fixed bottom-4 right-4 z-40 w-80 rounded-lg border border-[#8957e5] bg-[#161b22] p-3 shadow-xl">
-            <p className="text-xs font-semibold text-[#e8eaed]">
+          <div className="fixed bottom-4 right-4 z-40 w-80 rounded-lg border border-[#8957e5] bg-[var(--bg-secondary)] p-3 shadow-xl">
+            <p className="text-xs font-semibold text-[var(--text-primary)]">
               {swarmResult.success ? `🐝 ${swarmResult.agent} finished`
                                     : `⚠ ${swarmResult.agent} could not finish`}
             </p>
-            <p className="mt-1.5 text-[11px] text-[#8b949e] whitespace-pre-wrap break-words">
+            <p className="mt-1.5 text-[11px] text-[var(--text-secondary)] whitespace-pre-wrap break-words">
               {swarmResult.text.length > 260
                 ? swarmResult.text.slice(0, 260) + '…'
                 : swarmResult.text}
             </p>
             <div className="mt-2 flex gap-2">
               <Link href="/chat"
-                    className="text-[10px] text-[#58a6ff] hover:text-[#4d94ff]">
+                    className="text-[10px] text-[var(--accent-hover)] hover:text-[var(--accent-hover)]">
                 Open in Chat
               </Link>
               <button onClick={() => setSwarmResult(null)}
-                      className="text-[10px] text-[#8b949e] hover:text-[#e8eaed]">
+                      className="text-[10px] text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
                 Dismiss
               </button>
             </div>
@@ -472,22 +489,22 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
         {/* Local model download progress */}
         {localProgress && (
-          <div className="fixed bottom-4 right-4 z-40 w-72 rounded-lg border border-[#30363d] bg-[#161b22] p-3 shadow-xl">
-            <p className="text-xs font-semibold text-[#e8eaed]">
+          <div className="fixed bottom-4 right-4 z-40 w-72 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-3 shadow-xl">
+            <p className="text-xs font-semibold text-[var(--text-primary)]">
               {localProgress.phase === 'failed' ? '⚠ Download failed'
                 : localProgress.phase === 'cancelled' ? 'Download cancelled'
                 : '⬇ Downloading local model'}
             </p>
-            <div className="mt-2 h-1.5 w-full rounded bg-[#21262d] overflow-hidden">
-              <div className="h-full bg-[#3380FF] transition-all"
+            <div className="mt-2 h-1.5 w-full rounded bg-[var(--bg-tertiary)] overflow-hidden">
+              <div className="h-full bg-[var(--accent)] transition-all"
                    style={{ width: `${Math.min(100, Math.max(0, localProgress.pct))}%` }} />
             </div>
-            <p className="mt-1.5 text-[10px] text-[#8b949e] truncate">
+            <p className="mt-1.5 text-[10px] text-[var(--text-secondary)] truncate">
               {localProgress.detail} · {Math.round(localProgress.pct)}%
             </p>
             {(localProgress.phase === 'failed' || localProgress.phase === 'cancelled') && (
               <button onClick={() => setLocalProgress(null)}
-                      className="mt-2 text-[10px] text-[#8b949e] hover:text-[#e8eaed]">
+                      className="mt-2 text-[10px] text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
                 Dismiss
               </button>
             )}
@@ -551,9 +568,9 @@ function WindowHeader({
           anywhere — a disconnected app looks identical to an idle one
           otherwise. */}
       {wsState !== 'connected' && (
-        <span className="text-[11px] text-[#f85149]">
+        <span className="text-[11px] text-[var(--danger)]">
           {wsState === 'connecting' ? 'Connecting…'
-            : <>Backend not running · <code className="text-[#58a6ff]">python backend/main.py</code></>}
+            : <>Backend not running · <code className="text-[var(--accent-hover)]">python backend/main.py</code></>}
         </span>
       )}
 
@@ -561,7 +578,7 @@ function WindowHeader({
       <span className="flex-1" />
 
       <span className={`w-2 h-2 rounded-full ${wsStatusColor}`} />
-      <span className="text-[11px] text-[#8b949e] mr-1">
+      <span className="text-[11px] text-[var(--text-secondary)] mr-1">
         {STATE_LABELS[characterState || ''] || characterState || ''}
       </span>
 

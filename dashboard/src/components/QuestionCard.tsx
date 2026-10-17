@@ -58,26 +58,26 @@ export default function QuestionCard({
 
   return (
     <div
-      className={`rounded-lg border ${error ? 'border-[#f85149]' : 'border-[#1f6feb]'} bg-[#161b22] ${compact ? 'p-3' : 'p-3.5'} my-2 max-w-[520px]`}
+      className={`rounded-lg border ${error ? 'border-[var(--danger)]' : 'border-[var(--accent)]'} bg-[var(--bg-secondary)] ${compact ? 'p-3' : 'p-3.5'} my-2 max-w-[520px]`}
       role="group"
       aria-label="Addled is asking a question"
     >
-      <p className="text-sm font-semibold text-[#e8eaed] flex items-center gap-1.5">
+      <p className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-1.5">
         <span>❓</span>
         Addled needs to know
       </p>
 
-      <p className="text-sm text-[#e8eaed] mt-1.5 break-words">
+      <p className="text-sm text-[var(--text-primary)] mt-1.5 break-words">
         {question.question}
       </p>
 
       {question.context && (
-        <p className="text-[11px] text-[#8b949e] mt-1 break-words">
+        <p className="text-[11px] text-[var(--text-secondary)] mt-1 break-words">
           {question.context}
         </p>
       )}
 
-      {error && <p className="text-xs text-[#f85149] mt-2">{error}</p>}
+      {error && <p className="text-xs text-[var(--danger)] mt-2">{error}</p>}
 
       {hasChoices ? (
         <div className="flex flex-wrap gap-2 mt-3">
@@ -86,7 +86,7 @@ export default function QuestionCard({
               key={option}
               onClick={() => send(option)}
               disabled={pending}
-              className="bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 border border-[#30363d] text-[#e8eaed] rounded-md px-3 py-1.5 text-xs font-medium max-w-[240px] truncate"
+              className="bg-[var(--bg-tertiary)] hover:bg-[var(--border)] disabled:opacity-50 border border-[var(--border)] text-[var(--text-primary)] rounded-md px-3 py-1.5 text-xs font-medium max-w-[240px] truncate"
               title={option}
             >
               {option}
@@ -96,7 +96,7 @@ export default function QuestionCard({
             <button
               onClick={() => { if (!pending) { setLocalBusy(true); onDismiss(); } }}
               disabled={pending}
-              className="bg-[#3d1f1f] hover:bg-[#5a2a2a] disabled:opacity-50 text-[#f85149] rounded-md px-3 py-1.5 text-xs font-medium"
+              className="bg-[#3d1f1f] hover:bg-[#5a2a2a] disabled:opacity-50 text-[var(--danger)] rounded-md px-3 py-1.5 text-xs font-medium"
             >
               Skip
             </button>
@@ -113,12 +113,12 @@ export default function QuestionCard({
             disabled={pending}
             placeholder="Type your answer…"
             aria-label="Your answer"
-            className="flex-1 min-w-0 bg-[#0d1117] border border-[#30363d] rounded-md px-3 py-1.5 text-xs text-[#e8eaed] disabled:opacity-50"
+            className="flex-1 min-w-0 bg-[var(--bg-primary)] border border-[var(--border)] rounded-md px-3 py-1.5 text-xs text-[var(--text-primary)] disabled:opacity-50"
           />
           <button
             type="submit"
             disabled={pending || !text.trim()}
-            className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-md px-3 py-1.5 text-xs font-medium"
+            className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded-md px-3 py-1.5 text-xs font-medium"
           >
             Answer
           </button>
@@ -127,7 +127,7 @@ export default function QuestionCard({
               type="button"
               onClick={() => { if (!pending) { setLocalBusy(true); onDismiss(); } }}
               disabled={pending}
-              className="bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 border border-[#30363d] text-[#8b949e] rounded-md px-3 py-1.5 text-xs font-medium"
+              className="bg-[var(--bg-tertiary)] hover:bg-[var(--border)] disabled:opacity-50 border border-[var(--border)] text-[var(--text-secondary)] rounded-md px-3 py-1.5 text-xs font-medium"
             >
               Skip
             </button>
@@ -135,7 +135,7 @@ export default function QuestionCard({
         </form>
       )}
 
-      <p className="text-[10px] text-[#484f58] mt-2">
+      <p className="text-[10px] text-[var(--text-muted)] mt-2">
         {question.ttl
           ? `Waiting for ${question.ttl}. Addled carries on when you answer.`
           : 'Addled carries on when you answer.'}

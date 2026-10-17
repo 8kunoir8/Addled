@@ -100,9 +100,9 @@ export default function BotsPage() {
   };
 
   const dot = (bot: Bot) =>
-    bot.running ? 'bg-[#3fb950]'
-    : bot.ready ? 'bg-[#d29922]'
-    : 'bg-[#484f58]';
+    bot.running ? 'bg-[var(--success)]'
+    : bot.ready ? 'bg-[var(--warning)]'
+    : 'bg-[var(--text-muted)]';
 
   const state = (bot: Bot) =>
     bot.running ? `running${bot.pid ? ` (pid ${bot.pid})` : ''}`
@@ -111,37 +111,37 @@ export default function BotsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <header className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+      <header className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
         <h1 className="text-sm font-semibold">Bot Bridges</h1>
-        <button onClick={load} className="text-xs px-2 py-1 rounded border border-[#30363d] hover:border-[#8b949e] text-[#8b949e] hover:text-[#e8eaed]">
+        <button onClick={load} className="text-xs px-2 py-1 rounded border border-[var(--border)] hover:border-[var(--text-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
           Refresh
         </button>
       </header>
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {wsState !== 'connected' && <p className="text-sm text-[#f85149]">Backend not connected.</p>}
-        {error && <p className="text-sm text-[#f85149]">{error}</p>}
-        {note && <p className="text-sm text-[#3fb950]">{note}</p>}
+        {wsState !== 'connected' && <p className="text-sm text-[var(--danger)]">Backend not connected.</p>}
+        {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
+        {note && <p className="text-sm text-[var(--success)]">{note}</p>}
 
         {bots.map(bot => (
-          <div key={bot.id} className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+          <div key={bot.id} className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg p-4">
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-3">
                 <span className="text-2xl">{bot.icon}</span>
                 <div>
-                  <h3 className="text-sm font-medium text-[#e8eaed]">{bot.name}</h3>
-                  <p className="text-xs text-[#8b949e]">{bot.label}</p>
+                  <h3 className="text-sm font-medium text-[var(--text-primary)]">{bot.name}</h3>
+                  <p className="text-xs text-[var(--text-secondary)]">{bot.label}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
                 <span className={`w-2 h-2 rounded-full ${dot(bot)} ${bot.running ? 'animate-pulse' : ''}`} />
-                <span className="text-xs text-[#8b949e]">{state(bot)}</span>
+                <span className="text-xs text-[var(--text-secondary)]">{state(bot)}</span>
               </div>
             </div>
 
             {bot.blockers.length > 0 && (
               <ul className="mb-3 space-y-0.5">
                 {bot.blockers.map((b, i) => (
-                  <li key={i} className="text-xs text-[#d29922]">• {b}</li>
+                  <li key={i} className="text-xs text-[var(--warning)]">• {b}</li>
                 ))}
               </ul>
             )}
@@ -153,12 +153,12 @@ export default function BotsPage() {
                   value={drafts[bot.id] ?? ''}
                   onChange={e => setDrafts(p => ({ ...p, [bot.id]: e.target.value }))}
                   placeholder={bot.has_token ? `${bot.token_env} saved — paste a new one to replace` : bot.token_env}
-                  className="flex-1 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] font-mono placeholder-[#484f58]"
+                  className="flex-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] font-mono placeholder-[var(--text-muted)]"
                 />
                 <button
                   onClick={() => saveToken(bot)}
                   disabled={busy === bot.id}
-                  className="text-xs px-3 py-1 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] disabled:opacity-50">
+                  className="text-xs px-3 py-1 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50">
                   {bot.has_token && !(drafts[bot.id] ?? '').trim() ? 'Clear' : 'Save'}
                 </button>
               </div>
@@ -167,21 +167,21 @@ export default function BotsPage() {
             <div className="flex gap-2">
               <button
                 onClick={() => setExpanded(expanded === bot.id ? null : bot.id)}
-                className="text-xs px-3 py-1 bg-[#21262d] text-[#e8eaed] rounded hover:bg-[#30363d]">
+                className="text-xs px-3 py-1 bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded hover:bg-[var(--border)]">
                 {expanded === bot.id ? 'Hide Setup' : 'Setup'}
               </button>
               <button
                 onClick={() => toggleRun(bot)}
                 disabled={busy === bot.id || (!bot.ready && !bot.running)}
-                className={`text-xs px-3 py-1 rounded text-white disabled:opacity-50 ${bot.running ? 'bg-[#f85149] hover:bg-[#ff6a63]' : 'bg-[#3380FF] hover:bg-[#4d94ff]'}`}>
+                className={`text-xs px-3 py-1 rounded text-white disabled:opacity-50 ${bot.running ? 'bg-[var(--danger)] hover:bg-[#ff6a63]' : 'bg-[var(--accent)] hover:bg-[var(--accent-hover)]'}`}>
                 {busy === bot.id ? '…' : bot.running ? 'Stop' : 'Start'}
               </button>
             </div>
 
             {expanded === bot.id && (
-              <div className="mt-3 p-3 bg-[#0d1117] rounded border border-[#21262d]">
-                <p className="text-xs text-[#8b949e] whitespace-pre-line">{bot.setup}</p>
-                <p className="text-[11px] text-[#484f58] mt-2 font-mono">
+              <div className="mt-3 p-3 bg-[var(--bg-primary)] rounded border border-[var(--bg-tertiary)]">
+                <p className="text-xs text-[var(--text-secondary)] whitespace-pre-line">{bot.setup}</p>
+                <p className="text-[11px] text-[var(--text-muted)] mt-2 font-mono">
                   node {bot.script_found ? bot.id + '-bot.js' : '…'} · deps {bot.deps_installed === false ? 'missing' : 'ok'} · node {bot.node || 'not found'}
                 </p>
               </div>
@@ -193,22 +193,22 @@ export default function BotsPage() {
                 this in a terminal any more and the dashboard is the only place
                 a user can scan it from. */}
             {bot.qr && (
-              <div className="mt-3 p-3 bg-white rounded border border-[#21262d] flex flex-col items-center">
+              <div className="mt-3 p-3 bg-white rounded border border-[var(--bg-tertiary)] flex flex-col items-center">
                 <QRCodeSVG value={bot.qr} size={220} level="L" marginSize={2} />
-                <p className="mt-2 text-[11px] text-[#484f58] text-center">
+                <p className="mt-2 text-[11px] text-[var(--text-muted)] text-center">
                   WhatsApp → Settings → Linked Devices → Link a Device
                 </p>
               </div>
             )}
             {bot.qr && (
-              <p className="mt-1 text-[11px] text-[#d29922]">
+              <p className="mt-1 text-[11px] text-[var(--warning)]">
                 Waiting to be scanned. The code refreshes on its own — if it
                 expires, scan the newest one.
               </p>
             )}
 
             {bot.log.length > 0 && (
-              <pre className="mt-3 p-2 bg-[#0d1117] rounded border border-[#21262d] text-[10px] leading-relaxed text-[#8b949e] max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
+              <pre className="mt-3 p-2 bg-[var(--bg-primary)] rounded border border-[var(--bg-tertiary)] text-[10px] leading-relaxed text-[var(--text-secondary)] max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
                 {bot.log.slice(-12).join('\n')}
               </pre>
             )}
@@ -216,7 +216,7 @@ export default function BotsPage() {
         ))}
 
         {bots.length === 0 && wsState === 'connected' && (
-          <p className="text-sm text-[#8b949e]">No bot bridges reported.</p>
+          <p className="text-sm text-[var(--text-secondary)]">No bot bridges reported.</p>
         )}
       </div>
     </div>

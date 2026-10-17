@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { useWS } from '@/lib/useWS';
 import { APP_VERSION } from '@/lib/guide-content';
 import type { HfStatus } from '@/lib/ws-types';
 import GuideSection from './guide-section';
 import CliToolsSection from './cli-tools-section';
+import { applyAppearance } from '@/lib/appearance';
 
 type SettingsData = Record<string, any>;
 
@@ -64,17 +65,17 @@ export default function SettingsPage() {
   const sections = ['guide','providers','character','voice','workspace','safety','remote','notifications','observation','memory','wiki','tools','cli-tools','guidelines','mcp','browser','desktop','integrations','appearance','about'];
 
   if (!settings) return (
-    <div className="flex items-center justify-center h-full text-[#8b949e]">
+    <div className="flex items-center justify-center h-full text-[var(--text-secondary)]">
       <div className="text-center"><div className="animate-spin text-2xl mb-3">⟳</div><p>{wsState === 'connected' ? 'Loading...' : 'Connecting...'}</p></div>
     </div>
   );
 
   return (
     <div className="flex h-full">
-      <div className="w-48 border-r border-[#30363d] p-2 space-y-0.5 overflow-y-auto">
+      <div className="w-48 border-r border-[var(--border)] p-2 space-y-0.5 overflow-y-auto">
         {sections.map(s => (
           <button key={s} onClick={() => setActiveSection(s)}
-            className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${activeSection === s ? 'bg-[#1f6feb] text-white' : 'text-[#8b949e] hover:bg-[#21262d] hover:text-[#e8eaed]'}`}>
+            className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${activeSection === s ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'}`}>
             <span className="mr-2">{SECTION_ICONS[s]}</span>{s.charAt(0).toUpperCase()+s.slice(1)}
           </button>
         ))}
@@ -101,7 +102,7 @@ export default function SettingsPage() {
         {activeSection==='browser'&&<BrowserSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='desktop'&&<DesktopSection settings={settings} update={updateSetting} saving={saving} status={saveStatus} send={send} connected={wsState==='connected'}/>}
         {activeSection==='integrations'&&<IntegrationsSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
-        {activeSection==='appearance'&&<AppearanceSection/>}
+        {activeSection==='appearance'&&<AppearanceSection settings={settings} update={updateSetting} saving={saving} status={saveStatus}/>}
         {activeSection==='about'&&<AboutSection/>}
       </div>
     </div>
@@ -110,10 +111,10 @@ export default function SettingsPage() {
 
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
   return (
-    <div className="py-3 border-b border-[#21262d]">
+    <div className="py-3 border-b border-[var(--bg-tertiary)]">
       <div className="flex items-center justify-between">
-        <div className="flex-1"><label className="text-sm font-medium text-[#e8eaed]">{label}</label>
-          {description && <p className="text-xs text-[#8b949e] mt-0.5">{description}</p>}</div>
+        <div className="flex-1"><label className="text-sm font-medium text-[var(--text-primary)]">{label}</label>
+          {description && <p className="text-xs text-[var(--text-secondary)] mt-0.5">{description}</p>}</div>
         <div className="ml-4">{children}</div>
       </div>
     </div>
@@ -121,8 +122,8 @@ function SettingRow({ label, description, children }: { label: string; descripti
 }
 
 function SaveIndicator({ settingKey, saving, status }: { settingKey: string; saving: string|null; status: {key:string;ok:boolean}|null }) {
-  if (saving===settingKey) return <span className="text-xs text-[#d29922]">Saving...</span>;
-  if (status?.key===settingKey) return <span className={`text-xs ${status.ok?'text-[#3fb950]':'text-[#f85149]'}`}>{status.ok?'✓ Saved':'✗ Failed'}</span>;
+  if (saving===settingKey) return <span className="text-xs text-[var(--warning)]">Saving...</span>;
+  if (status?.key===settingKey) return <span className={`text-xs ${status.ok?'text-[var(--success)]':'text-[var(--danger)]'}`}>{status.ok?'✓ Saved':'✗ Failed'}</span>;
   return null;
 }
 
@@ -188,19 +189,19 @@ function SkinsSection({ send, connected }: { send: (m: string, p?: any) => Promi
   };
 
   return (
-    <div className="mt-6 pt-4 border-t border-[#21262d]">
-      <h3 className="text-sm font-semibold text-[#e8eaed] mb-1">🦊 Sprite skin <span className="text-xs font-normal text-[#8b949e]">(codex-pet style)</span></h3>
-      <p className="text-xs text-[#8b949e] mb-3">Upload an animated GIF and Fox becomes that pet — all agent states, movement and effects stay active on top.</p>
+    <div className="mt-6 pt-4 border-t border-[var(--bg-tertiary)]">
+      <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">🦊 Sprite skin <span className="text-xs font-normal text-[var(--text-secondary)]">(codex-pet style)</span></h3>
+      <p className="text-xs text-[var(--text-secondary)] mb-3">Upload an animated GIF and Fox becomes that pet — all agent states, movement and effects stay active on top.</p>
 
       {/* Upload options */}
       <div className="flex items-center gap-2 mb-3">
-        <label className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : 'border-[#3380FF] text-[#3380FF] hover:bg-[#1f6feb22]'}`}>
+        <label className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : 'border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--accent-soft)]'}`}>
           {uploading ? '⟳ Uploading...' : '⬆ Upload GIF'}
           <input type="file" accept="image/gif,.gif" className="hidden" disabled={uploading}
             onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
         </label>
-        <span className="text-xs text-[#484f58]">or</span>
-        <label className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : 'border-[#3380FF] text-[#3380FF] hover:bg-[#1f6feb22]'}`}>
+        <span className="text-xs text-[var(--text-muted)]">or</span>
+        <label className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : 'border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--accent-soft)]'}`}>
           {uploading ? '⟳ Uploading...' : '📦 Upload ZIP (multi-state)'}
           <input type="file" accept=".zip,application/zip" className="hidden" disabled={uploading}
             onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
@@ -208,36 +209,36 @@ function SkinsSection({ send, connected }: { send: (m: string, p?: any) => Promi
       </div>
 
       {/* What's needed for multi-state ZIPs */}
-      <div className="bg-[#0d1117] border border-[#21262d] rounded-lg p-3 mb-3">
-        <p className="text-xs font-semibold text-[#e8eaed] mb-1.5">📦 ZIP with one GIF per agent state</p>
-        <p className="text-[11px] leading-relaxed text-[#8b949e]">
-          Name each GIF after the state it should play. Any GIFs you skip fall back to <span className="text-[#e8eaed] font-mono">idle.gif</span>.
+      <div className="bg-[var(--bg-primary)] border border-[var(--bg-tertiary)] rounded-lg p-3 mb-3">
+        <p className="text-xs font-semibold text-[var(--text-primary)] mb-1.5">📦 ZIP with one GIF per agent state</p>
+        <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
+          Name each GIF after the state it should play. Any GIFs you skip fall back to <span className="text-[var(--text-primary)] font-mono">idle.gif</span>.
         </p>
-        <p className="text-[11px] leading-relaxed text-[#8b949e] mt-1.5 font-mono break-all">
+        <p className="text-[11px] leading-relaxed text-[var(--text-secondary)] mt-1.5 font-mono break-all">
           idle.gif · listening.gif · observing.gif · thinking.gif<br/>
           has_suggestion.gif · acting.gif · speaking.gif · sleeping.gif<br/>
           blocked.gif · error.gif · working.gif · dreaming.gif
         </p>
       </div>
 
-      {msg && <p className={`text-xs mt-2 ${msg.ok ? 'text-[#3fb950]' : 'text-[#f85149]'}`}>{msg.text}</p>}
+      {msg && <p className={`text-xs mt-2 ${msg.ok ? 'text-[var(--success)]' : 'text-[var(--danger)]'}`}>{msg.text}</p>}
 
       <div className="mt-4 space-y-1">
         <button onClick={() => setSkin('none')}
-          className={`w-full text-left px-3 py-2 rounded-md text-sm border transition-colors ${active === '' ? 'border-[#3380FF] bg-[#1f6feb22] text-[#3380FF]' : 'border-[#30363d] text-[#8b949e] hover:border-[#484f58]'}`}>
+          className={`w-full text-left px-3 py-2 rounded-md text-sm border transition-colors ${active === '' ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]' : 'border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--text-muted)]'}`}>
           🔷 Procedural shape (default)
         </button>
         {skins.map(s => (
-          <div key={s.id} className={`flex items-center justify-between px-3 py-2 rounded-md border ${s.active ? 'border-[#3380FF] bg-[#1f6feb22]' : 'border-[#30363d] hover:border-[#484f58]'}`}>
-            <button onClick={() => setSkin(s.id)} className="text-left flex-1 text-sm text-[#e8eaed]">
-              🎞 {s.name} <span className="text-xs text-[#8b949e]">({s.files.length} clip{s.files.length !== 1 ? 's' : ''}{s.mapped && s.mapped.length ? ` · ${s.mapped.length} states mapped` : ''})</span>
-              {s.active && <span className="ml-2 text-xs text-[#3fb950]">● active</span>}
+          <div key={s.id} className={`flex items-center justify-between px-3 py-2 rounded-md border ${s.active ? 'border-[var(--accent)] bg-[var(--accent-soft)]' : 'border-[var(--border)] hover:border-[var(--text-muted)]'}`}>
+            <button onClick={() => setSkin(s.id)} className="text-left flex-1 text-sm text-[var(--text-primary)]">
+              🎞 {s.name} <span className="text-xs text-[var(--text-secondary)]">({s.files.length} clip{s.files.length !== 1 ? 's' : ''}{s.mapped && s.mapped.length ? ` · ${s.mapped.length} states mapped` : ''})</span>
+              {s.active && <span className="ml-2 text-xs text-[var(--success)]">● active</span>}
             </button>
             <button onClick={() => removeSkin(s.id)} title="Delete skin"
-              className="text-[#8b949e] hover:text-[#f85149] text-sm px-2">✕</button>
+              className="text-[var(--text-secondary)] hover:text-[var(--danger)] text-sm px-2">✕</button>
           </div>
         ))}
-        {skins.length === 0 && <p className="text-xs text-[#8b949e] px-1 py-1">No skins yet — upload a GIF or ZIP to get started.</p>}
+        {skins.length === 0 && <p className="text-xs text-[var(--text-secondary)] px-1 py-1">No skins yet — upload a GIF or ZIP to get started.</p>}
       </div>
     </div>
   );
@@ -263,9 +264,9 @@ function relTime(iso?:string){
 
 const MCP_STATES: Record<string,string> = {
   ready: 'bg-[#238636] text-white',
-  connecting: 'bg-[#d29922] text-black',
-  error: 'bg-[#f85149] text-white',
-  disconnected: 'bg-[#21262d] text-[#8b949e]',
+  connecting: 'bg-[var(--warning)] text-black',
+  error: 'bg-[var(--danger)] text-white',
+  disconnected: 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)]',
 };
 
 function McpSection({settings,update,saving,status}: any){
@@ -506,19 +507,19 @@ function McpSection({settings,update,saving,status}: any){
     setBusy(null);
   };
 
-  const btn='px-3 py-1.5 rounded text-xs font-medium border border-[#30363d] hover:border-[#484f58] text-[#e8eaed] disabled:opacity-40';
-  const inp='bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]';
+  const btn='px-3 py-1.5 rounded text-xs font-medium border border-[var(--border)] hover:border-[var(--text-muted)] text-[var(--text-primary)] disabled:opacity-40';
+  const inp='bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]';
   const servers:any[]=live?.servers||[];
   // A card is about a market listing; whether that listing is already running
   // here is a fact about the configured servers, joined on market_name.
   const installedOf=(name:string)=>servers.find((s:any)=>s.market_name===name);
 
   return <div className="space-y-1 max-w-3xl">
-    <p className="text-xs text-[#d29922] px-1 pb-2">
+    <p className="text-xs text-[var(--warning)] px-1 pb-2">
       ⚠ MCP servers are third-party programs. They run with your permissions and can
       read, change and delete things. Only add servers you trust.
     </p>
-    <p className="text-xs text-[#8b949e] px-1 pb-2">
+    <p className="text-xs text-[var(--text-secondary)] px-1 pb-2">
       Their tools become Addled skills in the <span className="font-mono">MCP</span> category.
       Tools from an untrusted server ask for your approval the first time they run.
     </p>
@@ -556,21 +557,21 @@ function McpSection({settings,update,saving,status}: any){
         disabled={busy==='reload'||wsState!=='connected'} className={btn}>
         {busy==='reload'?'Reconnecting…':'↻ Reconnect all'}
       </button>
-      <span className="text-[#8b949e]">
+      <span className="text-[var(--text-secondary)]">
         {live?`${servers.filter((s:any)=>s.state==='ready').length}/${servers.length} connected · ${live.tool_count||0} tool(s)`:'loading…'}
       </span>
     </div>
-    {err&&<p className="px-1 pt-1 text-xs text-[#f85149]">⚠ {err}</p>}
+    {err&&<p className="px-1 pt-1 text-xs text-[var(--danger)]">⚠ {err}</p>}
 
-    {servers.map((s:any)=><div key={s.id} className="mt-3 rounded-lg border border-[#30363d] p-3">
+    {servers.map((s:any)=><div key={s.id} className="mt-3 rounded-lg border border-[var(--border)] p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-sm font-medium text-[#e8eaed] truncate">
-            {s.name} <span className="ml-1 text-[10px] text-[#8b949e]">{s.transport}</span>
-            {s.auto?<span className="ml-1 rounded bg-[#1f6feb22] px-1.5 py-0.5 text-[10px] text-[#58a6ff]"
+          <p className="text-sm font-medium text-[var(--text-primary)] truncate">
+            {s.name} <span className="ml-1 text-[10px] text-[var(--text-secondary)]">{s.transport}</span>
+            {s.auto?<span className="ml-1 rounded bg-[var(--accent-soft)] px-1.5 py-0.5 text-[10px] text-[var(--accent-hover)]"
               title="Addled added this one; it is switched off again when idle">auto</span>:null}
           </p>
-          <p className="truncate text-[10px] text-[#8b949e]"
+          <p className="truncate text-[10px] text-[var(--text-secondary)]"
             title={s.transport==='http'?s.url:(Array.isArray(s.command)?s.command.join(' '):String(s.command||''))}>
             {s.transport==='http'?s.url:(Array.isArray(s.command)?s.command.join(' '):String(s.command||''))}
           </p>
@@ -579,18 +580,18 @@ function McpSection({settings,update,saving,status}: any){
           {s.state}{s.tool_count?` · ${s.tool_count} tools`:''}
         </span>
       </div>
-      {s.last_error&&<p className="mt-1 text-[10px] text-[#d29922]">⚠ {s.last_error}</p>}
+      {s.last_error&&<p className="mt-1 text-[10px] text-[var(--warning)]">⚠ {s.last_error}</p>}
       {s.transport==='http'&&(s.auth_required||s.auth_error)&&
-        <p className="mt-1 text-[10px] text-[#d29922]">
+        <p className="mt-1 text-[10px] text-[var(--warning)]">
           🔑 {s.auth_error||'This server needs a sign-in.'}
         </p>}
       <div className="mt-2 flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+        <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] cursor-pointer">
           <input type="checkbox" checked={s.enabled}
             onChange={e=>act('mcp.update',{id:s.id,patch:{enabled:e.target.checked}},'toggle')}/>
           Enabled
         </label>
-        <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer"
+        <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] cursor-pointer"
           title="Skip the approval prompt for this server's tools">
           <input type="checkbox" checked={s.trusted}
             onChange={e=>act('mcp.update',{id:s.id,patch:{trusted:e.target.checked}},'toggle')}/>
@@ -616,11 +617,11 @@ function McpSection({settings,update,saving,status}: any){
           disabled={!!busy||wsState!=='connected'} className={btn}>Disconnect</button>
         <button onClick={()=>{ if(window.confirm(`Remove ${s.name}?`)) act('mcp.remove',{id:s.id},'remove'); }}
           disabled={!!busy||wsState!=='connected'}
-          className={`${btn} text-[#f85149]`}>Remove</button>
+          className={`${btn} text-[var(--danger)]`}>Remove</button>
       </div>
       {(s.env_keys?.length||s.header_keys?.length||s.own_env_keys?.length||s.own_header_keys?.length)?
-        <div className="mt-2 border-t border-[#30363d] pt-2">
-          <p className="text-[10px] text-[#8b949e]">
+        <div className="mt-2 border-t border-[var(--border)] pt-2">
+          <p className="text-[10px] text-[var(--text-secondary)]">
             Credentials this server uses. A value set here belongs to this server only —
             servers that want the same name each keep their own.
           </p>
@@ -633,23 +634,23 @@ function McpSection({settings,update,saving,status}: any){
               const owns=(bucket==='env'?s.own_env_keys:s.own_header_keys||[]).includes(k);
               return (
                 <div key={key} className="mt-1 flex items-center gap-2">
-                  <span className="w-40 shrink-0 truncate font-mono text-[10px] text-[#8b949e]" title={k}>{k}</span>
+                  <span className="w-40 shrink-0 truncate font-mono text-[10px] text-[var(--text-secondary)]" title={k}>{k}</span>
                   <input type="password" value={ownValues[key]||''} placeholder={owns?'set for this server':'set a value for this server'}
                     onChange={e=>setOwnValues(v=>({...v,[key]:e.target.value}))}
                     onKeyDown={e=>{ if(e.key==='Enter')saveOwnValue(s.id,k,bucket,ownValues[key]||''); }}
                     className={`${inp} flex-1 font-mono text-[10px]`}/>
                   <button onClick={()=>saveOwnValue(s.id,k,bucket,ownValues[key]||'')}
                     disabled={!!busy||wsState!=='connected'}
-                    className="shrink-0 text-[10px] px-2 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:border-[#484f58]">
+                    className="shrink-0 text-[10px] px-2 py-1 rounded border border-[var(--border)] text-[var(--text-primary)] hover:border-[var(--text-muted)]">
                     Save
                   </button>
                   {owns&&<button onClick={()=>clearOwnValue(s.id,k,bucket)}
                     disabled={!!busy||wsState!=='connected'}
                     title="Remove this server's own value; it goes back to any shared one"
-                    className="shrink-0 text-[10px] px-2 py-1 rounded border border-[#30363d] text-[#f85149] hover:border-[#484f58]">
+                    className="shrink-0 text-[10px] px-2 py-1 rounded border border-[var(--border)] text-[var(--danger)] hover:border-[var(--text-muted)]">
                     Clear
                   </button>}
-                  {owns&&<span className="shrink-0 text-[10px] text-[#3fb950]" title="This server has its own value, not a shared one">own</span>}
+                  {owns&&<span className="shrink-0 text-[10px] text-[var(--success)]" title="This server has its own value, not a shared one">own</span>}
                 </div>
               );
             })}
@@ -669,7 +670,7 @@ function McpSection({settings,update,saving,status}: any){
           };
           return (
             <div key={t.name} className="flex items-center justify-between gap-2">
-              <span className={`font-mono text-[10px] truncate ${off?'text-[#484f58] line-through':'text-[#8b949e]'}`}
+              <span className={`font-mono text-[10px] truncate ${off?'text-[var(--text-muted)] line-through':'text-[var(--text-secondary)]'}`}
                 title={t.description||t.name}>
                 {t.name}
               </span>
@@ -678,11 +679,11 @@ function McpSection({settings,update,saving,status}: any){
                 title={off
                   ? 'Hidden from the model — click to show it again'
                   : 'Hide this tool from the model entirely'}
-                className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58]">
+                className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)]">
                 {off?'off':'on'}
               </button>
               {s.trusted ? (
-                <span className="shrink-0 text-[10px] text-[#3fb950]"
+                <span className="shrink-0 text-[10px] text-[var(--success)]"
                   title="The whole server is trusted, so this tool never asks">
                   ✓ trusted
                 </span>
@@ -696,13 +697,13 @@ function McpSection({settings,update,saving,status}: any){
                     : 'Never ask for this tool again'}
                   className={`shrink-0 text-[10px] px-2 py-0.5 rounded border transition-colors ${
                     t.standing
-                      ? 'border-[#3fb95055] bg-[#12261e] text-[#3fb950]'
-                      : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#484f58]'
+                      ? 'border-[#3fb95055] bg-[#12261e] text-[var(--success)]'
+                      : 'border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)]'
                   }`}>
                   {t.standing ? '✓ Always' : 'Always allow'}
                 </button>
               ) : (
-                <span className="shrink-0 text-[10px] text-[#484f58]"
+                <span className="shrink-0 text-[10px] text-[var(--text-muted)]"
                   title="This tool always asks first">asks</span>
               )}
             </div>
@@ -711,11 +712,11 @@ function McpSection({settings,update,saving,status}: any){
       </div>:null}
     </div>)}
 
-    {!servers.length&&<p className="px-1 pt-3 text-xs text-[#8b949e]">No MCP servers configured yet.</p>}
+    {!servers.length&&<p className="px-1 pt-3 text-xs text-[var(--text-secondary)]">No MCP servers configured yet.</p>}
 
-    <div className="mt-4 rounded-lg border border-[#30363d] p-3">
-      <p className="text-sm font-medium text-[#e8eaed]">MCP market</p>
-      <p className="mt-1 text-[11px] text-[#8b949e]">
+    <div className="mt-4 rounded-lg border border-[var(--border)] p-3">
+      <p className="text-sm font-medium text-[var(--text-primary)]">MCP market</p>
+      <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
         Searches the official Model Context Protocol registry, and Smithery's. A server that needs an
         API key, a required variable or a runtime you do not have is listed with a field to fill in
         or the reason it cannot be added, instead of being added to fail later.
@@ -730,25 +731,25 @@ function McpSection({settings,update,saving,status}: any){
         </button>
       </div>
       {marketHits&&!marketHits.length&&
-        <p className="mt-2 text-[11px] text-[#8b949e]">Nothing matched that.</p>}
+        <p className="mt-2 text-[11px] text-[var(--text-secondary)]">Nothing matched that.</p>}
       {marketHits&&marketHits.length>0&&<div className="mt-2 space-y-2">
-        {marketHits.map((c:any)=><div key={c.name} className="rounded border border-[#30363d] p-2">
+        {marketHits.map((c:any)=><div key={c.name} className="rounded border border-[var(--border)] p-2">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <p className="truncate text-[12px] text-[#e8eaed]">{c.title||c.name}</p>
-              <p className="truncate font-mono text-[10px] text-[#8b949e]">
+              <p className="truncate text-[12px] text-[var(--text-primary)]">{c.title||c.name}</p>
+              <p className="truncate font-mono text-[10px] text-[var(--text-secondary)]">
                 {c.name}{c.version?` · v${c.version}`:''}
               </p>
             </div>
-            <span className="shrink-0 rounded bg-[#21262d] px-2 py-0.5 text-[10px] text-[#8b949e]"
+            <span className="shrink-0 rounded bg-[var(--bg-tertiary)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]"
               title={`found via ${c.source||'the official registry'}`}>
               {c.transport}{c.source&&c.source!=='registry'?` · ${c.source}`:''}
             </span>
           </div>
-          {c.description&&<p className="mt-1 text-[11px] text-[#8b949e]">{c.description}</p>}
+          {c.description&&<p className="mt-1 text-[11px] text-[var(--text-secondary)]">{c.description}</p>}
           {c.transport==='stdio'&&c.runnable&&
             <div className="mt-1 flex items-center gap-2">
-              <span className="w-16 shrink-0 text-[10px] text-[#8b949e]">Arguments</span>
+              <span className="w-16 shrink-0 text-[10px] text-[var(--text-secondary)]">Arguments</span>
               <input value={extraArgs[c.name]||''}
                 onChange={e=>setExtraArgs({...extraArgs,[c.name]:e.target.value})}
                 placeholder="optional — some servers need these and never say so"
@@ -757,16 +758,16 @@ function McpSection({settings,update,saving,status}: any){
           {missingVars(c).length>0&&<div className="mt-1 space-y-2">
             {missingVars(c).map((v:string)=><div key={v} className="space-y-0.5">
               <div className="flex items-center gap-2">
-                <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[#d29922]" title={v}>{v}</span>
+                <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[var(--warning)]" title={v}>{v}</span>
                 <input type="password" autoComplete="off" value={creds[v]||''}
                   onChange={e=>setCreds({...creds,[v]:e.target.value})}
                   placeholder={String((c.header_hints||{})[v]||((c.requires_params||[]).includes(v)?'your API key':((c.requires_headers||[]).includes(v)?'value for this header':'value for this variable')))}
                   className={`${inp} flex-1`}/>
               </div>
               {(c.key_help||{})[v]&&
-                <p className="pl-[11.5rem] text-[10px] text-[#8b949e]">{String(c.key_help[v])}</p>}
+                <p className="pl-[11.5rem] text-[10px] text-[var(--text-secondary)]">{String(c.key_help[v])}</p>}
             </div>)}
-            <p className="text-[10px] text-[#8b949e]">
+            <p className="text-[10px] text-[var(--text-secondary)]">
               Fill {missingVars(c).length>1?'these':'this'} in to turn Add &amp; connect on. Kept by name,
               so the next server wanting one of these reuses it — including when the
               agent finds and adds a server on its own. Values are never read back out.
@@ -775,8 +776,8 @@ function McpSection({settings,update,saving,status}: any){
           </div>}
           {heldVars(c).length>0&&<div className="mt-1 space-y-1">
             {heldVars(c).map((v:string)=><div key={v} className="flex items-center gap-2">
-              <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[#3fb950]" title={v}>{v}</span>
-              <span className="flex-1 truncate text-[10px] text-[#8b949e]">using the value you saved</span>
+              <span className="w-44 shrink-0 truncate font-mono text-[10px] text-[var(--success)]" title={v}>{v}</span>
+              <span className="flex-1 truncate text-[10px] text-[var(--text-secondary)]">using the value you saved</span>
               <button onClick={()=>forgetValue(v,c)} disabled={busy==='forget'||wsState!=='connected'}
                 title="Forget this value so a different one can be given"
                 className={btn}>Forget</button>
@@ -784,10 +785,10 @@ function McpSection({settings,update,saving,status}: any){
           </div>}
           {installedOf(c.name)&&<p className="mt-1 text-[10px]">
             {installedOf(c.name).state==='ready'
-              ? <span className="text-[#3fb950]">Installed and connected · {installedOf(c.name).tool_count} tool(s)</span>
+              ? <span className="text-[var(--success)]">Installed and connected · {installedOf(c.name).tool_count} tool(s)</span>
               : installedOf(c.name).state==='error'
-                ? <span className="text-[#f85149]">Installed, but it will not connect: {installedOf(c.name).last_error}</span>
-                : <span className="text-[#8b949e]">Installed · {installedOf(c.name).state}</span>}
+                ? <span className="text-[var(--danger)]">Installed, but it will not connect: {installedOf(c.name).last_error}</span>
+                : <span className="text-[var(--text-secondary)]">Installed · {installedOf(c.name).state}</span>}
           </p>}
           {(c.blocked_kinds||[]).includes('runtime')&&String(c.command||'')==='uvx'&&
             <div className="mt-1"><UvInstall compact send={send} connected={wsState==='connected'}/></div>}
@@ -795,10 +796,10 @@ function McpSection({settings,update,saving,status}: any){
             <span className="min-w-0 truncate text-[10px]"
               title={c.runnable?(c.transport==='stdio'?`${c.command} ${(c.args||[]).join(' ')}`:c.url):c.blocked_reason}>
               {c.runnable
-                ?<span className="text-[#3fb950]">
+                ?<span className="text-[var(--success)]">
                   {c.transport==='stdio'?`${c.command} ${(c.args||[]).join(' ')}`:c.url}
                 </span>
-                :<span className="text-[#d29922]">{c.blocked_reason}</span>}
+                :<span className="text-[var(--warning)]">{c.blocked_reason}</span>}
             </span>
             <button onClick={()=>installServer(c.name,extraArgs[c.name],c)}
               disabled={!canAdd(c)||busy==='install'||wsState!=='connected'}
@@ -809,16 +810,16 @@ function McpSection({settings,update,saving,status}: any){
       </div>}
     </div>
 
-    <div className="mt-4 rounded-lg border border-[#30363d] p-3">
-      <p className="text-sm font-medium text-[#e8eaed]">Add a server</p>
+    <div className="mt-4 rounded-lg border border-[var(--border)] p-3">
+      <p className="text-sm font-medium text-[var(--text-primary)]">Add a server</p>
       <div className="mt-2 space-y-2">
         <div className="flex items-center gap-2">
-          <span className="w-24 text-[11px] text-[#8b949e]">Name</span>
+          <span className="w-24 text-[11px] text-[var(--text-secondary)]">Name</span>
           <input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}
             placeholder="Filesystem" className={`${inp} flex-1`}/>
         </div>
         <div className="flex items-center gap-2">
-          <span className="w-24 text-[11px] text-[#8b949e]">Transport</span>
+          <span className="w-24 text-[11px] text-[var(--text-secondary)]">Transport</span>
           <select value={form.transport} onChange={e=>setForm({...form,transport:e.target.value})} className={inp}>
             <option value="stdio">stdio (local command)</option>
             <option value="http">HTTP (remote URL)</option>
@@ -826,74 +827,74 @@ function McpSection({settings,update,saving,status}: any){
         </div>
         {form.transport==='stdio'
           ?<div className="flex items-center gap-2">
-            <span className="w-24 text-[11px] text-[#8b949e]">Command</span>
+            <span className="w-24 text-[11px] text-[var(--text-secondary)]">Command</span>
             <input value={form.command} onChange={e=>setForm({...form,command:e.target.value})}
               placeholder="npx -y @modelcontextprotocol/server-filesystem C:\\Users"
               className={`${inp} flex-1`}/>
           </div>
           :<div className="flex items-center gap-2">
-            <span className="w-24 text-[11px] text-[#8b949e]">URL</span>
+            <span className="w-24 text-[11px] text-[var(--text-secondary)]">URL</span>
             <input value={form.url} onChange={e=>setForm({...form,url:e.target.value})}
               placeholder="https://example.com/mcp" className={`${inp} flex-1`}/>
           </div>}
         {form.transport==='stdio'&&<div className="flex items-start gap-2">
-          <span className="w-24 pt-1 text-[11px] text-[#8b949e]">Environment</span>
+          <span className="w-24 pt-1 text-[11px] text-[var(--text-secondary)]">Environment</span>
           <textarea value={form.env} onChange={e=>setForm({...form,env:e.target.value})}
             rows={2} placeholder={'MODE=stdio\nKEY=value'}
             className={`${inp} flex-1 font-mono`}/>
         </div>}
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+          <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] cursor-pointer">
             <input type="checkbox" checked={!!form.trusted}
               onChange={e=>setForm({...form,trusted:e.target.checked})}/>
             Trust this server (skip approval prompts)
           </label>
           <button onClick={addServer} disabled={!!busy||wsState!=='connected'}
-            className="px-3 py-1.5 rounded text-xs font-medium bg-[#3380FF] hover:bg-[#4d94ff] text-white disabled:opacity-40">
+            className="px-3 py-1.5 rounded text-xs font-medium bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white disabled:opacity-40">
             Add server
           </button>
         </div>
-        <p className="text-[10px] text-[#8b949e]">
+        <p className="text-[10px] text-[var(--text-secondary)]">
           To change a server's command or URL, remove it and add it again.
           Environment values are set here and stored in settings.json, never sent to the dashboard.
         </p>
-        <div className="border-t border-[#30363d] pt-3">
+        <div className="border-t border-[var(--border)] pt-3">
           <div className="flex items-center gap-3">
             <button onClick={scanConfigs} disabled={!!busy||wsState!=='connected'}
-              className="px-3 py-1.5 rounded text-xs border border-[#30363d] text-[#e8eaed] hover:border-[#484f58] disabled:opacity-40">
+              className="px-3 py-1.5 rounded text-xs border border-[var(--border)] text-[var(--text-primary)] hover:border-[var(--text-muted)] disabled:opacity-40">
               {busy==='scan'?'Looking…':'Import from other tools'}
             </button>
-            <span className="text-[10px] text-[#8b949e]">
+            <span className="text-[10px] text-[var(--text-secondary)]">
               Reads Cursor, VS Code and Claude Code config files. Nothing is added until you tick it.
             </span>
           </div>
           {found&&<div className="mt-2 space-y-1">
             {found.length===0
-              ? <p className="text-[10px] text-[#8b949e]">No MCP servers found in other tools' config files.</p>
+              ? <p className="text-[10px] text-[var(--text-secondary)]">No MCP servers found in other tools' config files.</p>
               : found.map((f:any)=>(
                 <label key={`${f.source}:${f.name}`}
-                  className={`flex items-start gap-2 rounded border border-[#30363d] p-2 cursor-pointer ${f.duplicate_of||f.error?'opacity-60':''}`}
+                  className={`flex items-start gap-2 rounded border border-[var(--border)] p-2 cursor-pointer ${f.duplicate_of||f.error?'opacity-60':''}`}
                   title={f.error||f.duplicate_of?`Not importable: ${f.error||'a duplicate of '+f.duplicate_of}`:'Import this server'}>
                   <input type="checkbox" className="mt-0.5"
                     checked={!!chosen[f.id||f.name]}
                     disabled={!!f.error||!!f.duplicate_of||!f.id}
                     onChange={e=>setChosen({...chosen,[f.id||f.name]:e.target.checked})}/>
                   <span className="min-w-0">
-                    <span className="block text-xs text-[#e8eaed] truncate">{f.name}
-                      <span className="ml-1 text-[10px] text-[#8b949e]">{f.source}{f.transport?` · ${f.transport}`:''}</span>
+                    <span className="block text-xs text-[var(--text-primary)] truncate">{f.name}
+                      <span className="ml-1 text-[10px] text-[var(--text-secondary)]">{f.source}{f.transport?` · ${f.transport}`:''}</span>
                     </span>
-                    <span className="block truncate text-[10px] text-[#8b949e] font-mono">
+                    <span className="block truncate text-[10px] text-[var(--text-secondary)] font-mono">
                       {f.command?`${f.command} ${(f.args||[]).join(' ')}`.trim():f.url||''}
                     </span>
-                    {f.project&&<span className="block text-[10px] text-[#8b949e]">for {f.project}</span>}
-                    {f.error&&<span className="block text-[10px] text-[#d29922]">⚠ {f.error}</span>}
-                    {f.duplicate_of&&<span className="block text-[10px] text-[#8b949e]">also listed in another file</span>}
+                    {f.project&&<span className="block text-[10px] text-[var(--text-secondary)]">for {f.project}</span>}
+                    {f.error&&<span className="block text-[10px] text-[var(--warning)]">⚠ {f.error}</span>}
+                    {f.duplicate_of&&<span className="block text-[10px] text-[var(--text-secondary)]">also listed in another file</span>}
                     {!!(f.missing||[]).length&&
-                      <span className="block text-[10px] text-[#d29922]">
+                      <span className="block text-[10px] text-[var(--warning)]">
                         ⚠ needs {f.missing.join(', ')} in the environment — the import will leave it unset
                       </span>}
                     {!!(f.header_names||[]).length&&
-                      <span className="block text-[10px] text-[#8b949e]">
+                      <span className="block text-[10px] text-[var(--text-secondary)]">
                         carries {f.header_names.join(', ')} — stored as a credential, not shown
                       </span>}
                   </span>
@@ -901,7 +902,7 @@ function McpSection({settings,update,saving,status}: any){
               ))}
             {found.length>0&&
               <button onClick={importConfigs} disabled={!!busy||wsState!=='connected'}
-                className="mt-1 px-3 py-1.5 rounded text-xs font-medium bg-[#3380FF] hover:bg-[#4d94ff] text-white disabled:opacity-40">
+                className="mt-1 px-3 py-1.5 rounded text-xs font-medium bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white disabled:opacity-40">
                 {busy==='import'?'Importing…':`Import ${Object.values(chosen).filter(Boolean).length||''} server(s)`}
               </button>}
           </div>}
@@ -940,15 +941,15 @@ function GuidelinesSection({settings,update,saving,status}: any){
     update('guidelines','packs',{...packs,[id]:{...(packs[id]||{}),...patch}});
   };
 
-  const btn='px-3 py-1.5 rounded text-xs font-medium border border-[#30363d] hover:border-[#484f58] text-[#e8eaed] disabled:opacity-40';
-  const sel='bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed]';
+  const btn='px-3 py-1.5 rounded text-xs font-medium border border-[var(--border)] hover:border-[var(--text-muted)] text-[var(--text-primary)] disabled:opacity-40';
+  const sel='bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)]';
   const packDocs:any=docs?.packs||{};
   // Prefer the live state, but fall back to the configured packs so the panel
   // still renders if the status call fails.
   const ids:string[]=Object.keys(packDocs).length?Object.keys(packDocs):Object.keys(packs);
 
   return <div className="space-y-1 max-w-3xl">
-    <p className="text-xs text-[#8b949e] px-1 pb-2">
+    <p className="text-xs text-[var(--text-secondary)] px-1 pb-2">
       Addled can follow external coding rulesets. The text is downloaded from the
       upstream repository on first use, cached locally, and refreshed weekly —
       nothing is bundled with Addled, so upstream updates arrive on their own.
@@ -972,7 +973,7 @@ function GuidelinesSection({settings,update,saving,status}: any){
       <button onClick={refreshAll} disabled={busy||wsState!=='connected'} className={btn}>
         {busy?'Refreshing…':'↻ Refresh from upstream'}
       </button>
-      <span className="text-[#8b949e]">
+      <span className="text-[var(--text-secondary)]">
         {g.enabled!==false
           ? `${ids.length} pack(s) · ${(g.scope||'code')==='always'?'every chat':'code tasks only'}`
           : 'guidelines are off'}
@@ -984,27 +985,27 @@ function GuidelinesSection({settings,update,saving,status}: any){
       const pc:any=packs[id]||{};
       const level=pc.level||d.default_level||'full';
       const levels:string[]=d.levels?.length?d.levels:['lite','full','ultra'];
-      return <div key={id} className="mt-3 rounded-lg border border-[#30363d] p-3">
+      return <div key={id} className="mt-3 rounded-lg border border-[var(--border)] p-3">
         <div className="flex items-start justify-between gap-3">
-          <p className="text-sm font-medium text-[#e8eaed]">
+          <p className="text-sm font-medium text-[var(--text-primary)]">
             {d.title||id}
-            {d.subtitle?<span className="font-normal text-[#8b949e]"> — {d.subtitle}</span>:null}
+            {d.subtitle?<span className="font-normal text-[var(--text-secondary)]"> — {d.subtitle}</span>:null}
           </p>
-          <label className="flex shrink-0 items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+          <label className="flex shrink-0 items-center gap-2 text-[11px] text-[var(--text-secondary)] cursor-pointer">
             <input type="checkbox" checked={pc.enabled!==false}
               onChange={e=>setPack(id,{enabled:e.target.checked})}/>
             Enabled
           </label>
         </div>
-        {d.summary&&<p className="mt-1 text-[11px] text-[#8b949e]">{d.summary}</p>}
+        {d.summary&&<p className="mt-1 text-[11px] text-[var(--text-secondary)]">{d.summary}</p>}
         <div className="mt-2 flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-2 text-[11px] text-[#8b949e]">Level
+          <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">Level
             <select value={level} onChange={e=>setPack(id,{level:e.target.value})} className={sel}>
               {levels.map((l:string)=><option key={l} value={l}>{l}</option>)}
               <option value="off">off</option>
             </select>
           </label>
-          <label className="flex items-center gap-2 text-[11px] text-[#8b949e]">Scope
+          <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">Scope
             <select value={pc.scope||g.scope||'code'}
               onChange={e=>setPack(id,{scope:e.target.value})} className={sel}>
               <option value="code">code tasks</option>
@@ -1012,17 +1013,17 @@ function GuidelinesSection({settings,update,saving,status}: any){
             </select>
           </label>
         </div>
-        <div className="mt-2 space-y-0.5 text-[10px] text-[#8b949e]">
+        <div className="mt-2 space-y-0.5 text-[10px] text-[var(--text-secondary)]">
           <p>{d.cached?`${d.chars} characters · updated ${relTime(d.fetched_at)}`
                      :'not downloaded yet'}</p>
           {d.source_url&&<p className="truncate" title={d.source_url}>source: {d.source_url}</p>}
           {d.home&&<p className="truncate">
             <a href={d.home} target="_blank" rel="noreferrer"
-              className="text-[#4d94ff] hover:underline">{d.home}</a>
+              className="text-[var(--accent-hover)] hover:underline">{d.home}</a>
             {d.license?` · ${d.license}`:''}
           </p>}
           {d.path&&<p className="truncate" title={d.path}>cached at {d.path}</p>}
-          {d.error&&<p className="text-[#d29922]">⚠ {d.error}</p>}
+          {d.error&&<p className="text-[var(--warning)]">⚠ {d.error}</p>}
           {!d.cached&&!d.error&&<p>Press Refresh to download it.</p>}
         </div>
       </div>;
@@ -1091,33 +1092,33 @@ function ProvidersSection({ settings, update, saving, status }: any) {
   const hf: HfStatus | null = llmStatus?.hf || null;
   const llmPct=typeof llmStatus?.progress==='number'?llmStatus.progress:0;
   const sizeGb=((llm.size_mb||2400)/1024).toFixed(1);
-  const btn='px-3 py-1.5 rounded text-xs font-medium border border-[#30363d] hover:border-[#484f58] text-[#e8eaed] disabled:opacity-40';
-  const btnPrimary='px-3 py-1.5 rounded text-xs font-medium bg-[#3380FF] hover:bg-[#4d94ff] text-white disabled:opacity-40';
+  const btn='px-3 py-1.5 rounded text-xs font-medium border border-[var(--border)] hover:border-[var(--text-muted)] text-[var(--text-primary)] disabled:opacity-40';
+  const btnPrimary='px-3 py-1.5 rounded text-xs font-medium bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white disabled:opacity-40';
 
   return <div className="space-y-1">
     <SettingRow label="Active Provider">
-      <select value={active} onChange={e=>update('providers','active',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]">
+      <select value={active} onChange={e=>update('providers','active',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]">
         {Object.keys(builtin).map(id=><option key={id} value={id}>{builtin[id]?.name||id}</option>)}
         {(p.custom||[]).map((c:any)=><option key={c.id} value={c.id}>{c.name||c.id}</option>)}
       </select>
     </SettingRow>
     <SettingRow label="Default Model">
       {models.length>1?(
-        <select value={activeCfg?.default_model||''} onChange={e=>{saveDefaultModel(e.target.value)}} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-64">
+        <select value={activeCfg?.default_model||''} onChange={e=>{saveDefaultModel(e.target.value)}} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-64">
           {!!activeCfg?.default_model&&!models.includes(activeCfg.default_model)&&
             <option value={activeCfg.default_model}>{activeCfg.default_model}</option>}
           {models.map(m=><option key={m} value={m}>{m}</option>)}
         </select>
       ):(
         <input type="text" value={activeCfg?.default_model||''} onChange={e=>saveDefaultModel(e.target.value)}
-          placeholder="e.g. gpt-4o" className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-64 font-mono"/>
+          placeholder="e.g. gpt-4o" className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-64 font-mono"/>
       )}
     </SettingRow>
     <div className="flex items-center gap-2 px-1 text-[11px]">
       <button onClick={refreshModels} disabled={refreshing||wsState!=='connected'} className={btn}>
         {refreshing?'Refreshing…':'↻ Refresh models'}
       </button>
-      <span className="text-[#8b949e]">
+      <span className="text-[var(--text-secondary)]">
         {cat?.fetched_at?`updated ${relTime(cat.fetched_at)}`
           :cat?.checked_at?`checked ${relTime(cat.checked_at)}`
           :'not checked yet'}
@@ -1125,19 +1126,19 @@ function ProvidersSection({ settings, update, saving, status }: any) {
       </span>
     </div>
     {cat?.status==='error'&&cat.error&&
-      <p className="text-xs text-[#d29922] px-1">⚠ Model list unavailable — {cat.error}</p>}
+      <p className="text-xs text-[var(--warning)] px-1">⚠ Model list unavailable — {cat.error}</p>}
     {cat?.status==='skipped'&&cat.error&&
-      <p className="text-[11px] text-[#8b949e] px-1">{cat.error}; showing the built-in list.</p>}
-    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+      <p className="text-[11px] text-[var(--text-secondary)] px-1">{cat.error}; showing the built-in list.</p>}
+    <div className="mt-3 rounded-lg border border-[var(--border)] p-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-medium text-[#e8eaed]">🎯 Model routing</p>
-        <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+        <p className="text-sm font-medium text-[var(--text-primary)]">🎯 Model routing</p>
+        <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] cursor-pointer">
           <input type="checkbox" checked={p.auto_route!==false}
             onChange={e=>update('providers','auto_route',e.target.checked)}/>
           Auto-switch per task
         </label>
       </div>
-      <p className="mt-1 text-[11px] text-[#8b949e]">
+      <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
         Addled picks a model based on what the task needs. Any role left on
         <span className="font-mono"> default </span>
         uses <span className="font-mono">{activeCfg?.default_model||'the provider default'}</span>.
@@ -1155,25 +1156,25 @@ function ProvidersSection({ settings, update, saving, status }: any) {
                ...(role==='vision'&&activeCfg?.vision_model?[activeCfg.vision_model]:[])]
             )).filter(Boolean) as string[];
             return <div key={role} className="flex items-center gap-2">
-              <span className="w-24 shrink-0 text-[11px] text-[#8b949e]" title={hint}>{label}</span>
+              <span className="w-24 shrink-0 text-[11px] text-[var(--text-secondary)]" title={hint}>{label}</span>
               <select value={cur}
                 onChange={e=>{saveRole(role, e.target.value)}}
-                className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] flex-1 min-w-0">
+                className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] flex-1 min-w-0">
                 <option value="">Use default — {fb||'provider default'}</option>
                 {opts.map(m=><option key={m} value={m}>{m}</option>)}
               </select>
-              <span className="w-44 shrink-0 truncate text-[10px] text-[#8b949e]" title={`Effective model: ${cur||fb}`}>{cur||fb||'—'}</span>
+              <span className="w-44 shrink-0 truncate text-[10px] text-[var(--text-secondary)]" title={`Effective model: ${cur||fb}`}>{cur||fb||'—'}</span>
             </div>;
           })}
         </div>}
     </div>
     {active==='openrouter'&&!builtin?.openrouter?.api_key&&
-      <p className="text-xs text-[#d29922] px-1">⚠ OpenRouter needs an API key — paste it below (openrouter.ai/keys).</p>}
+      <p className="text-xs text-[var(--warning)] px-1">⚠ OpenRouter needs an API key — paste it below (openrouter.ai/keys).</p>}
 
-    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+    <div className="mt-3 rounded-lg border border-[var(--border)] p-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-medium text-[#e8eaed]">🧠 Local AI (llamafile)</p>
-        <span className="text-[10px] text-[#8b949e]">
+        <p className="text-sm font-medium text-[var(--text-primary)]">🧠 Local AI (llamafile)</p>
+        <span className="text-[10px] text-[var(--text-secondary)]">
           {llmStatus?.paused
             ? `⏸ paused while you ${llmStatus.paused}`
             : llmStatus?.running
@@ -1181,7 +1182,7 @@ function ProvidersSection({ settings, update, saving, status }: any) {
               : llmStatus?.installed?'○ stopped':'— not installed'}
         </span>
       </div>
-      <p className="mt-1 text-[11px] text-[#8b949e]">
+      <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
         <span className="font-mono">{llm.model_file||'model'}</span> · about {sizeGb} GB
         {llmStatus?.installed_mb?` · on disk ${(llmStatus.installed_mb/1024).toFixed(1)} GB`:''}
         {llmStatus?` · ${llmStatus.free_mb} MB free`:''}
@@ -1189,19 +1190,19 @@ function ProvidersSection({ settings, update, saving, status }: any) {
       {/* A paused model is not a stopped one. Saying so here is what stops it
           reading as broken when it declines to start while a game is running. */}
       {llmStatus?.paused && (
-        <p className="mt-1 text-[10px] text-[#d29922]">
+        <p className="mt-1 text-[10px] text-[var(--warning)]">
           Freed while you {llmStatus.paused}. It comes back about 30 seconds
           after the game closes, or press Start to bring it back now.
         </p>
       )}
       {llmStatus?.installed&&(
         <div className="mt-2 space-y-1">
-          <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+          <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] cursor-pointer">
             <input type="checkbox" checked={!!llmStatus?.keep_running}
               onChange={e=>{ send('localLlm.setOption',{key:'enabled',value:e.target.checked}).then(refresh).catch(()=>{}); }}/>
             Keep local AI running (always loaded)
           </label>
-          <label className="flex items-center gap-2 text-[11px] text-[#8b949e] cursor-pointer">
+          <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] cursor-pointer">
             <input type="checkbox" checked={llmStatus?.autostart!==false}
               onChange={e=>{ send('localLlm.setOption',{key:'autostart',value:e.target.checked}).then(refresh).catch(()=>{}); }}/>
             Start automatically when selected as provider
@@ -1210,13 +1211,13 @@ function ProvidersSection({ settings, update, saving, status }: any) {
       )}
       {llmStatus?.downloading&&(
         <div className="mt-2">
-          <div className="h-1.5 w-full rounded bg-[#21262d] overflow-hidden">
-            <div className="h-full bg-[#3380FF] transition-all" style={{width:`${Math.min(100,llmPct)}%`}}/>
+          <div className="h-1.5 w-full rounded bg-[var(--bg-tertiary)] overflow-hidden">
+            <div className="h-full bg-[var(--accent)] transition-all" style={{width:`${Math.min(100,llmPct)}%`}}/>
           </div>
-          <p className="mt-1 text-[10px] text-[#8b949e] truncate">{llmStatus?.detail} · {Math.round(llmPct)}%</p>
+          <p className="mt-1 text-[10px] text-[var(--text-secondary)] truncate">{llmStatus?.detail} · {Math.round(llmPct)}%</p>
         </div>
       )}
-      {!!llmStatus?.error&&<p className="mt-1 text-[10px] text-[#f85149] break-words">{llmStatus.error}</p>}
+      {!!llmStatus?.error&&<p className="mt-1 text-[10px] text-[var(--danger)] break-words">{llmStatus.error}</p>}
       <div className="mt-2 flex flex-wrap gap-2">
         {!llmStatus?.installed&&
           <button disabled={busy!==null||wsState!=='connected'} onClick={()=>act('localLlm.installApprove','install')} className={btnPrimary}>
@@ -1230,15 +1231,15 @@ function ProvidersSection({ settings, update, saving, status }: any) {
           <button disabled={busy!==null} onClick={()=>act('localLlm.remove','remove')} className={btn}>🗑 Remove</button>}
         <button disabled={busy!==null} onClick={refresh} className={btn}>↻ Refresh</button>
       </div>
-      <p className="mt-2 text-[10px] text-[#484f58] break-all">{llmStatus?.dir||''}</p>
+      <p className="mt-2 text-[10px] text-[var(--text-muted)] break-all">{llmStatus?.dir||''}</p>
     </div>
 
     <ModelEndpointPanel/>
 
-    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+    <div className="mt-3 rounded-lg border border-[var(--border)] p-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-medium text-[#e8eaed]">🤗 Hugging Face (Local)</p>
-        <span className="text-[10px] text-[#8b949e]">
+        <p className="text-sm font-medium text-[var(--text-primary)]">🤗 Hugging Face (Local)</p>
+        <span className="text-[10px] text-[var(--text-secondary)]">
           {!hf?.deps_ready
             ? '— needs torch'
             : hf?.vision_ready === false
@@ -1246,15 +1247,15 @@ function ProvidersSection({ settings, update, saving, status }: any) {
               : '● ready'}
         </span>
       </div>
-      <p className="mt-1 text-[11px] text-[#8b949e]">
+      <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
         Runs <span className="font-mono break-all">{hf?.model_id||builtin?.huggingface?.default_model||''}</span> in-process.
         {hf?.downloaded?' Model is downloaded.':' Model downloads on first use.'}
       </p>
-      {hf&&!hf.deps_ready&&<p className="mt-1 text-[10px] text-[#d29922] break-words">{hf.error||'torch + transformers are required.'}</p>}
+      {hf&&!hf.deps_ready&&<p className="mt-1 text-[10px] text-[var(--warning)] break-words">{hf.error||'torch + transformers are required.'}</p>}
       {/* Vision has its own requirements (einops/timm) on top of torch. Saying
           "ready" while every image silently fails is the bug this reports. */}
       {hf&&hf.deps_ready&&hf.vision_ready===false&&(
-        <p className="mt-1 text-[10px] text-[#d29922] break-words">
+        <p className="mt-1 text-[10px] text-[var(--warning)] break-words">
           {hf.vision_error||'Local vision needs einops and timm.'}
         </p>
       )}
@@ -1272,8 +1273,8 @@ function ProvidersSection({ settings, update, saving, status }: any) {
       <SettingRow key={id} label={`${cfg.name} API Key`}>
         <div className="flex items-center gap-2">
           <input type="password" value={cfg.api_key||''} onChange={e=>{const u={...builtin,[id]:{...cfg,api_key:e.target.value}};update('providers','builtin',u)}}
-            placeholder="sk-..." className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-56 font-mono"/>
-          {cfg.api_key&&<span className="text-xs text-[#3fb950]">✓ Set</span>}
+            placeholder="sk-..." className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-56 font-mono"/>
+          {cfg.api_key&&<span className="text-xs text-[var(--success)]">✓ Set</span>}
         </div>
       </SettingRow>)}
   </div>;
@@ -1284,8 +1285,8 @@ function ModelEndpointPanel() {
   const [st, setSt] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState('');
-  const btn = 'text-xs px-3 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:bg-[#21262d] disabled:opacity-50';
-  const btnPrimary = 'text-xs px-3 py-1 rounded bg-[#3380FF] text-white hover:bg-[#4d94ff] disabled:opacity-50';
+  const btn = 'text-xs px-3 py-1 rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50';
+  const btnPrimary = 'text-xs px-3 py-1 rounded bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] disabled:opacity-50';
 
   const refresh = useCallback(async () => {
     if (wsState !== 'connected') return;
@@ -1315,20 +1316,20 @@ function ModelEndpointPanel() {
   };
 
   return (
-    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+    <div className="mt-3 rounded-lg border border-[var(--border)] p-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-medium text-[#e8eaed]">🔌 Use Addled as a model</p>
-        <span className="text-[10px] text-[#8b949e]">
+        <p className="text-sm font-medium text-[var(--text-primary)]">🔌 Use Addled as a model</p>
+        <span className="text-[10px] text-[var(--text-secondary)]">
           {st?.running ? '● listening' : '— off'}
         </span>
       </div>
-      <p className="mt-1 text-[11px] text-[#8b949e]">
+      <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
         An OpenAI-compatible endpoint for agent tools — GitHub Copilot, Codex and
         anything else that takes a base URL. Point them at this instead of the
         model's own port: the address here stays put, and asking starts the
         model if it is asleep.
       </p>
-      <p className="mt-1 text-[10px] text-[#484f58]">
+      <p className="mt-1 text-[10px] text-[var(--text-muted)]">
         Reachable on this machine only{st?.loopback_only ? ' (127.0.0.1)' : ''}. Claude Code
         speaks a different protocol and is not supported yet.
       </p>
@@ -1337,36 +1338,36 @@ function ModelEndpointPanel() {
         <div className="mt-3 space-y-2">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] uppercase tracking-wide text-[#8b949e]">Base URL</span>
-              <button onClick={() => copy('url', st.base_url)} className="text-[10px] text-[#3380FF] hover:underline">
+              <span className="text-[10px] uppercase tracking-wide text-[var(--text-secondary)]">Base URL</span>
+              <button onClick={() => copy('url', st.base_url)} className="text-[10px] text-[var(--accent)] hover:underline">
                 {copied === 'url' ? 'copied' : 'copy'}
               </button>
             </div>
-            <p className="font-mono text-[11px] text-[#e8eaed] break-all">{st.base_url}</p>
+            <p className="font-mono text-[11px] text-[var(--text-primary)] break-all">{st.base_url}</p>
           </div>
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] uppercase tracking-wide text-[#8b949e]">API key</span>
-              <button onClick={() => copy('key', st.token || '')} className="text-[10px] text-[#3380FF] hover:underline">
+              <span className="text-[10px] uppercase tracking-wide text-[var(--text-secondary)]">API key</span>
+              <button onClick={() => copy('key', st.token || '')} className="text-[10px] text-[var(--accent)] hover:underline">
                 {copied === 'key' ? 'copied' : 'copy'}
               </button>
             </div>
-            <p className="font-mono text-[11px] text-[#e8eaed] break-all">{st.token}</p>
+            <p className="font-mono text-[11px] text-[var(--text-primary)] break-all">{st.token}</p>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-[10px] uppercase tracking-wide text-[#8b949e]">Model name</span>
-            <span className="font-mono text-[11px] text-[#e8eaed]">{st.model_id}</span>
+            <span className="text-[10px] uppercase tracking-wide text-[var(--text-secondary)]">Model name</span>
+            <span className="font-mono text-[11px] text-[var(--text-primary)]">{st.model_id}</span>
           </div>
           {/* Worth saying plainly: a tool that reaches a sleeping model gets a
               helpful error rather than a hang, but it still cannot answer. */}
           {!st.model_running && (
-            <p className="text-[10px] text-[#d29922]">
+            <p className="text-[10px] text-[var(--warning)]">
               The local model is not running. It will start on the first request,
               which takes a moment.
             </p>
           )}
           {!st.model_installed && !st.model_running && (
-            <p className="text-[10px] text-[#d29922]">
+            <p className="text-[10px] text-[var(--warning)]">
               No local model is installed yet — download it above first.
             </p>
           )}
@@ -1416,9 +1417,9 @@ function CustomProvidersPanel({ custom, update, btn, btnPrimary }: any) {
   };
 
   return (
-    <div className="mt-3 rounded-lg border border-[#30363d] p-3">
+    <div className="mt-3 rounded-lg border border-[var(--border)] p-3">
       <div className="flex items-center justify-between mb-2">
-        <p className="text-sm font-medium text-[#e8eaed]">🔗 Custom Providers</p>
+        <p className="text-sm font-medium text-[var(--text-primary)]">🔗 Custom Providers</p>
         <div className="flex gap-2">
           <button onClick={addNinerouter} disabled={custom.some((c:any)=>c.id==='9router')}
             className={btnPrimary} title="Add 9router (localhost:20128)">
@@ -1427,32 +1428,32 @@ function CustomProvidersPanel({ custom, update, btn, btnPrimary }: any) {
           <button onClick={addBlank} className={btn}>＋ Add</button>
         </div>
       </div>
-      <p className="mb-3 text-[11px] text-[#8b949e]">
+      <p className="mb-3 text-[11px] text-[var(--text-secondary)]">
         Any OpenAI-compatible endpoint — 9router, LiteLLM, vLLM, etc.
         Localhost URLs need no API key.
       </p>
       {custom.length===0 && (
-        <p className="text-[11px] text-[#484f58]">No custom providers yet.</p>
+        <p className="text-[11px] text-[var(--text-muted)]">No custom providers yet.</p>
       )}
       {custom.map((c:any, idx:number)=>(
-        <div key={c.id||idx} className="mb-3 rounded border border-[#21262d] p-2 space-y-1.5">
+        <div key={c.id||idx} className="mb-3 rounded border border-[var(--bg-tertiary)] p-2 space-y-1.5">
           <div className="flex gap-2">
             <input type="text" placeholder="Name" value={c.name||''} onChange={e=>set(idx,'name',e.target.value)}
-              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] w-28"/>
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] w-28"/>
             <input type="text" placeholder="Base URL  e.g. http://localhost:20128/v1" value={c.base_url||''} onChange={e=>set(idx,'base_url',e.target.value)}
-              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] flex-1 font-mono"/>
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] flex-1 font-mono"/>
           </div>
           <div className="flex gap-2 items-center">
             <input type="password" placeholder="API Key (optional for localhost)" value={c.api_key||''} onChange={e=>set(idx,'api_key',e.target.value)}
-              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] w-44 font-mono"/>
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] w-44 font-mono"/>
             <input type="text" placeholder="Default model" value={c.default_model||''} onChange={e=>set(idx,'default_model',e.target.value)}
-              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] w-40 font-mono"/>
-            <label className="flex items-center gap-1 text-[11px] text-[#8b949e] cursor-pointer ml-auto shrink-0">
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] w-40 font-mono"/>
+            <label className="flex items-center gap-1 text-[11px] text-[var(--text-secondary)] cursor-pointer ml-auto shrink-0">
               <input type="checkbox" checked={!!c.vision} onChange={e=>set(idx,'vision',e.target.checked)}/> Vision
             </label>
-            <button onClick={()=>del(c.id)} className="text-[11px] text-[#f85149] hover:text-red-400 px-1">🗑</button>
+            <button onClick={()=>del(c.id)} className="text-[11px] text-[var(--danger)] hover:text-red-400 px-1">🗑</button>
           </div>
-          <p className="text-[10px] text-[#484f58]">id: {c.id||'(unsaved)'}</p>
+          <p className="text-[10px] text-[var(--text-muted)]">id: {c.id||'(unsaved)'}</p>
         </div>
       ))}
     </div>
@@ -1467,9 +1468,9 @@ function CharacterSection({ settings, update, saving, status }: any) {
   // longer asks either. Their values stay in settings.json and can be edited there.
   const c=settings?.character||{};
   return <div className="space-y-1">
-    <SettingRow label="Agent Name"><input type="text" value={settings?.agent_name||'Addled'} onChange={e=>update('agent_name','',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-40"/></SettingRow>
+    <SettingRow label="Agent Name"><input type="text" value={settings?.agent_name||'Addled'} onChange={e=>update('agent_name','',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-40"/></SettingRow>
     <SettingRow label="Size" description={`${c.size||64}px`}><input type="range" min={32} max={128} value={c.size||64} onChange={e=>update('character','size',parseInt(e.target.value))} className="w-32"/></SettingRow>
-    <SettingRow label="Speed"><select value={c.movement_speed||'medium'} onChange={e=>update('character','movement_speed',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="slow">Slow</option><option value="medium">Medium</option><option value="fast">Fast</option></select></SettingRow>
+    <SettingRow label="Speed"><select value={c.movement_speed||'medium'} onChange={e=>update('character','movement_speed',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]"><option value="slow">Slow</option><option value="medium">Medium</option><option value="fast">Fast</option></select></SettingRow>
     <SettingRow label="Start with Windows" description="Launches Addled when you sign in"><input type="checkbox" checked={!!settings?.system?.autostart} onChange={e=>update('system','autostart',e.target.checked)} className="w-4 h-4"/></SettingRow>
   </div>;
 }
@@ -1530,7 +1531,7 @@ function EmotionSection({ send, connected }: { send: (m: string, p?: Record<stri
   }, [send, connected]);
 
   return <div>
-    <p className="text-xs text-[#8b949e] mb-3">
+    <p className="text-xs text-[var(--text-secondary)] mb-3">
       How the character feels, which is separate from what it is doing.
       An emotion changes the eyes; the app's state still drives the body,
       so the two combine rather than replace each other.
@@ -1542,21 +1543,21 @@ function EmotionSection({ send, connected }: { send: (m: string, p?: Record<stri
                   : 'Connect to the backend to change this'}>
       <button onClick={() => apply('neutral')}
               disabled={!connected}
-              className={`px-3 py-1.5 rounded text-xs border transition-colors disabled:opacity-40 ${active === 'neutral' ? 'bg-[#1f6feb] border-[#1f6feb] text-white' : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed]'}`}>
+              className={`px-3 py-1.5 rounded text-xs border transition-colors disabled:opacity-40 ${active === 'neutral' ? 'bg-[var(--accent)] border-[var(--accent)] text-white' : 'border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}>
         Neutral (rest)
       </button>
     </SettingRow>
 
-    <div className="py-3 border-b border-[#21262d]">
-      <label className="text-sm font-medium text-[#e8eaed]">Moods</label>
-      <p className="text-xs text-[#8b949e] mt-0.5 mb-2">
+    <div className="py-3 border-b border-[var(--bg-tertiary)]">
+      <label className="text-sm font-medium text-[var(--text-primary)]">Moods</label>
+      <p className="text-xs text-[var(--text-secondary)] mt-0.5 mb-2">
         The ten from Web-Eye-Animation. These hold until you change them.
       </p>
       <div className="flex flex-wrap gap-1.5">
-        {emotions.length === 0 && <span className="text-xs text-[#8b949e]">Loading…</span>}
+        {emotions.length === 0 && <span className="text-xs text-[var(--text-secondary)]">Loading…</span>}
         {emotions.map(name => (
           <button key={name} onClick={() => apply(name)} disabled={!connected || busy === name}
-                  className={`px-2.5 py-1 rounded text-xs border transition-colors disabled:opacity-40 ${active === name ? 'bg-[#1f6feb] border-[#1f6feb] text-white' : 'border-[#30363d] text-[#8b949e] hover:text-[#e8eaed] hover:border-[#8b949e]'}`}>
+                  className={`px-2.5 py-1 rounded text-xs border transition-colors disabled:opacity-40 ${active === name ? 'bg-[var(--accent)] border-[var(--accent)] text-white' : 'border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)]'}`}>
             {busy === name ? '…' : name}
           </button>
         ))}
@@ -1565,7 +1566,7 @@ function EmotionSection({ send, connected }: { send: (m: string, p?: Record<stri
 
     {mood && <SettingRow label="App mood"
                          description="Set automatically from what happens; decays over hours">
-      <span className="text-sm text-[#e8eaed]">{mood.name}</span>
+      <span className="text-sm text-[var(--text-primary)]">{mood.name}</span>
     </SettingRow>}
 
     {msg && <p className="text-xs text-[#e8a33d] mt-2">{msg}</p>}
@@ -1659,7 +1660,7 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
 
   useEffect(()=>{load();},[load]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const selectCls="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] max-w-[320px]";
+  const selectCls="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] max-w-[320px]";
   const edgeVoices:any[]=catalogue?.edge||[];
   const kokoroVoices:any[]=catalogue?.kokoro||[];
   const kokoroLanguages:string[]=catalogue?.kokoro_languages||[];
@@ -1699,7 +1700,7 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
   const kokoroReady=Boolean(models?.available) && kokoroVoices.length>0;
   const modelPct=Math.max(0,Math.min(100,Number(models?.percent)||0));
 
-  const toggleCls=(on:boolean)=>`w-10 h-5 rounded-full transition-colors ${on?'bg-[#3380FF]':'bg-[#30363d]'}`;
+  const toggleCls=(on:boolean)=>`w-10 h-5 rounded-full transition-colors ${on?'bg-[var(--accent)]':'bg-[var(--border)]'}`;
   const knobCls=(on:boolean)=>`w-4 h-4 bg-white rounded-full transition-transform ${on?'translate-x-5':'translate-x-0.5'}`;
 
   return <div className="space-y-1">
@@ -1714,7 +1715,7 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
       {customEdge
         ? <div className="flex items-center gap-2">
             <input type="text" value={edgeValue} onChange={e=>update('voice','tts_voice',e.target.value)} className={`${selectCls} w-56`}/>
-            <button onClick={()=>setCustomEdge(false)} className="text-xs text-[#8b949e] hover:text-[#e8eaed]">done</button>
+            <button onClick={()=>setCustomEdge(false)} className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">done</button>
           </div>
         : <select value={edgeKnown?edgeValue:'__custom__'} onChange={e=>{const val=e.target.value; if(val==='__custom__') setCustomEdge(true); else update('voice','tts_voice',val);}} className={`${selectCls} w-56`}>
             {!edgeKnown&&<option value="__custom__">{edgeValue} (current)</option>}
@@ -1737,7 +1738,7 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
       {customKokoro
         ? <div className="flex items-center gap-2">
             <input type="text" value={kokoroValue} onChange={e=>update('voice','kokoro_voice',e.target.value)} className={`${selectCls} w-44`}/>
-            <button onClick={()=>setCustomKokoro(false)} className="text-xs text-[#8b949e] hover:text-[#e8eaed]">done</button>
+            <button onClick={()=>setCustomKokoro(false)} className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">done</button>
           </div>
         : <select value={kokoroKnown?kokoroValue:'__custom__'} onChange={e=>{const val=e.target.value; if(val==='__custom__') setCustomKokoro(true); else update('voice','kokoro_voice',val);}} className={`${selectCls} w-44`}>
             {!kokoroKnown&&<option value="__custom__">{kokoroValue} (current)</option>}
@@ -1762,7 +1763,7 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
         : models.download_present?'Present but not the verified files — download again'
         : `${(Number(models.total_bytes||0)/1048576).toFixed(0)} MB — downloaded on request, not shipped with Addled`}>
       <div className="flex items-center gap-2">
-        <span className={`text-xs ${kokoroReady?'text-[#3fb950]':'text-[#d29922]'}`}>
+        <span className={`text-xs ${kokoroReady?'text-[var(--success)]':'text-[var(--warning)]'}`}>
           {!models?''
             :models.bundled?'✓ bundled'
             :models.installed?'✓ installed'
@@ -1771,7 +1772,7 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
         </span>
         {models&&models.supported&&!models.installing&&!models.bundled&&(
           <button onClick={()=>startModelInstall(Boolean(models.installed||models.download_present))} disabled={installing||!connected}
-            className="text-xs px-2 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:border-[#484f58] disabled:opacity-50">
+            className="text-xs px-2 py-1 rounded border border-[var(--border)] text-[var(--text-primary)] hover:border-[var(--text-muted)] disabled:opacity-50">
             {models.installed?'Reinstall':models.download_present?'Re-download':'Download'}
           </button>
         )}
@@ -1780,14 +1781,14 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
     {models?.installing&&(
       <SettingRow label="Downloading" description={models.detail||models.phase}>
         <div className="flex items-center gap-2 w-40">
-          <div className="flex-1 h-1.5 bg-[#21262d] rounded overflow-hidden">
-            <div className="h-full bg-[#3380FF] transition-all" style={{width:`${modelPct}%`}}/>
+          <div className="flex-1 h-1.5 bg-[var(--bg-tertiary)] rounded overflow-hidden">
+            <div className="h-full bg-[var(--accent)] transition-all" style={{width:`${modelPct}%`}}/>
           </div>
-          <span className="text-xs text-[#8b949e]">{modelPct}%</span>
+          <span className="text-xs text-[var(--text-secondary)]">{modelPct}%</span>
         </div>
       </SettingRow>
     )}
-    <p className="text-xs text-[#8b949e] mb-2">
+    <p className="text-xs text-[var(--text-secondary)] mb-2">
       Kokoro&apos;s offline voice is two files totalling 356 MB, fetched from the
       kokoro-onnx release on GitHub and checked against a sha256 Addled pins for
       them — the release publishes none of its own. They used to travel inside
@@ -1796,33 +1797,33 @@ function VoiceSection({ settings, update, saving, status, send, connected }: any
       speaks through Edge instead, and keeps working.
     </p>
     {models&&!models.supported&&(
-      <p className="text-xs text-[#8b949e]">These are the Windows builds. On this machine, put the two files in {models.install_dir} yourself.</p>
+      <p className="text-xs text-[var(--text-secondary)]">These are the Windows builds. On this machine, put the two files in {models.install_dir} yourself.</p>
     )}
-    {modelNote&&<p className="text-xs text-[#8b949e]">{modelNote}</p>}
-    {models?.error&&<p className="text-xs text-[#d29922]">{models.error}</p>}
+    {modelNote&&<p className="text-xs text-[var(--text-secondary)]">{modelNote}</p>}
+    {models?.error&&<p className="text-xs text-[var(--warning)]">{models.error}</p>}
 
     {kokoroMissing&&(
-      <p className="text-xs text-[#d29922] py-2">
+      <p className="text-xs text-[var(--warning)] py-2">
         Kokoro has no {language} voice — its {kokoroVoices.length} voices cover {
           kokoroLanguages.join(', ')}. Pick an Edge voice to speak {language}, or
         change the language above.
       </p>
     )}
     {!busy&&catalogue&&edgeCount===0&&(
-      <p className="text-xs text-[#d29922] py-2">
+      <p className="text-xs text-[var(--warning)] py-2">
         Could not list Edge voices{loadError?`: ${loadError}`:''}. Showing nothing rather than a guess — try Refresh.
       </p>
     )}
     {loadError&&edgeCount>0&&(
-      <p className="text-xs text-[#8b949e] py-2">
+      <p className="text-xs text-[var(--text-secondary)] py-2">
         Edge list could not be refreshed ({loadError}); showing the last known set.
       </p>
     )}
-    <SettingRow label="Voice list"><button onClick={()=>load(true)} disabled={busy} className="text-xs px-2 py-1 rounded border border-[#30363d] hover:border-[#8b949e] text-[#8b949e] hover:text-[#e8eaed] disabled:opacity-50">{busy?'Refreshing…':'Refresh'}</button></SettingRow>
+    <SettingRow label="Voice list"><button onClick={()=>load(true)} disabled={busy} className="text-xs px-2 py-1 rounded border border-[var(--border)] hover:border-[var(--text-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50">{busy?'Refreshing…':'Refresh'}</button></SettingRow>
 
     <SettingRow label="STT Engine"><select value={v.stt_engine||'sensevoice'} onChange={e=>update('voice','stt_engine',e.target.value)} className={selectCls}><option value="sensevoice">SenseVoice (falls back to Whisper)</option><option value="whisper">Faster-Whisper</option></select></SettingRow>
     <SettingRow label="STT Model"><select value={v.stt_model||'small'} onChange={e=>update('voice','stt_model',e.target.value)} className={selectCls}><option value="tiny">tiny (fast)</option><option value="small">small (accurate)</option></select></SettingRow>
-    <SettingRow label="Wake Word"><input type="text" value={v.wake_word||'hey addled'} onChange={e=>update('voice','wake_word',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-40"/></SettingRow>
+    <SettingRow label="Wake Word"><input type="text" value={v.wake_word||'hey addled'} onChange={e=>update('voice','wake_word',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-40"/></SettingRow>
     <SettingRow label="Auto TTS"><button onClick={()=>update('voice','auto_tts',v.auto_tts===false)} className={toggleCls(v.auto_tts!==false)}><div className={knobCls(v.auto_tts!==false)}/></button></SettingRow>
     <SettingRow label="VAD (Silero)"><button onClick={()=>update('voice','vad_enabled',v.vad_enabled===false)} className={toggleCls(v.vad_enabled!==false)}><div className={knobCls(v.vad_enabled!==false)}/></button></SettingRow>
   </div>;
@@ -1849,12 +1850,12 @@ function WorkspaceSection({ settings, update, saving, status, send, connected }:
     <SettingRow label="Workspace Folder" description="The folder Addled works in. Relative paths resolve here, and file tools stay inside it.">
       <input type="text" value={root} placeholder="C:\\Users\\you\\Projects\\thing"
         onChange={e=>update('workspace','root',e.target.value)}
-        className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-80 font-mono"/>
+        className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-80 font-mono"/>
     </SettingRow>
 
     <SettingRow label="File Access" description="Workspace Only keeps everything inside the folder above. Custom also allows the extra folders. Unrestricted disables all confinement.">
       <select value={mode} onChange={e=>update('safety','file_access_mode',e.target.value)}
-        className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]">
+        className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]">
         <option value="workspace_only">Workspace Only</option>
         <option value="custom">Custom</option>
         <option value="unrestricted">Unrestricted</option>
@@ -1866,14 +1867,14 @@ function WorkspaceSection({ settings, update, saving, status, send, connected }:
         <textarea value={extraText} rows={3}
           onChange={e=>{setExtraText(e.target.value); setExtraDirty(true);}}
           placeholder="D:\\Notes\nE:\\Scratch"
-          className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-80 font-mono"/>
+          className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-80 font-mono"/>
         <button onClick={()=>{update('workspace','extra_dirs',extraText.split('\n').map(x=>x.trim()).filter(Boolean)); setExtraDirty(false);}}
-          className={`px-3 py-1.5 rounded text-sm ${extraDirty?'bg-[#1f6feb] text-white':'bg-[#21262d] text-[#8b949e]'}`}>Save</button>
+          className={`px-3 py-1.5 rounded text-sm ${extraDirty?'bg-[var(--accent)] text-white':'bg-[var(--bg-tertiary)] text-[var(--text-secondary)]'}`}>Save</button>
       </div>
     </SettingRow>}
 
-    {info&&<div className="mt-4 rounded-md border border-[#30363d] bg-[#0d1117] p-3 text-xs space-y-1.5 font-mono text-[#8b949e]">
-      <div className={info.configured?'text-[#e8eaed]':'text-[#d29922]'}>
+    {info&&<div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg-primary)] p-3 text-xs space-y-1.5 font-mono text-[var(--text-secondary)]">
+      <div className={info.configured?'text-[var(--text-primary)]':'text-[var(--warning)]'}>
         {info.configured ? `Workspace: ${info.root}` : info.note}
       </div>
       <div>Mode: {info.mode_label}{info.enforced?' — enforced':' — not enforced'}</div>
@@ -1882,7 +1883,7 @@ function WorkspaceSection({ settings, update, saving, status, send, connected }:
           ? <>Allowed folders:{info.allowed.map((p:string,i:number)=><div key={i} className="pl-3 truncate">{p}</div>)}</>
           : 'No folder restriction is active.'}
       </div>
-      {info.configured&&info.mode==='unrestricted'&&<div className="text-[#d29922]">The folder is set but Unrestricted mode means it is not being enforced.</div>}
+      {info.configured&&info.mode==='unrestricted'&&<div className="text-[var(--warning)]">The folder is set but Unrestricted mode means it is not being enforced.</div>}
     </div>}
   </div>;
 }
@@ -1891,35 +1892,35 @@ function RemoteSection({ settings, update, saving, status }: any) {
   const r=settings?.remote||{};
   const t=settings?.tailscale||{};
   const Toggle=({label,desc,group,cfg,skey}:any)=><SettingRow label={label} description={desc}>
-    <button onClick={()=>update(group,skey,!cfg[skey])} className={`w-10 h-5 rounded-full transition-colors ${cfg[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}>
+    <button onClick={()=>update(group,skey,!cfg[skey])} className={`w-10 h-5 rounded-full transition-colors ${cfg[skey]?'bg-[var(--accent)]':'bg-[var(--border)]'}`}>
       <div className={`w-4 h-4 bg-white rounded-full transition-transform ${cfg[skey]?'translate-x-5':'translate-x-0.5'}`}/>
     </button>
   </SettingRow>;
   const Num=({label,desc,group,cfg,skey,min,max}:any)=><SettingRow label={label} description={desc}>
     <input type="number" min={min} max={max} value={cfg[skey] ?? ''}
       onChange={(e)=>update(group,skey,Number(e.target.value))}
-      className="w-20 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] focus:outline-none focus:border-[#3380FF]"/>
+      className="w-20 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"/>
   </SettingRow>;
   return <div className="space-y-1">
-    <p className="text-xs text-[#8b949e] mb-2">Other machines reach this Addled through Tailscale. The gateway binds loopback only; Tailscale terminates HTTPS and proxies to it. See the Remote page for status and sign-in.</p>
+    <p className="text-xs text-[var(--text-secondary)] mb-2">Other machines reach this Addled through Tailscale. The gateway binds loopback only; Tailscale terminates HTTPS and proxies to it. See the Remote page for status and sign-in.</p>
     <Toggle label="Remote access" desc="Start the authenticated gateway" group="remote" cfg={r} skey="enabled"/>
     <Num label="Gateway port" desc="Loopback only — never exposed directly" group="remote" cfg={r} skey="port" min={1024} max={65535}/>
     <Num label="Session length (hours)" desc="How long a signed-in device stays signed in" group="remote" cfg={r} skey="session_hours" min={1} max={720}/>
     <Num label="Idle timeout (minutes)" desc="Sign out after this long without use" group="remote" cfg={r} skey="idle_timeout_minutes" min={5} max={1440}/>
     <Num label="Maximum sessions" desc="Older sessions are dropped beyond this" group="remote" cfg={r} skey="max_sessions" min={1} max={50}/>
 
-    <div className="border-t border-[#30363d] my-3"/>
-    <p className="text-xs text-[#8b949e] mb-2">A signed-in browser is not automatically root. These hold back the two things that would turn a stolen session into full control of this machine.</p>
+    <div className="border-t border-[var(--border)] my-3"/>
+    <p className="text-xs text-[var(--text-secondary)] mb-2">A signed-in browser is not automatically root. These hold back the two things that would turn a stolen session into full control of this machine.</p>
     <Toggle label="Allow remote shell" desc="Let a remote session run commands. This is remote code execution — leave it off unless you need it" group="remote" cfg={r} skey="allow_shell"/>
     <Toggle label="Allow remote input" desc="Let a remote session move the mouse and type. This can drive any window on this machine" group="remote" cfg={r} skey="allow_desktop_input"/>
     <Toggle label="Permit public internet access" desc="Allows Tailscale Funnel. This is a permission only — nothing is published until you turn on Funnel on the Remote page, and it is never published automatically" group="remote" cfg={r} skey="allow_funnel"/>
 
-    <div className="border-t border-[#30363d] my-3"/>
-    <p className="text-xs text-[#8b949e] mb-2">Addled manages Tailscale — status, sign-in and sharing — and can run the official installer when you press the button on the Remote page. Nothing installs on its own.</p>
+    <div className="border-t border-[var(--border)] my-3"/>
+    <p className="text-xs text-[var(--text-secondary)] mb-2">Addled manages Tailscale — status, sign-in and sharing — and can run the official installer when you press the button on the Remote page. Nothing installs on its own.</p>
     <Toggle label="Manage Tailscale" desc="Read status and reconcile the share on startup" group="tailscale" cfg={t} skey="enabled"/>
     <SettingRow label="Install method" description="winget is the vendor's own published package; the download is checked against Tailscale's signature before it is run.">
       <select value={t.install_method||'auto'} onChange={e=>update('tailscale','install_method',e.target.value)}
-        className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]">
+        className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]">
         <option value="auto">Automatic</option>
         <option value="winget">winget</option>
         <option value="download">Download from tailscale.com</option>
@@ -1928,30 +1929,30 @@ function RemoteSection({ settings, update, saving, status }: any) {
     <SettingRow label="Node name" description="The name this machine takes on your tailnet. Blank uses the computer's name.">
       <input type="text" value={t.hostname||''} placeholder="addled"
         onChange={e=>update('tailscale','hostname',e.target.value)}
-        className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-44 font-mono"/>
+        className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-44 font-mono"/>
     </SettingRow>
     <Num label="Share port" desc="The HTTPS port Tailscale serves on" group="tailscale" cfg={t} skey="serve_port" min={443} max={8443}/>
     <Num label="Status poll (seconds)" desc="How often to ask the Tailscale CLI for its status" group="tailscale" cfg={t} skey="poll_seconds" min={5} max={600}/>
     <Toggle label="Share to the tailnet automatically" desc="Once Tailscale is installed and signed in, keep the dashboard shared to your own tailnet and start the gateway. Refuses without a password, and never publishes to the public internet" group="tailscale" cfg={t} skey="auto_share"/>
     <SettingRow label="Funnel" description="Not configured here — Funnel is started and stopped only from the Remote page, so it can never come on by itself.">
-      <span className="text-xs text-[#8b949e]">{t.funnel ? 'last state: on (will be cleared)' : 'off'}</span>
+      <span className="text-xs text-[var(--text-secondary)]">{t.funnel ? 'last state: on (will be cleared)' : 'off'}</span>
     </SettingRow>
     <SettingRow label="Auth key" description="Optional, for headless sign-in. Stored locally and never sent to a browser.">
-      <span className="text-xs text-[#8b949e]">{t.auth_key ? 'Stored' : 'Not set'}</span>
+      <span className="text-xs text-[var(--text-secondary)]">{t.auth_key ? 'Stored' : 'Not set'}</span>
     </SettingRow>
-    <SettingRow label="Open remote access"><Link href="/remote" className="text-xs text-[#3380FF] hover:underline">Go to the Remote page →</Link></SettingRow>
+    <SettingRow label="Open remote access"><Link href="/remote" className="text-xs text-[var(--accent)] hover:underline">Go to the Remote page →</Link></SettingRow>
   </div>;
 }
 
 function SafetySection({ settings, update, saving, status }: any) {
   const { send, state: wsState } = useWS();
   const s=settings?.safety||{};
-  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('safety',skey,!s[skey])} className={`w-10 h-5 rounded-full transition-colors ${s[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${s[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('safety',skey,!s[skey])} className={`w-10 h-5 rounded-full transition-colors ${s[skey]?'bg-[var(--accent)]':'bg-[var(--border)]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${s[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   return <div className="space-y-1">
-    <SettingRow label="Kill Switch"><input type="text" value={s.kill_switch_hotkey||'ctrl+shift+alt+k'} onChange={e=>update('safety','kill_switch_hotkey',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-44 font-mono"/></SettingRow>
+    <SettingRow label="Kill Switch"><input type="text" value={s.kill_switch_hotkey||'ctrl+shift+alt+k'} onChange={e=>update('safety','kill_switch_hotkey',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-44 font-mono"/></SettingRow>
     <Toggle label="Clipboard Filter" desc="Redact secrets from clipboard" skey="clipboard_filter"/>
     <Toggle label="Prompt Guard" desc="Block injection attempts" skey="prompt_guard"/>
-    <SettingRow label="Quiet Hours"><div className="flex items-center gap-2 text-sm text-[#e8eaed]"><input type="time" value={s.quiet_hours_start||'22:00'} onChange={e=>update('safety','quiet_hours_start',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed]"/><span className="text-[#8b949e]">to</span><input type="time" value={s.quiet_hours_end||'07:00'} onChange={e=>update('safety','quiet_hours_end',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm text-[#e8eaed]"/></div></SettingRow>
+    <SettingRow label="Quiet Hours"><div className="flex items-center gap-2 text-sm text-[var(--text-primary)]"><input type="time" value={s.quiet_hours_start||'22:00'} onChange={e=>update('safety','quiet_hours_start',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-sm text-[var(--text-primary)]"/><span className="text-[var(--text-secondary)]">to</span><input type="time" value={s.quiet_hours_end||'07:00'} onChange={e=>update('safety','quiet_hours_end',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-1 text-sm text-[var(--text-primary)]"/></div></SettingRow>
     <Toggle label="Meeting Auto-Sleep" skey="meeting_auto_sleep"/>
     <Toggle label="Gaming Auto-Sleep" desc="Stay quiet while you play" skey="gaming_auto_sleep"/>
     <Toggle label="Free the local model while gaming"
@@ -1996,31 +1997,31 @@ function StandingPermissions({ send, connected }: any) {
 
   return (
     <>
-      <div className="border-t border-[#30363d] my-3"/>
-      <p className="text-xs text-[#8b949e] mb-2">
+      <div className="border-t border-[var(--border)] my-3"/>
+      <p className="text-xs text-[var(--text-secondary)] mb-2">
         Skills and tools that no longer ask before they run. Anything you allowed with
         &ldquo;Always allow&rdquo; is listed here; destructive commands and file deletion are not,
         because those always ask.
       </p>
       {rows.length === 0
-        ? <p className="px-1 text-xs text-[#484f58]">Nothing has standing permission.</p>
+        ? <p className="px-1 text-xs text-[var(--text-muted)]">Nothing has standing permission.</p>
         : <div className="space-y-1">
             {rows.map(({ kind, name }) => (
               <div key={`${kind}:${name}`}
-                className="flex items-center justify-between gap-2 rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5">
+                className="flex items-center justify-between gap-2 rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-1.5">
                 <span className="min-w-0 truncate text-xs">
-                  <span className="mr-1.5 rounded bg-[#1f2937] px-1.5 py-0.5 text-[10px] text-[#58a6ff]">{kind}</span>
-                  <span className="font-mono text-[#e8eaed]">{name}</span>
+                  <span className="mr-1.5 rounded bg-[#1f2937] px-1.5 py-0.5 text-[10px] text-[var(--accent-hover)]">{kind}</span>
+                  <span className="font-mono text-[var(--text-primary)]">{name}</span>
                 </span>
                 <button onClick={() => revoke(kind, name)} disabled={!connected}
                   title="Make it ask again"
-                  className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-[#30363d] text-[#8b949e] hover:text-[#f85149] hover:border-[#f8514955] disabled:opacity-50">
+                  className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--danger)] hover:border-[#f8514955] disabled:opacity-50">
                   Revoke
                 </button>
               </div>
             ))}
           </div>}
-      {err && <p className="mt-1 text-xs text-[#f85149]">{err}</p>}
+      {err && <p className="mt-1 text-xs text-[var(--danger)]">{err}</p>}
     </>
   );
 }
@@ -2029,31 +2030,31 @@ function NotificationsSection({ settings, update, saving, status }: any) {
   const n=settings?.notifications||{};
   return <div className="space-y-1">
     <SettingRow label="Bubble Duration" description={`${n.bubble_duration_s||8}s`}><input type="range" min={3} max={30} value={n.bubble_duration_s||8} onChange={e=>update('notifications','bubble_duration_s',parseInt(e.target.value))} className="w-32"/></SettingRow>
-    <SettingRow label="Max Bubbles"><input type="number" min={1} max={10} value={n.max_bubbles||3} onChange={e=>update('notifications','max_bubbles',parseInt(e.target.value))} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-20"/></SettingRow>
-    <SettingRow label="Show State"><button onClick={()=>update('notifications','show_character_state',n.show_character_state===false)} className={`w-10 h-5 rounded-full transition-colors ${n.show_character_state!==false?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${n.show_character_state!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
+    <SettingRow label="Max Bubbles"><input type="number" min={1} max={10} value={n.max_bubbles||3} onChange={e=>update('notifications','max_bubbles',parseInt(e.target.value))} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-20"/></SettingRow>
+    <SettingRow label="Show State"><button onClick={()=>update('notifications','show_character_state',n.show_character_state===false)} className={`w-10 h-5 rounded-full transition-colors ${n.show_character_state!==false?'bg-[var(--accent)]':'bg-[var(--border)]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${n.show_character_state!==false?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>
   </div>;
 }
 
 function ObservationSection({ settings, update, saving, status }: any) {
   const o=settings?.observation||{};
-  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('observation',skey,!o[skey])} className={`w-10 h-5 rounded-full transition-colors ${o[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${o[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('observation',skey,!o[skey])} className={`w-10 h-5 rounded-full transition-colors ${o[skey]?'bg-[var(--accent)]':'bg-[var(--border)]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${o[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   return <div className="space-y-1">
     <Toggle label="Deep vision" desc="Periodically screenshot your screen and analyze it with the visual model (respects privacy zones)" skey="deep_vision"/>
-    <SettingRow label="Deep vision interval" description={`Every ${o.deep_interval_s||300}s`}><select value={o.deep_interval_s||300} onChange={e=>update('observation','deep_interval_s',parseInt(e.target.value))} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value={60}>1 min</option><option value={120}>2 min</option><option value={300}>5 min</option><option value={600}>10 min</option><option value={1800}>30 min</option></select></SettingRow>
+    <SettingRow label="Deep vision interval" description={`Every ${o.deep_interval_s||300}s`}><select value={o.deep_interval_s||300} onChange={e=>update('observation','deep_interval_s',parseInt(e.target.value))} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]"><option value={60}>1 min</option><option value={120}>2 min</option><option value={300}>5 min</option><option value={600}>10 min</option><option value={1800}>30 min</option></select></SettingRow>
     <Toggle label="Speak insights" desc="Read proactive insights out loud (Auto TTS must be on)" skey="voice_insights"/>
-    <SettingRow label="Snapshot memory"><span className="text-xs text-[#8b949e]">{o.snapshot_store_enabled===false?'Disabled':'Enabled'} · max {o.snapshot_max||30} · every {o.snapshot_min_interval_s||60}s</span></SettingRow>
+    <SettingRow label="Snapshot memory"><span className="text-xs text-[var(--text-secondary)]">{o.snapshot_store_enabled===false?'Disabled':'Enabled'} · max {o.snapshot_max||30} · every {o.snapshot_min_interval_s||60}s</span></SettingRow>
   </div>;
 }
 
 function MemorySection({ settings, update, saving, status }: any) {
   const m=settings?.memory||{};
-  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('memory',skey,!m[skey])} className={`w-10 h-5 rounded-full transition-colors ${m[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${m[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('memory',skey,!m[skey])} className={`w-10 h-5 rounded-full transition-colors ${m[skey]?'bg-[var(--accent)]':'bg-[var(--border)]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${m[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   return <div className="space-y-1">
     <Toggle label="Semantic recall" desc="Local MiniLM embeddings for meaning-based memory search (falls back to hashed keywords when the model is missing)" skey="semantic_embeddings"/>
     <Toggle label="Hybrid search" desc="Fuse semantic + exact-keyword matching for stronger recall" skey="hybrid_search"/>
     <Toggle label="Auto memory notes" desc="Let the agent occasionally write durable facts about you in the background (uses provider credits)" skey="auto_facts"/>
     <Toggle label="Knowledge graph" desc="Extract fact triples (subject → relation → object) from conversations in the background (uses provider credits)" skey="graph_extract"/>
-    <SettingRow label="Vector Store"><span className="text-xs text-[#8b949e]">SQLite + numpy (384-dim)</span></SettingRow>
+    <SettingRow label="Vector Store"><span className="text-xs text-[var(--text-secondary)]">SQLite + numpy (384-dim)</span></SettingRow>
   </div>;
 }
 
@@ -2064,7 +2065,7 @@ function WikiSection({ settings, update, saving, status }: any) {
   const Toggle=(group:'links'|'wiki'|'sop', cfg:any)=>{
     const T=({label,desc,skey}:{label:string;desc?:string;skey:string})=>(
       <SettingRow label={label} description={desc}>
-        <button onClick={()=>update(group,skey,!cfg[skey])} className={`w-10 h-5 rounded-full transition-colors ${cfg[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}>
+        <button onClick={()=>update(group,skey,!cfg[skey])} className={`w-10 h-5 rounded-full transition-colors ${cfg[skey]?'bg-[var(--accent)]':'bg-[var(--border)]'}`}>
           <div className={`w-4 h-4 bg-white rounded-full transition-transform ${cfg[skey]?'translate-x-5':'translate-x-0.5'}`}/>
         </button>
       </SettingRow>
@@ -2076,7 +2077,7 @@ function WikiSection({ settings, update, saving, status }: any) {
       <SettingRow label={label} description={desc}>
         <input type="number" min={min} max={max} value={cfg[skey] ?? ''}
           onChange={(e)=>update(group,skey,Number(e.target.value))}
-          className="w-20 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] focus:outline-none focus:border-[#3380FF]"/>
+          className="w-20 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"/>
       </SettingRow>
     );
   };
@@ -2091,10 +2092,10 @@ function WikiSection({ settings, update, saving, status }: any) {
     <SettingRow label={label} description={desc}>
       <input type="number" min={0} max={1} step={0.05} value={sop[skey] ?? ''}
         onChange={(e)=>update('sop',skey,Number(e.target.value))}
-        className="w-20 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-[#e8eaed] focus:outline-none focus:border-[#3380FF]"/>
+        className="w-20 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"/>
     </SettingRow>;
   return <div className="space-y-1">
-    <p className="text-xs text-[#8b949e] mb-2">One graph connects every memory store (facts, triples, memories, summaries, journal days, wiki pages) to each other and to files on disk.</p>
+    <p className="text-xs text-[var(--text-secondary)] mb-2">One graph connects every memory store (facts, triples, memories, summaries, journal days, wiki pages) to each other and to files on disk.</p>
     <LinkToggle label="Memory relations" desc="Record and use relations between memories, and between memories and files" skey="enabled"/>
     <LinkToggle label="Link files automatically" desc="Scan new memories for file paths and link them to the file" skey="auto_file_links"/>
     <LinkToggle label="Record provenance" desc="Link a memory back to whatever produced it (a conversation turn, a journal day, a file)" skey="auto_provenance"/>
@@ -2102,23 +2103,23 @@ function WikiSection({ settings, update, saving, status }: any) {
     <LinkNum label="Relation hops to follow" desc="How far to walk the graph when recalling related items (1-4)" skey="related_depth"/>
     <LinkNum label="Related items to inject" desc="Maximum related items added to a chat prompt" skey="related_inject"/>
 
-    <div className="border-t border-[#30363d] my-3"/>
-    <p className="text-xs text-[#8b949e] mb-2">The wiki is a set of markdown pages Addled maintains from your own documents, so its pages can be cited as fact instead of guessed at.</p>
+    <div className="border-t border-[var(--border)] my-3"/>
+    <p className="text-xs text-[var(--text-secondary)] mb-2">The wiki is a set of markdown pages Addled maintains from your own documents, so its pages can be cited as fact instead of guessed at.</p>
     <WikiToggle label="Wiki" desc="Maintain and use knowledge pages" skey="enabled"/>
     <WikiToggle label="Ingest files automatically" desc="Off by default — Addled never reads your files into the wiki unless you ask it to" skey="auto_ingest"/>
     <WikiNum label="Pages to inject" desc="How many matching pages to give the model per message" skey="inject_top_k"/>
     <WikiNum label="Prompt budget (chars)" desc="Upper bound on wiki text added to one message" skey="max_chars"/>
-    <SettingRow label="Wiki folder"><span className="text-xs text-[#8b949e] break-all">{w.dir || 'default (backend/memory/wiki)'}</span></SettingRow>
+    <SettingRow label="Wiki folder"><span className="text-xs text-[var(--text-secondary)] break-all">{w.dir || 'default (backend/memory/wiki)'}</span></SettingRow>
 
-    <div className="border-t border-[#30363d] my-3"/>
-    <p className="text-xs text-[#8b949e] mb-2">A procedure is the route a task took the last time it worked. When a new task is close enough to one, Addled is given those steps up front instead of working them out again.</p>
+    <div className="border-t border-[var(--border)] my-3"/>
+    <p className="text-xs text-[var(--text-secondary)] mb-2">A procedure is the route a task took the last time it worked. When a new task is close enough to one, Addled is given those steps up front instead of working them out again.</p>
     <SopToggle label="Procedures" desc="Look up a standard procedure before starting a task" skey="enabled"/>
     <SopToggle label="Learn from runs" desc="Keep the route after a task that used tools and succeeded. Failed runs are never kept" skey="learn"/>
     <SopNum label="Procedures to offer" desc="How many matching procedures to give the model per message" skey="inject_top_k"/>
     {SopScore("Minimum similarity", "How close a task must be before a procedure is offered. Higher means fewer, safer matches", "min_similarity")}
     {SopScore("Merge similarity", "How close two runs must be to count as the same procedure rather than a new one", "merge_similarity")}
-    <SettingRow label="Procedures folder"><span className="text-xs text-[#8b949e] break-all">{sop.dir || 'default (backend/memory/sop)'}</span></SettingRow>
-    <SettingRow label="Browse procedures"><Link href="/sop" className="text-xs text-[#3380FF] hover:underline">Open the Procedures page →</Link></SettingRow>
+    <SettingRow label="Procedures folder"><span className="text-xs text-[var(--text-secondary)] break-all">{sop.dir || 'default (backend/memory/sop)'}</span></SettingRow>
+    <SettingRow label="Browse procedures"><Link href="/sop" className="text-xs text-[var(--accent)] hover:underline">Open the Procedures page →</Link></SettingRow>
   </div>;
 }
 
@@ -2167,27 +2168,27 @@ function UvInstall({ compact, send, connected }:{compact?:boolean;send:any;conne
     : 'Not installed — PyPI-packaged servers cannot run';
   const button = uv&&uv.supported&&!uv.installing&&(
     <button onClick={start} disabled={busy||!connected}
-      className="text-xs px-2 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:border-[#484f58] disabled:opacity-50">
+      className="text-xs px-2 py-1 rounded border border-[var(--border)] text-[var(--text-primary)] hover:border-[var(--text-muted)] disabled:opacity-50">
       {uv.own?.installed?'Reinstall':uv.available?'Install Addled\u2019s copy':'Install uv'}
     </button>
   );
 
   if(compact){
     return <div className="flex flex-wrap items-center gap-2 text-[10px]">
-      <span className={uv?.available?'text-[#3fb950]':'text-[#d29922]'}>{status}</span>
+      <span className={uv?.available?'text-[var(--success)]':'text-[var(--warning)]'}>{status}</span>
       {button}
-      {uv?.installing&&<span className="text-[#8b949e]">{pct}% — {uv.detail||uv.phase}</span>}
-      {note&&<span className="text-[#8b949e]">{note}</span>}
+      {uv?.installing&&<span className="text-[var(--text-secondary)]">{pct}% — {uv.detail||uv.phase}</span>}
+      {note&&<span className="text-[var(--text-secondary)]">{note}</span>}
     </div>;
   }
   return <>
     <SettingRow label="uv runtime" description="Optional — needed by MCP servers packaged for PyPI, which the market lists as &quot;needs uvx on PATH&quot;">
       <div className="flex items-center gap-2">
-        <span className={`text-xs ${uv?.available ? 'text-[#3fb950]':'text-[#d29922]'}`}>{status}</span>
+        <span className={`text-xs ${uv?.available ? 'text-[var(--success)]':'text-[var(--warning)]'}`}>{status}</span>
         {button}
       </div>
     </SettingRow>
-    <p className="text-xs text-[#8b949e] mb-2">
+    <p className="text-xs text-[var(--text-secondary)] mb-2">
       uv is a single third-party runtime, fetched from its GitHub releases and checked against the
       sha256 GitHub publishes for it. Addled never bundles it and never installs it on its own — the
       npm half of the MCP market works without it.
@@ -2195,23 +2196,23 @@ function UvInstall({ compact, send, connected }:{compact?:boolean;send:any;conne
     {uv?.installing&&(
       <SettingRow label="Downloading" description={uv.detail||uv.phase}>
         <div className="flex items-center gap-2 w-40">
-          <div className="flex-1 h-1.5 bg-[#21262d] rounded overflow-hidden">
-            <div className="h-full bg-[#3380FF] transition-all" style={{width:`${pct}%`}}/>
+          <div className="flex-1 h-1.5 bg-[var(--bg-tertiary)] rounded overflow-hidden">
+            <div className="h-full bg-[var(--accent)] transition-all" style={{width:`${pct}%`}}/>
           </div>
-          <span className="text-xs text-[#8b949e]">{pct}%</span>
+          <span className="text-xs text-[var(--text-secondary)]">{pct}%</span>
         </div>
       </SettingRow>
     )}
     {uv&&!uv.installing&&uv.own?.installed&&(
       <SettingRow label="Addled's copy" description={`${uv.own.version||'version unknown'} — installed ${uv.own.installed_at||'unknown'}`}>
-        <span className="text-xs text-[#8b949e] break-all">{uv.install_dir}</span>
+        <span className="text-xs text-[var(--text-secondary)] break-all">{uv.install_dir}</span>
       </SettingRow>
     )}
     {uv&&!uv.supported&&(
-      <p className="text-xs text-[#8b949e]">This download is the Windows build of uv. On this machine, put <code>uvx</code> on PATH and it will be used.</p>
+      <p className="text-xs text-[var(--text-secondary)]">This download is the Windows build of uv. On this machine, put <code>uvx</code> on PATH and it will be used.</p>
     )}
-    {uv?.error&&<p className="text-xs text-[#d29922]">{uv.error}</p>}
-    {note&&<p className="text-xs text-[#8b949e]">{note}</p>}
+    {uv?.error&&<p className="text-xs text-[var(--warning)]">{uv.error}</p>}
+    {note&&<p className="text-xs text-[var(--text-secondary)]">{note}</p>}
   </>;
 }
 
@@ -2264,13 +2265,13 @@ function ToolsSection({ settings, update, saving, status, send, connected }: any
     }
   };
 
-  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('tools',skey,!t[skey])} className={`w-10 h-5 rounded-full transition-colors ${t[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${t[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('tools',skey,!t[skey])} className={`w-10 h-5 rounded-full transition-colors ${t[skey]?'bg-[var(--accent)]':'bg-[var(--border)]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${t[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   const pct = Math.max(0, Math.min(100, Number(rtk?.percent)||0));
   return <div className="space-y-1">
     <Toggle label="Token saver (RTK)" desc="Auto-compress git / pip / pytest / npm / gh / docker command output before it reaches the model — saves provider credits" skey="rtk_enabled"/>
     <SettingRow label="RTK binary" description="Optional — downloaded on request, not shipped with Addled">
       <div className="flex items-center gap-2">
-        <span className={`text-xs ${rtk?.available ? 'text-[#3fb950]':'text-[#d29922]'}`}>
+        <span className={`text-xs ${rtk?.available ? 'text-[var(--success)]':'text-[var(--warning)]'}`}>
           {!rtk ? 'Checking…'
             : rtk.source === 'path' ? `✓ ${rtk.version || 'installed'} on PATH — compression active`
             : rtk.available ? `✓ ${rtk.version || 'installed'} — compression active`
@@ -2278,13 +2279,13 @@ function ToolsSection({ settings, update, saving, status, send, connected }: any
         </span>
         {rtk && rtk.supported && !rtk.installing && (
           <button onClick={()=>startInstall(Boolean(rtk.available))} disabled={busy || !connected}
-            className="text-xs px-2 py-1 rounded border border-[#30363d] text-[#e8eaed] hover:border-[#484f58] disabled:opacity-50">
+            className="text-xs px-2 py-1 rounded border border-[var(--border)] text-[var(--text-primary)] hover:border-[var(--text-muted)] disabled:opacity-50">
             {rtk.own?.installed ? 'Reinstall' : 'Install'}
           </button>
         )}
       </div>
     </SettingRow>
-    <p className="text-xs text-[#8b949e] mb-2">
+    <p className="text-xs text-[var(--text-secondary)] mb-2">
       The token saver is 6 MB of third-party binaries (rtk and ripgrep) fetched from their GitHub
       releases and checked against the sha256 GitHub publishes for them. It used to travel inside
       every Addled build; it does not any more, so a fresh copy has none until you install it here.
@@ -2294,23 +2295,23 @@ function ToolsSection({ settings, update, saving, status, send, connected }: any
     {rtk?.installing && (
       <SettingRow label="Downloading" description={rtk.detail || rtk.phase}>
         <div className="flex items-center gap-2 w-40">
-          <div className="flex-1 h-1.5 bg-[#21262d] rounded overflow-hidden">
-            <div className="h-full bg-[#3380FF] transition-all" style={{width:`${pct}%`}}/>
+          <div className="flex-1 h-1.5 bg-[var(--bg-tertiary)] rounded overflow-hidden">
+            <div className="h-full bg-[var(--accent)] transition-all" style={{width:`${pct}%`}}/>
           </div>
-          <span className="text-xs text-[#8b949e]">{pct}%</span>
+          <span className="text-xs text-[var(--text-secondary)]">{pct}%</span>
         </div>
       </SettingRow>
     )}
     {rtk && !rtk.installing && rtk.own?.installed && (
       <SettingRow label="Addled's copy" description={`${rtk.own.version || 'version unknown'} — verified against the sha256 GitHub publishes for the release, installed ${rtk.own.installed_at || 'unknown'}`}>
-        <span className="text-xs text-[#8b949e] break-all">{rtk.install_dir}</span>
+        <span className="text-xs text-[var(--text-secondary)] break-all">{rtk.install_dir}</span>
       </SettingRow>
     )}
     {rtk && !rtk.supported && (
-      <p className="text-xs text-[#8b949e]">The token saver is only published for Windows. On this machine, put <code>rtk</code> on PATH and it will be used.</p>
+      <p className="text-xs text-[var(--text-secondary)]">The token saver is only published for Windows. On this machine, put <code>rtk</code> on PATH and it will be used.</p>
     )}
     {(rtk?.error || note) && (
-      <p className={`text-xs ${rtk?.error ? 'text-[#f85149]' : 'text-[#8b949e]'}`}>{rtk?.error || note}</p>
+      <p className={`text-xs ${rtk?.error ? 'text-[var(--danger)]' : 'text-[var(--text-secondary)]'}`}>{rtk?.error || note}</p>
     )}
   </div>;
 }
@@ -2367,32 +2368,32 @@ function BrowserSection({ settings, update, saving, status, send, connected }: a
         <div className="flex items-center gap-2">
           <span className="text-xs w-24">{label}</span>
           {installed
-            ? <span className="text-xs text-[#3fb950]">✓ installed{info.version?` (${info.version})`:''}</span>
+            ? <span className="text-xs text-[var(--success)]">✓ installed{info.version?` (${info.version})`:''}</span>
             : running
-              ? <span className="text-xs text-[#d29922]">⟳ installing…</span>
+              ? <span className="text-xs text-[var(--warning)]">⟳ installing…</span>
               : <button onClick={()=>install(backend)} disabled={busy!==null}
                   className="text-xs px-2 py-1 rounded bg-[#238636] hover:bg-[#2ea043] disabled:opacity-50 text-white">Install</button>}
         </div>
         {!installed && !running && does &&
-          <p className="text-xs text-[#8b949e] mt-0.5 ml-24">Installs {does}</p>}
+          <p className="text-xs text-[var(--text-secondary)] mt-0.5 ml-24">Installs {does}</p>}
       </div>
     );
   };
 
-  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('browser',skey,!b[skey])} className={`w-10 h-5 rounded-full transition-colors ${b[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${b[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('browser',skey,!b[skey])} className={`w-10 h-5 rounded-full transition-colors ${b[skey]?'bg-[var(--accent)]':'bg-[var(--border)]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${b[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   const Status=({label, ok}:{label:string;ok?:boolean})=><p className="text-xs mb-0.5">{ok?'✓':'·'} {label}</p>;
   return <div className="space-y-1">
     <Toggle label="Attach to my browser" desc="Use your running Chrome/Edge via its debug port instead of Addled's own browser. Requires launching the browser with --remote-debugging-port." skey="user_browser"/>
     <Toggle label="Read-only" desc="Only read pages and take screenshots — block clicking, typing and navigation in your browser" skey="readonly"/>
-    <SettingRow label="Debug port"><input type="number" value={b.cdp_port||9222} onChange={e=>update('browser','cdp_port',parseInt(e.target.value)||9222)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-24"/></SettingRow>
-    <SettingRow label="Engine"><select value={b.engine||'auto'} onChange={e=>update('browser','engine',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="auto">Auto</option><option value="cdp">My browser (CDP)</option><option value="playwright">Playwright</option><option value="http">HTTP only</option></select></SettingRow>
-    <SettingRow label="Framework mode" description="browser-use handles open-ended multi-step tasks — used only when installed AND an LLM is available"><select value={b.task_mode||'auto'} onChange={e=>update('browser','task_mode',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="auto">Auto (conditional)</option><option value="off">Off</option><option value="always">Always</option></select></SettingRow>
-    <SettingRow label="Auto-install backends" description="When a task needs Playwright or browser-use and it's missing: ask first (recommended), install silently, or never"><select value={b.auto_install||'ask'} onChange={e=>update('browser','auto_install',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option value="ask">Ask first</option><option value="off">Never</option><option value="auto">Auto</option></select></SettingRow>
+    <SettingRow label="Debug port"><input type="number" value={b.cdp_port||9222} onChange={e=>update('browser','cdp_port',parseInt(e.target.value)||9222)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-24"/></SettingRow>
+    <SettingRow label="Engine"><select value={b.engine||'auto'} onChange={e=>update('browser','engine',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]"><option value="auto">Auto</option><option value="cdp">My browser (CDP)</option><option value="playwright">Playwright</option><option value="http">HTTP only</option></select></SettingRow>
+    <SettingRow label="Framework mode" description="browser-use handles open-ended multi-step tasks — used only when installed AND an LLM is available"><select value={b.task_mode||'auto'} onChange={e=>update('browser','task_mode',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]"><option value="auto">Auto (conditional)</option><option value="off">Off</option><option value="always">Always</option></select></SettingRow>
+    <SettingRow label="Auto-install backends" description="When a task needs Playwright or browser-use and it's missing: ask first (recommended), install silently, or never"><select value={b.auto_install||'ask'} onChange={e=>update('browser','auto_install',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]"><option value="ask">Ask first</option><option value="off">Never</option><option value="auto">Auto</option></select></SettingRow>
     <SettingRow label="Backends" description="Playwright drives Addled's own browser. browser-use handles open-ended multi-step tasks. Installing is a one-time download into Addled's own Python.">
       <div>
         {renderBackend('playwright')}
         {renderBackend('framework')}
-        {note && <p className={`text-xs mt-1 ${note.ok?'text-[#3fb950]':'text-[#f85149]'}`}>
+        {note && <p className={`text-xs mt-1 ${note.ok?'text-[var(--success)]':'text-[var(--danger)]'}`}>
           {note.ok?'✓':'✗'} {note.msg || (note.ok?'Installed.':'Install failed.')}
         </p>}
       </div>
@@ -2400,10 +2401,10 @@ function BrowserSection({ settings, update, saving, status, send, connected }: a
     <SettingRow label="Backend status">
       <div>
         <Status label="Playwright installed" ok={bst?.playwright_available}/>
-        {bst?.installing_playwright && <p className="text-xs text-[#d29922]">⟳ downloading Playwright + Chromium…</p>}
+        {bst?.installing_playwright && <p className="text-xs text-[var(--warning)]">⟳ downloading Playwright + Chromium…</p>}
         <Status label="Browser attach available" ok={bst?.cdp_available}/>
         <Status label="browser-use installed" ok={bst?.framework_available}/>
-        {bst?.installing_framework && <p className="text-xs text-[#d29922]">⟳ installing browser-use…</p>}
+        {bst?.installing_framework && <p className="text-xs text-[var(--warning)]">⟳ installing browser-use…</p>}
         <Status label="LLM available" ok={bst?.llm_available}/>
       </div>
     </SettingRow>
@@ -2416,19 +2417,19 @@ function DesktopSection({ settings, update, saving, status, send, connected }: a
   useEffect(() => {
     if (connected) send('desktop.status', {}).then((r: any) => setState(r || null)).catch(() => {});
   }, [connected, send]);
-  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('desktop',skey,!d[skey])} className={`w-10 h-5 rounded-full transition-colors ${d[skey]?'bg-[#3380FF]':'bg-[#30363d]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${d[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
+  const Toggle=({label,desc,skey}:{label:string;desc?:string;skey:string})=><SettingRow label={label} description={desc}><button onClick={()=>update('desktop',skey,!d[skey])} className={`w-10 h-5 rounded-full transition-colors ${d[skey]?'bg-[var(--accent)]':'bg-[var(--border)]'}`}><div className={`w-4 h-4 bg-white rounded-full transition-transform ${d[skey]?'translate-x-5':'translate-x-0.5'}`}/></button></SettingRow>;
   return <div className="space-y-1">
     <Toggle label="Desktop control" desc="Let the agent move the mouse, click, type and scroll on your desktop (OFF by default — the safest choice)" skey="allow_input"/>
     <Toggle label="Ask before each session" desc="Require a dashboard approval once per session (expires after the timeout)" skey="require_session_approval"/>
     <Toggle label="Extended hotkeys" desc="Also allow alt+tab, win+d, alt+f4 (riskier — keep off unless you need it)" skey="allow_extended_hotkeys"/>
-    <SettingRow label="Max typed characters"><input type="number" min={50} max={5000} value={d.max_type_chars||500} onChange={e=>update('desktop','max_type_chars',parseInt(e.target.value)||500)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-24"/></SettingRow>
+    <SettingRow label="Max typed characters"><input type="number" min={50} max={5000} value={d.max_type_chars||500} onChange={e=>update('desktop','max_type_chars',parseInt(e.target.value)||500)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-24"/></SettingRow>
     <SettingRow label="Permission status">
-      <span className={`text-xs ${state?.granted ? 'text-[#3fb950]' : 'text-[#8b949e]'}`}>
+      <span className={`text-xs ${state?.granted ? 'text-[var(--success)]' : 'text-[var(--text-secondary)]'}`}>
         {state?.granted ? '✓ granted this session' : 'not granted'}
       </span>
     </SettingRow>
     <SettingRow label="Emergency stop">
-      <span className="text-xs text-[#8b949e]">Mouse to the top-left screen corner aborts input (pyautogui FAILSAFE) · Kill switch: Ctrl+Shift+Alt+K</span>
+      <span className="text-xs text-[var(--text-secondary)]">Mouse to the top-left screen corner aborts input (pyautogui FAILSAFE) · Kill switch: Ctrl+Shift+Alt+K</span>
     </SettingRow>
   </div>;
 }
@@ -2436,27 +2437,89 @@ function DesktopSection({ settings, update, saving, status, send, connected }: a
 function IntegrationsSection({ settings, update, saving, status }: any) {
   const i=settings?.integrations||{};
   return <div className="space-y-1">
-    <SettingRow label="Calendar" description={i.calendar_provider?'Connected':'Not connected'}><button className={`px-3 py-1.5 text-sm rounded ${i.calendar_provider?'bg-[#21262d] hover:bg-[#30363d] text-[#e8eaed]':'bg-[#3380FF] hover:bg-[#4d94ff] text-white'}`}>{i.calendar_provider?'Disconnect':'Connect'}</button></SettingRow>
-    <SettingRow label="IMAP"><input type="text" value={i.email_imap||''} placeholder="imap.gmail.com" onChange={e=>update('integrations','email_imap',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-48"/></SettingRow>
-    <SettingRow label="SMTP"><input type="text" value={i.email_smtp||''} placeholder="smtp.gmail.com" onChange={e=>update('integrations','email_smtp',e.target.value)} className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed] w-48"/></SettingRow>
+    <SettingRow label="Calendar" description={i.calendar_provider?'Connected':'Not connected'}><button className={`px-3 py-1.5 text-sm rounded ${i.calendar_provider?'bg-[var(--bg-tertiary)] hover:bg-[var(--border)] text-[var(--text-primary)]':'bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white'}`}>{i.calendar_provider?'Disconnect':'Connect'}</button></SettingRow>
+    <SettingRow label="IMAP"><input type="text" value={i.email_imap||''} placeholder="imap.gmail.com" onChange={e=>update('integrations','email_imap',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-48"/></SettingRow>
+    <SettingRow label="SMTP"><input type="text" value={i.email_smtp||''} placeholder="smtp.gmail.com" onChange={e=>update('integrations','email_smtp',e.target.value)} className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)] w-48"/></SettingRow>
   </div>;
 }
 
-function AppearanceSection() {
+function AppearanceSection({ settings, update, saving, status }: any) {
+  // Theme and Accent used to be two uncontrolled inputs with no handler at all,
+  // so choosing "Light" did nothing and was not remembered. Both are wired now:
+  // the choice is applied to the document immediately (that is what makes it
+  // visible) and saved through `update` (that is what makes it survive).
+  //
+  // `appearance` lives in settings.json like every other section. The values
+  // are ALSO mirrored into localStorage by `applyAppearance`, because the
+  // dashboard has to paint with the right colours before the socket connects
+  // and settings arrive - otherwise every reload flashes the dark default.
+  const saved = settings?.appearance || {};
+  const [theme, setTheme] = useState<string>(saved.theme || 'dark');
+  const [accent, setAccent] = useState<string>(saved.accent || '#3380FF');
+
+  // Adopt the stored values once they arrive, without clobbering a choice the
+  // user made while the request was still out.
+  const touched = useRef(false);
+  useEffect(() => {
+    if (touched.current) return;
+    if (saved.theme) setTheme(saved.theme);
+    if (saved.accent) setAccent(saved.accent);
+  }, [saved.theme, saved.accent]);
+
+  const chooseTheme = (next: string) => {
+    touched.current = true;
+    setTheme(next);
+    applyAppearance({ theme: next as any, accent });
+    update('appearance', 'theme', next);
+  };
+
+  const chooseAccent = (next: string) => {
+    touched.current = true;
+    setAccent(next);
+    applyAppearance({ theme: theme as any, accent: next });
+    update('appearance', 'accent', next);
+  };
+
   return <div className="space-y-1">
-    <SettingRow label="Theme"><select className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-[#e8eaed]"><option>Dark</option><option>Light</option><option>System</option></select></SettingRow>
-    <SettingRow label="Accent"><input type="color" defaultValue="#3380FF" className="w-8 h-8 rounded cursor-pointer border-0"/></SettingRow>
+    <SettingRow label="Theme"
+                description="Changes the dashboard's background and text, in every page.">
+      <select value={theme} onChange={(e) => chooseTheme(e.target.value)}
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-3 py-1.5 text-sm text-[var(--text-primary)]">
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
+        <option value="system">System</option>
+      </select>
+    </SettingRow>
+    <SettingRow label="Accent"
+                description="Buttons, links, highlights, and the glow around the window.">
+      <div className="flex items-center gap-3">
+        <input type="color" value={accent} onChange={(e) => chooseAccent(e.target.value)}
+               className="w-8 h-8 rounded cursor-pointer border-0 bg-transparent"/>
+        <span className="text-xs font-mono text-[var(--text-secondary)]">{accent.toUpperCase()}</span>
+      </div>
+    </SettingRow>
+    <SettingRow label="Preview"
+                description="How the accent and the frame look with the current choice.">
+      <div className="flex items-center gap-2">
+        <span className="px-2.5 py-1 rounded text-xs font-medium text-white"
+              style={{ backgroundColor: 'var(--accent)' }}>Button</span>
+        <span className="text-xs" style={{ color: 'var(--accent)' }}>a link</span>
+        <span className="w-6 h-6 rounded" style={{
+          boxShadow: 'inset 0 0 0 2px var(--accent), inset 0 0 10px rgba(var(--accent-rgb), 0.6)',
+        }}/>
+      </div>
+    </SettingRow>
   </div>;
 }
 
 function AboutSection() {
   return <div className="space-y-4">
-    <div className="text-center py-8"><div className="text-4xl mb-3">△</div><h3 className="text-lg font-semibold">Addled</h3><p className="text-sm text-[#8b949e] mt-1">AI Desktop Companion</p><p className="text-xs text-[#484f58] mt-1">Version {APP_VERSION}</p></div>
+    <div className="text-center py-8"><div className="text-4xl mb-3">△</div><h3 className="text-lg font-semibold">Addled</h3><p className="text-sm text-[var(--text-secondary)] mt-1">AI Desktop Companion</p><p className="text-xs text-[var(--text-muted)] mt-1">Version {APP_VERSION}</p></div>
     <div className="space-y-1">
-      <SettingRow label="Repository"><a href="https://github.com/8kunoir8/Addled" target="_blank" rel="noopener noreferrer" className="text-sm text-[#3380FF] hover:underline">github.com/8kunoir8/Addled</a></SettingRow>
-      <SettingRow label="License"><span className="text-sm text-[#8b949e]">MIT</span></SettingRow>
-      <SettingRow label="Stack"><span className="text-sm text-[#8b949e]">Python + PyQt6 + Electron + Next.js</span></SettingRow>
-      <SettingRow label="Author"><span className="text-sm text-[#8b949e]">Kunoir</span></SettingRow>
+      <SettingRow label="Repository"><a href="https://github.com/8kunoir8/Addled" target="_blank" rel="noopener noreferrer" className="text-sm text-[var(--accent)] hover:underline">github.com/8kunoir8/Addled</a></SettingRow>
+      <SettingRow label="License"><span className="text-sm text-[var(--text-secondary)]">MIT</span></SettingRow>
+      <SettingRow label="Stack"><span className="text-sm text-[var(--text-secondary)]">Python + PyQt6 + Electron + Next.js</span></SettingRow>
+      <SettingRow label="Author"><span className="text-sm text-[var(--text-secondary)]">Kunoir</span></SettingRow>
     </div>
   </div>;
 }

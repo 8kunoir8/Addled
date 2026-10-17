@@ -180,10 +180,10 @@ export default function MeetingsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
         <div className="flex items-baseline gap-2 text-xs">
-          <h1 className="text-sm font-semibold text-[#e8eaed]">Meetings</h1>
-          <span className="text-[#8b949e]">
+          <h1 className="text-sm font-semibold text-[var(--text-primary)]">Meetings</h1>
+          <span className="text-[var(--text-secondary)]">
             {stats.count || 0} saved · {stats.summarised || 0} summarised
           </span>
         </div>
@@ -191,8 +191,8 @@ export default function MeetingsPage() {
 
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
         {/* Creating one from a recording is the primary action, so it is first. */}
-        <section className="bg-[#161b22] border border-[#30363d] rounded-lg p-3">
-          <div className="text-xs text-[#8b949e] mb-2">
+        <section className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg p-3">
+          <div className="text-xs text-[var(--text-secondary)] mb-2">
             Transcribe a recording into a meeting. Nothing is uploaded — the
             audio is transcribed on this machine.
           </div>
@@ -201,44 +201,44 @@ export default function MeetingsPage() {
               value={path}
               onChange={(e) => setPath(e.target.value)}
               placeholder="Path to a recording (.wav, .mp3, .m4a, .mp4…)"
-              className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"
+              className="flex-1 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
               onKeyDown={(e) => { if (e.key === 'Enter') transcribe(); }}
             />
             <input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Title (optional)"
-              className="w-48 bg-[#0d1117] border border-[#30363d] rounded px-2 py-2 text-sm text-[#e8eaed] placeholder-[#484f58] focus:outline-none focus:border-[#3380FF]"
+              className="w-48 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-2 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
             />
             <button
               onClick={transcribe}
               disabled={!path.trim() || !!busy}
-              className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium"
+              className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded-lg px-4 py-2 text-sm font-medium"
             >
               {busy === 'Transcribing…' ? 'Transcribing…' : 'Transcribe'}
             </button>
           </div>
           {busy && busy !== 'Transcribing…' && (
-            <div className="text-xs text-[#8b949e]">{busy}</div>
+            <div className="text-xs text-[var(--text-secondary)]">{busy}</div>
           )}
         </section>
 
         {notice && (
-          <div className="text-xs text-[#3fb950] bg-[#0d2818] border border-[#238636] rounded px-3 py-2">
+          <div className="text-xs text-[var(--success)] bg-[#0d2818] border border-[#238636] rounded px-3 py-2">
             {notice}
           </div>
         )}
         {error && (
-          <div className="text-xs text-[#f85149] bg-[#2d1214] border border-[#8b2c31] rounded px-3 py-2">
+          <div className="text-xs text-[var(--danger)] bg-[#2d1214] border border-[#8b2c31] rounded px-3 py-2">
             {error}
           </div>
         )}
 
         <div className="grid grid-cols-[280px_1fr] gap-4">
           <section className="space-y-1">
-            {loading && <div className="text-xs text-[#8b949e]">Loading…</div>}
+            {loading && <div className="text-xs text-[var(--text-secondary)]">Loading…</div>}
             {!loading && meetings.length === 0 && (
-              <div className="text-xs text-[#8b949e]">
+              <div className="text-xs text-[var(--text-secondary)]">
                 No meetings yet. Point at a recording above.
               </div>
             )}
@@ -248,17 +248,17 @@ export default function MeetingsPage() {
                 onClick={() => open(m.id)}
                 className={`w-full text-left px-3 py-2 rounded border ${
                   selected?.id === m.id
-                    ? 'bg-[#161b22] border-[#3380FF]'
-                    : 'border-[#30363d] hover:border-[#8b949e]'
+                    ? 'bg-[var(--bg-secondary)] border-[var(--accent)]'
+                    : 'border-[var(--border)] hover:border-[var(--text-secondary)]'
                 }`}
               >
                 <div className="flex items-center gap-2">
-                  <span className="flex-1 text-sm text-[#e8eaed] truncate">
+                  <span className="flex-1 text-sm text-[var(--text-primary)] truncate">
                     {m.title}
                   </span>
-                  {m.summarised && <span className="text-[10px] text-[#3fb950]">✓</span>}
+                  {m.summarised && <span className="text-[10px] text-[var(--success)]">✓</span>}
                 </div>
-                <div className="text-[11px] text-[#8b949e]">
+                <div className="text-[11px] text-[var(--text-secondary)]">
                   {fmtDate(m.started_at)}
                   {fmtLength(m) ? ` · ${fmtLength(m)}` : ''}
                   {m.segment_count ? ` · ${m.segment_count} lines` : ''}
@@ -270,7 +270,7 @@ export default function MeetingsPage() {
 
           <section>
             {!selected && (
-              <div className="text-xs text-[#8b949e]">
+              <div className="text-xs text-[var(--text-secondary)]">
                 Pick a meeting to read it.
               </div>
             )}
@@ -285,15 +285,15 @@ export default function MeetingsPage() {
                         rename(selected.id, e.target.value.trim());
                       }
                     }}
-                    className="w-full bg-transparent text-base font-semibold text-[#e8eaed] border-b border-transparent hover:border-[#30363d] focus:border-[#3380FF] focus:outline-none"
+                    className="w-full bg-transparent text-base font-semibold text-[var(--text-primary)] border-b border-transparent hover:border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
                   />
-                  <div className="flex items-center gap-3 text-[11px] text-[#8b949e] mt-1">
+                  <div className="flex items-center gap-3 text-[11px] text-[var(--text-secondary)] mt-1">
                     <span>{fmtDate(selected.started_at)}</span>
                     {fmtLength(selected) && <span>{fmtLength(selected)}</span>}
                     {selected.source && <span>{selected.source}</span>}
                     <button
                       onClick={() => remove(selected.id)}
-                      className="text-[#f85149] hover:underline ml-auto"
+                      className="text-[var(--danger)] hover:underline ml-auto"
                     >
                       Delete
                     </button>
@@ -304,14 +304,14 @@ export default function MeetingsPage() {
                   <button
                     onClick={summarise}
                     disabled={!!busy}
-                    className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded px-3 py-1 text-xs font-medium"
+                    className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded px-3 py-1 text-xs font-medium"
                   >
                     {busy === 'Summarising…' ? 'Summarising…'
                       : selected.summarised ? 'Re-summarise' : 'Summarise'}
                   </button>
                   <button
                     onClick={() => setShowTranscript((v) => !v)}
-                    className="border border-[#30363d] hover:border-[#8b949e] text-[#8b949e] hover:text-[#e8eaed] rounded px-3 py-1 text-xs"
+                    className="border border-[var(--border)] hover:border-[var(--text-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded px-3 py-1 text-xs"
                   >
                     {showTranscript ? 'Hide transcript' : 'Show transcript'}
                   </button>
@@ -320,18 +320,18 @@ export default function MeetingsPage() {
                 {selected.summarised ? (
                   <>
                     <section>
-                      <h2 className="text-[11px] text-[#8b949e] mb-1">Summary</h2>
-                      <p className="text-sm text-[#e8eaed] whitespace-pre-wrap break-words">
+                      <h2 className="text-[11px] text-[var(--text-secondary)] mb-1">Summary</h2>
+                      <p className="text-sm text-[var(--text-primary)] whitespace-pre-wrap break-words">
                         {selected.summary}
                       </p>
                     </section>
 
                     {(selected.decisions?.length ?? 0) > 0 && (
                       <section>
-                        <h2 className="text-[11px] text-[#8b949e] mb-1">Decisions</h2>
+                        <h2 className="text-[11px] text-[var(--text-secondary)] mb-1">Decisions</h2>
                         <ul className="space-y-0.5">
                           {selected.decisions!.map((d, i) => (
-                            <li key={i} className="text-sm text-[#e8eaed]">• {d}</li>
+                            <li key={i} className="text-sm text-[var(--text-primary)]">• {d}</li>
                           ))}
                         </ul>
                       </section>
@@ -339,16 +339,16 @@ export default function MeetingsPage() {
 
                     {(selected.actions?.length ?? 0) > 0 && (
                       <section>
-                        <h2 className="text-[11px] text-[#8b949e] mb-1">
+                        <h2 className="text-[11px] text-[var(--text-secondary)] mb-1">
                           Action items
                         </h2>
                         <ul className="space-y-0.5">
                           {selected.actions!.map((a, i) => (
-                            <li key={i} className="text-sm text-[#e8eaed]">
+                            <li key={i} className="text-sm text-[var(--text-primary)]">
                               • {a.what}
                               {a.who
-                                ? <span className="text-[#8b949e]"> — {a.who}</span>
-                                : <span className="text-[#8b949e]"> — owner not stated</span>}
+                                ? <span className="text-[var(--text-secondary)]"> — {a.who}</span>
+                                : <span className="text-[var(--text-secondary)]"> — owner not stated</span>}
                             </li>
                           ))}
                         </ul>
@@ -357,26 +357,26 @@ export default function MeetingsPage() {
 
                     {(selected.open_questions?.length ?? 0) > 0 && (
                       <section>
-                        <h2 className="text-[11px] text-[#8b949e] mb-1">
+                        <h2 className="text-[11px] text-[var(--text-secondary)] mb-1">
                           Left open
                         </h2>
                         <ul className="space-y-0.5">
                           {selected.open_questions!.map((q, i) => (
-                            <li key={i} className="text-sm text-[#e8eaed]">• {q}</li>
+                            <li key={i} className="text-sm text-[var(--text-primary)]">• {q}</li>
                           ))}
                         </ul>
                       </section>
                     )}
                   </>
                 ) : (
-                  <div className="text-xs text-[#8b949e]">
+                  <div className="text-xs text-[var(--text-secondary)]">
                     Not summarised yet.
                   </div>
                 )}
 
                 {showTranscript && (
                   <section>
-                    <h2 className="text-[11px] text-[#8b949e] mb-1">
+                    <h2 className="text-[11px] text-[var(--text-secondary)] mb-1">
                       Transcript {(selected.segments?.length ?? 0) > 0
                         && `· ${selected.segments!.length} segments`}
                     </h2>
@@ -384,15 +384,15 @@ export default function MeetingsPage() {
                       <div className="space-y-1">
                         {selected.segments!.map((s, i) => (
                           <div key={i} className="flex gap-2 text-sm">
-                            <span className="text-[#3380FF] font-mono text-xs pt-0.5 w-12 shrink-0">
+                            <span className="text-[var(--accent)] font-mono text-xs pt-0.5 w-12 shrink-0">
                               {s.at}
                             </span>
-                            <span className="text-[#e8eaed] break-words">{s.text}</span>
+                            <span className="text-[var(--text-primary)] break-words">{s.text}</span>
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <p className="text-sm text-[#e8eaed] whitespace-pre-wrap break-words">
+                      <p className="text-sm text-[var(--text-primary)] whitespace-pre-wrap break-words">
                         {selected.transcript}
                       </p>
                     )}

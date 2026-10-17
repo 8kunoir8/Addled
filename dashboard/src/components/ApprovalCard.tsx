@@ -101,23 +101,23 @@ export default function ApprovalCard({
   };
 
   return (
-    <div className={`rounded-lg border ${error ? 'border-[#f85149]' : 'border-[#d29922]'} bg-[#161b22] ${compact ? 'p-3' : 'p-3.5'} my-2 max-w-[520px]`}>
-      <p className="text-sm font-semibold text-[#e8eaed] flex items-center gap-1.5">
+    <div className={`rounded-lg border ${error ? 'border-[var(--danger)]' : 'border-[var(--warning)]'} bg-[var(--bg-secondary)] ${compact ? 'p-3' : 'p-3.5'} my-2 max-w-[520px]`}>
+      <p className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-1.5">
         <span>{KIND_ICON[request.kind] || '⚡'}</span>
         Permission needed
       </p>
-      <p className="text-xs text-[#8b949e] mt-1 break-words">{describe(request)}</p>
+      <p className="text-xs text-[var(--text-secondary)] mt-1 break-words">{describe(request)}</p>
       {request.command && (
-        <pre className="mt-2 max-h-32 overflow-auto rounded bg-[#0d1117] border border-[#30363d] px-2 py-1.5 text-[11px] text-[#e8eaed] font-mono whitespace-pre-wrap break-all">
+        <pre className="mt-2 max-h-32 overflow-auto rounded bg-[var(--bg-primary)] border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-primary)] font-mono whitespace-pre-wrap break-all">
           {request.command}
         </pre>
       )}
-      {error && <p className="text-xs text-[#f85149] mt-2">{error}</p>}
+      {error && <p className="text-xs text-[var(--danger)] mt-2">{error}</p>}
       <div className="flex flex-wrap gap-2 mt-3">
         <button
           onClick={run(onAllow)}
           disabled={pending}
-          className="bg-[#3380FF] hover:bg-[#4d94ff] disabled:opacity-50 text-white rounded-md px-3 py-1.5 text-xs font-medium"
+          className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 text-white rounded-md px-3 py-1.5 text-xs font-medium"
         >
           Allow once
         </button>
@@ -126,7 +126,7 @@ export default function ApprovalCard({
             onClick={run(onAllowForSession!)}
             disabled={pending}
             title="Do not ask again for this run of Addled; the prompt returns when it restarts"
-            className="bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 border border-[#30363d] text-[#e8eaed] rounded-md px-3 py-1.5 text-xs font-medium"
+            className="bg-[var(--bg-tertiary)] hover:bg-[var(--border)] disabled:opacity-50 border border-[var(--border)] text-[var(--text-primary)] rounded-md px-3 py-1.5 text-xs font-medium"
           >
             Allow for session
           </button>
@@ -136,7 +136,7 @@ export default function ApprovalCard({
             onClick={run(onAlwaysAllow!)}
             disabled={pending}
             title="Do not ask again until you turn this off on the skill or tool card"
-            className="bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 border border-[#30363d] text-[#e8eaed] rounded-md px-3 py-1.5 text-xs font-medium"
+            className="bg-[var(--bg-tertiary)] hover:bg-[var(--border)] disabled:opacity-50 border border-[var(--border)] text-[var(--text-primary)] rounded-md px-3 py-1.5 text-xs font-medium"
           >
             Always allow
           </button>
@@ -144,13 +144,13 @@ export default function ApprovalCard({
         <button
           onClick={run(onDeny)}
           disabled={pending}
-          className="bg-[#3d1f1f] hover:bg-[#5a2a2a] disabled:opacity-50 text-[#f85149] rounded-md px-3 py-1.5 text-xs font-medium"
+          className="bg-[#3d1f1f] hover:bg-[#5a2a2a] disabled:opacity-50 text-[var(--danger)] rounded-md px-3 py-1.5 text-xs font-medium"
         >
           Deny
         </button>
       </div>
       {!grantable && sessionGrantable && (
-        <p className="text-[10px] text-[#484f58] mt-2">
+        <p className="text-[10px] text-[var(--text-muted)] mt-2">
           This one judges each request on what it carries, so it can only be
           allowed for this session.
         </p>

@@ -28,15 +28,15 @@ import {
  * backend degrades to a neutral row instead of crashing the panel.
  */
 const STATUS_STYLE: Record<string, { dot: string; label: string; text: string }> = {
-  ok: { dot: 'text-[#3fb950]', label: '✓', text: 'text-[#3fb950]' },
-  failed: { dot: 'text-[#f85149]', label: '✗', text: 'text-[#f85149]' },
-  timeout: { dot: 'text-[#d29922]', label: '⏱', text: 'text-[#d29922]' },
-  denied: { dot: 'text-[#8b949e]', label: '⊘', text: 'text-[#8b949e]' },
-  awaiting: { dot: 'text-[#d29922]', label: '⏳', text: 'text-[#d29922]' },
-  running: { dot: 'text-[#58a6ff]', label: '…', text: 'text-[#58a6ff]' },
+  ok: { dot: 'text-[var(--success)]', label: '✓', text: 'text-[var(--success)]' },
+  failed: { dot: 'text-[var(--danger)]', label: '✗', text: 'text-[var(--danger)]' },
+  timeout: { dot: 'text-[var(--warning)]', label: '⏱', text: 'text-[var(--warning)]' },
+  denied: { dot: 'text-[var(--text-secondary)]', label: '⊘', text: 'text-[var(--text-secondary)]' },
+  awaiting: { dot: 'text-[var(--warning)]', label: '⏳', text: 'text-[var(--warning)]' },
+  running: { dot: 'text-[var(--accent-hover)]', label: '…', text: 'text-[var(--accent-hover)]' },
 };
 
-const NEUTRAL = { dot: 'text-[#8b949e]', label: '·', text: 'text-[#8b949e]' };
+const NEUTRAL = { dot: 'text-[var(--text-secondary)]', label: '·', text: 'text-[var(--text-secondary)]' };
 
 function fmtTime(ts?: number): string {
   if (!ts) return '';
@@ -149,12 +149,12 @@ export default function CommandConsole({
     return (
       <button
         onClick={() => setOpen(true)}
-        className="fixed bottom-3 right-3 z-40 flex items-center gap-2 rounded-lg border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs shadow-lg hover:border-[#58a6ff]"
+        className="fixed bottom-3 right-3 z-40 flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs shadow-lg hover:border-[var(--accent-hover)]"
         title="Show the command console"
       >
-        <span className="text-[#8b949e]">▸ console</span>
+        <span className="text-[var(--text-secondary)]">▸ console</span>
         {waiting > 0 && (
-          <span className="rounded bg-[#d29922] px-1.5 text-[10px] font-semibold text-black">
+          <span className="rounded bg-[var(--warning)] px-1.5 text-[10px] font-semibold text-black">
             {waiting} waiting
           </span>
         )}
@@ -163,7 +163,7 @@ export default function CommandConsole({
             {(STATUS_STYLE[last.status] || NEUTRAL).label} {commandLine(last)}
           </span>
         )}
-        {!last && <span className="text-[#484f58]">nothing yet</span>}
+        {!last && <span className="text-[var(--text-muted)]">nothing yet</span>}
       </button>
     );
   }
@@ -172,29 +172,29 @@ export default function CommandConsole({
     <div
       className={isPage
         ? 'flex h-full flex-col'
-        : 'fixed bottom-3 right-3 z-40 flex h-[420px] w-[640px] max-w-[92vw] flex-col rounded-lg border border-[#30363d] bg-[#0d1117] shadow-2xl'}
+        : 'fixed bottom-3 right-3 z-40 flex h-[420px] w-[640px] max-w-[92vw] flex-col rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] shadow-2xl'}
     >
-      <div className="flex shrink-0 items-center gap-2 border-b border-[#30363d] px-3 py-2">
-        <span className="text-xs font-semibold text-[#e8eaed]">Console</span>
-        <span className="text-[10px] text-[#8b949e]">
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] px-3 py-2">
+        <span className="text-xs font-semibold text-[var(--text-primary)]">Console</span>
+        <span className="text-[10px] text-[var(--text-secondary)]">
           {entries.length} command{entries.length === 1 ? '' : 's'}
         </span>
         {waiting > 0 && (
-          <span className="rounded bg-[#d29922] px-1.5 text-[10px] font-semibold text-black">
+          <span className="rounded bg-[var(--warning)] px-1.5 text-[10px] font-semibold text-black">
             {waiting} waiting on you
           </span>
         )}
         <div className="flex-1" />
         <button
           onClick={doClear}
-          className="rounded px-2 py-0.5 text-[11px] text-[#8b949e] hover:bg-[#21262d] hover:text-[#e8eaed]"
+          className="rounded px-2 py-0.5 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
         >
           Clear
         </button>
         {!isPage && (
           <button
             onClick={() => setOpen(false)}
-            className="rounded px-2 py-0.5 text-[11px] text-[#8b949e] hover:bg-[#21262d] hover:text-[#e8eaed]"
+            className="rounded px-2 py-0.5 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
             title="Collapse"
           >
             ▾
@@ -208,7 +208,7 @@ export default function CommandConsole({
         className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono text-[11px] leading-relaxed"
       >
         {entries.length === 0 && (
-          <p className="py-6 text-center text-[#484f58]">
+          <p className="py-6 text-center text-[var(--text-muted)]">
             Nothing has run yet. Commands Addled runs appear here — including the
             ones waiting for your approval.
           </p>
@@ -218,38 +218,38 @@ export default function CommandConsole({
           const isOpen = isPage || expanded[e.id];
           const masked = e.redacted || [];
           return (
-            <div key={e.id} className="border-b border-[#161b22] py-1.5 last:border-0">
+            <div key={e.id} className="border-b border-[var(--bg-secondary)] py-1.5 last:border-0">
               <button
                 onClick={() => !isPage && toggle(e.id)}
-                className="flex w-full items-start gap-2 text-left hover:bg-[#161b22]"
+                className="flex w-full items-start gap-2 text-left hover:bg-[var(--bg-secondary)]"
               >
                 <span className={`${st.dot} shrink-0`} title={e.status}>{st.label}</span>
-                <span className="shrink-0 text-[#484f58]">{fmtTime(e.ts)}</span>
-                <span className="shrink-0 text-[#58a6ff]">{e.tool}</span>
-                <span className="min-w-0 flex-1 break-all text-[#c9d1d9]">
+                <span className="shrink-0 text-[var(--text-muted)]">{fmtTime(e.ts)}</span>
+                <span className="shrink-0 text-[var(--accent-hover)]">{e.tool}</span>
+                <span className="min-w-0 flex-1 break-all text-[var(--text-primary)]">
                   {commandLine(e)}
                 </span>
                 {masked.length > 0 && (
                   <span
-                    className="shrink-0 rounded bg-[#21262d] px-1 text-[9px] text-[#d29922]"
+                    className="shrink-0 rounded bg-[var(--bg-tertiary)] px-1 text-[9px] text-[var(--warning)]"
                     title={`Redacted: ${masked.join(', ')} — a credential was masked at capture`}
                   >
                     masked
                   </span>
                 )}
-                <span className="shrink-0 text-[#484f58]">{fmtDuration(e.duration_ms)}</span>
+                <span className="shrink-0 text-[var(--text-muted)]">{fmtDuration(e.duration_ms)}</span>
                 {e.exit_code != null && e.exit_code !== 0 && (
-                  <span className="shrink-0 text-[#f85149]">exit {e.exit_code}</span>
+                  <span className="shrink-0 text-[var(--danger)]">exit {e.exit_code}</span>
                 )}
               </button>
 
               {e.status === 'awaiting' && (
-                <p className="pl-5 pt-1 text-[10px] text-[#d29922]">
+                <p className="pl-5 pt-1 text-[10px] text-[var(--warning)]">
                   Waiting for your approval — answer it on the approval card.
                 </p>
               )}
               {e.status === 'denied' && (
-                <p className="pl-5 pt-1 text-[10px] text-[#8b949e]">
+                <p className="pl-5 pt-1 text-[10px] text-[var(--text-secondary)]">
                   You denied this command. It did not run.
                 </p>
               )}
@@ -257,17 +257,17 @@ export default function CommandConsole({
               {isOpen && (e.stdout || e.stderr) && (
                 <div className="pl-5 pt-1">
                   {e.stdout && (
-                    <pre className="whitespace-pre-wrap break-all text-[#8b949e]">
+                    <pre className="whitespace-pre-wrap break-all text-[var(--text-secondary)]">
                       {e.stdout}
                     </pre>
                   )}
                   {e.stderr && (
-                    <pre className="whitespace-pre-wrap break-all text-[#f85149]">
+                    <pre className="whitespace-pre-wrap break-all text-[var(--danger)]">
                       {e.stderr}
                     </pre>
                   )}
                   {e.truncated && (
-                    <p className="pt-0.5 text-[10px] text-[#484f58]">
+                    <p className="pt-0.5 text-[10px] text-[var(--text-muted)]">
                       (output trimmed for display)
                     </p>
                   )}
@@ -279,9 +279,9 @@ export default function CommandConsole({
       </div>
 
       {/* The prompt. This is what makes it a terminal rather than a log. */}
-      <div className="shrink-0 border-t border-[#30363d] px-3 py-2">
+      <div className="shrink-0 border-t border-[var(--border)] px-3 py-2">
         <div className="flex items-center gap-2">
-          <span className="shrink-0 text-[11px] text-[#3fb950]">$</span>
+          <span className="shrink-0 text-[11px] text-[var(--success)]">$</span>
           <input
             value={typed}
             onChange={(ev) => setTyped(ev.target.value)}
@@ -291,18 +291,18 @@ export default function CommandConsole({
             placeholder={busy ? 'running…' : 'type a PowerShell command and press Enter'}
             disabled={busy}
             spellCheck={false}
-            className="min-w-0 flex-1 rounded border border-[#30363d] bg-[#161b22] px-2 py-1 font-mono text-[11px] text-[#e8eaed] outline-none focus:border-[#58a6ff] disabled:opacity-50"
+            className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1 font-mono text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent-hover)] disabled:opacity-50"
           />
           <button
             onClick={runTyped}
             disabled={busy || !typed.trim()}
-            className="shrink-0 rounded bg-[#3380FF] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#4d94ff] disabled:opacity-40"
+            className="shrink-0 rounded bg-[var(--accent)] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[var(--accent-hover)] disabled:opacity-40"
           >
             Run
           </button>
         </div>
-        {note && <p className="pt-1 text-[10px] text-[#d29922]">{note}</p>}
-        <p className="pt-1 text-[10px] text-[#484f58]">
+        {note && <p className="pt-1 text-[10px] text-[var(--warning)]">{note}</p>}
+        <p className="pt-1 text-[10px] text-[var(--text-muted)]">
           Runs in the same shell Addled uses. A destructive command still waits
           for your approval.
         </p>

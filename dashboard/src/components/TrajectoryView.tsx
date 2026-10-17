@@ -36,13 +36,13 @@ function fmtDuration(ms?: number | null): string {
  * backend degrades to a neutral row instead of crashing the panel.
  */
 const STATUS_STYLE: Record<string, { dot: string; text: string }> = {
-  running: { dot: 'bg-[#d29922] animate-pulse', text: 'text-[#d29922]' },
-  ok: { dot: 'bg-[#3fb950]', text: 'text-[#3fb950]' },
-  failed: { dot: 'bg-[#f85149]', text: 'text-[#f85149]' },
+  running: { dot: 'bg-[var(--warning)] animate-pulse', text: 'text-[var(--warning)]' },
+  ok: { dot: 'bg-[var(--success)]', text: 'text-[var(--success)]' },
+  failed: { dot: 'bg-[var(--danger)]', text: 'text-[var(--danger)]' },
 };
 
 function statusStyle(status?: string) {
-  return STATUS_STYLE[status || ''] || { dot: 'bg-[#8b949e]', text: 'text-[#8b949e]' };
+  return STATUS_STYLE[status || ''] || { dot: 'bg-[var(--text-secondary)]', text: 'text-[var(--text-secondary)]' };
 }
 
 /** A field is shown as the JSON the backend sent, trimmed to one readable line. */
@@ -64,17 +64,17 @@ function StepRow({ step }: { step: TrajectoryStep }) {
   const detail = step.error ? step.error : result;
 
   return (
-    <li className="border-b border-[#21262d] last:border-0">
+    <li className="border-b border-[var(--bg-tertiary)] last:border-0">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[#161b22]"
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--bg-secondary)]"
       >
         <span className={`h-2 w-2 shrink-0 rounded-full ${style.dot}`} />
-        <span className="shrink-0 font-mono text-[12px] text-[#e8eaed]">{step.tool}</span>
+        <span className="shrink-0 font-mono text-[12px] text-[var(--text-primary)]">{step.tool}</span>
         {step.truncated ? (
           <span
-            className="shrink-0 rounded bg-[#30363d] px-1 text-[10px] text-[#8b949e]"
+            className="shrink-0 rounded bg-[var(--border)] px-1 text-[10px] text-[var(--text-secondary)]"
             title="The backend capped this field; it is not the whole value."
           >
             trimmed
@@ -90,14 +90,14 @@ function StepRow({ step }: { step: TrajectoryStep }) {
       {open ? (
         <div className="px-3 pb-2 pl-7">
           {args ? (
-            <pre className="mb-1 overflow-x-auto whitespace-pre-wrap break-all rounded bg-[#0d1117] p-2 font-mono text-[11px] text-[#8b949e]">
+            <pre className="mb-1 overflow-x-auto whitespace-pre-wrap break-all rounded bg-[var(--bg-primary)] p-2 font-mono text-[11px] text-[var(--text-secondary)]">
               {args}
             </pre>
           ) : null}
           {detail ? (
             <pre
-              className={`overflow-x-auto whitespace-pre-wrap break-all rounded bg-[#0d1117] p-2 font-mono text-[11px] ${
-                step.error ? 'text-[#f85149]' : 'text-[#c9d1d9]'
+              className={`overflow-x-auto whitespace-pre-wrap break-all rounded bg-[var(--bg-primary)] p-2 font-mono text-[11px] ${
+                step.error ? 'text-[var(--danger)]' : 'text-[var(--text-primary)]'
               }`}
             >
               {detail}
@@ -113,18 +113,18 @@ function StepRow({ step }: { step: TrajectoryStep }) {
 
 function TurnBlock({ turn }: { turn: TrajectoryTurn }) {
   return (
-    <section className="mb-3 overflow-hidden rounded border border-[#30363d] bg-[#161b22]">
-      <header className="flex items-center gap-2 border-b border-[#30363d] px-3 py-1.5">
-        <span className="font-mono text-[11px] text-[#8b949e]">{fmtTime(turn.ts)}</span>
-        <span className="text-[11px] text-[#8b949e]">
+    <section className="mb-3 overflow-hidden rounded border border-[var(--border)] bg-[var(--bg-secondary)]">
+      <header className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-1.5">
+        <span className="font-mono text-[11px] text-[var(--text-secondary)]">{fmtTime(turn.ts)}</span>
+        <span className="text-[11px] text-[var(--text-secondary)]">
           {turn.count} step{turn.count === 1 ? '' : 's'}
         </span>
         {turn.failed ? (
-          <span className="rounded bg-[#f85149]/15 px-1.5 text-[10px] text-[#f85149]">
+          <span className="rounded bg-[var(--danger)]/15 px-1.5 text-[10px] text-[var(--danger)]">
             {turn.failed} failed
           </span>
         ) : null}
-        <span className="ml-auto font-mono text-[11px] text-[#8b949e]">
+        <span className="ml-auto font-mono text-[11px] text-[var(--text-secondary)]">
           {fmtDuration(turn.duration_ms)}
         </span>
       </header>
@@ -173,7 +173,7 @@ export default function TrajectoryView() {
   }, [send]);
 
   if (error) {
-    return <p className="p-4 text-[12px] text-[#f85149]">{error}</p>;
+    return <p className="p-4 text-[12px] text-[var(--danger)]">{error}</p>;
   }
 
   if (!turns.length) {
