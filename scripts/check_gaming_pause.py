@@ -50,50 +50,6 @@ def check(label, cond, detail=""):
         fails.append(label)
 
 
-def _foreground_is_frameless(u) -> bool:
-    """Whether the window in front is the kind a game would be.
-
-    Used only to decide if a live-desktop check is meaningful. If the user
-    really is in a game while this runs, asserting "not gaming" would fail
-    through no fault of the code.
-
-    Must check SIZE as well as style. Style alone said "a game is in front" for
-    the TASKBAR — an empty-titled popup with no caption, 2560x48 — and reported
-    a failure that the detector itself had correctly avoided. A game covers the
-    work area; that is half of what makes it one, so the check has to include it
-    or it is testing a different question than the code asks.
-    """
-    try:
-        GWL_STYLE = -16
-        WS_POPUP = 0x80000000
-        WS_CAPTION = 0x00C00000
-        WS_THICKFRAME = 0x00040000
-        hwnd = u.GetForegroundWindow()
-        style = u.GetWindowLongW(hwnd, GWL_STYLE) & 0xFFFFFFFF
-        has_caption = bool(style & WS_CAPTION)
-        has_frame = bool(style & WS_THICKFRAME)
-        is_popup = bool(style & WS_POPUP)
-        frameless = not ((has_caption or has_frame) and not is_popup)
-        if not frameless:
-            return False
-
-        class _RECT(ctypes.Structure):
-            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-        rect = _RECT()
-        u.GetWindowRect(hwnd, ctypes.byref(rect))
-        w, h = rect.right - rect.left, rect.bottom - rect.top
-        work = _RECT()
-        u.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0)
-        wa_w = work.right - work.left
-        wa_h = work.bottom - work.top
-        # Big enough to be covering the usable screen, frameless, and so the
-        # kind of window a game would be.
-        return w >= wa_w - 2 and h >= wa_h - 2
-    except Exception:  # noqa: BLE001
-        return False
-
-
 async def main() -> int:
     from backend.config import config
     from backend.local_llm.manager import local_llm
@@ -273,89 +229,139 @@ async def main() -> int:
         server._loop = had_loop
 
     print()
-    print("=== the detector recognises borderless-windowed games ===")
-    # Scored against the shapes that actually differ, using this machine's
-    # real numbers. A borderless game often sizes to the WORK AREA (1392 tall)
-    # rather than the screen (1440), because it does not cover the taskbar —
-    # and the old size-only test missed exactly that. A maximised ordinary
-    # window is the SAME size, so size alone can never separate them; the
-    # window STYLE does, which is what these cases pin down.
-    import ctypes
-    u = ctypes.windll.user32
-    screen_w = u.GetSystemMetrics(0)
-    screen_h = u.GetSystemMetrics(1)
+    print("=== the detector's rules, scored directly ===")
+    # These call the SHIPPING classifier with plain numbers - no window system
+    # is involved, so the result does not depend on what is on screen. The
+    # previous version re-implemented the rules here and then grepped the
+    # source for strings to keep the copy honest: two sources of truth, plus a
+    # match a comment can satisfy. The rules under test are the ones that ship.
+    #
+    # Rows 1-5 are REAL windows measured on this machine, including a real
+    # running game. The rest pin shapes that have no specimen here. A borderless
+    # game often sizes to the WORK AREA (1392 here) rather than the screen
+    # (1440), because it does not cover the taskbar - and a maximised ordinary
+    # window is the same size, so size alone can never separate them.
+    from backend.safety.presence_guard import (
+        classify_window, _under_system,
+        WS_EX_TOOLWINDOW, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_NOACTIVATE,
+    )
 
-    class _RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-    _work = _RECT()
-    u.SystemParametersInfoW(0x0030, 0, ctypes.byref(_work), 0)
-    work_w = _work.right - _work.left or screen_w
-    work_h = _work.bottom - _work.top or screen_h
+    WORK_W, WORK_H = 2560, 1392
+    GAME_PATH = (r"E:\Program\Game\Delta Force\DeltaForce\Binaries"
+                 r"\Win64\DeltaForceClient-Win64-Shipping.exe")
+    SYS_PATH = r"C:\Windows\System32\some.exe"
+    OWN_PID, OTHER_PID = 4242, 7777
 
-    WS_POPUP = 0x80000000
-    WS_CAPTION = 0x00C00000
-    WS_THICKFRAME = 0x00040000
-
-    def classify(w, h, style):
-        """The detector's decision, mirroring presence_guard._detect_gaming."""
-        SLACK = 2
-        if not (w >= work_w - SLACK and h >= work_h - SLACK):
-            return False
-        has_caption = bool(style & WS_CAPTION)
-        has_frame = bool(style & WS_THICKFRAME)
-        is_popup = bool(style & WS_POPUP)
-        if (has_caption or has_frame) and not is_popup:
-            return False
-        if has_caption and not has_frame:
-            return False
-        return True
-
+    # (label, class, w, h, style, exstyle, zoomed, pid, path, want, want_reason)
     cases = [
-        ("exclusive fullscreen", screen_w, screen_h, WS_POPUP, True),
-        ("borderless at screen size", screen_w, screen_h, WS_POPUP, True),
-        # The regression: this is the shape the old test reported as not-gaming.
-        ("borderless at work-area size", work_w, work_h, WS_POPUP, True),
-        ("borderless one pixel short", screen_w - 1, screen_h - 1, WS_POPUP, True),
-        ("maximised ordinary window", work_w, work_h,
-         WS_CAPTION | WS_THICKFRAME, False),
-        ("large plain window", 1400, 900, WS_CAPTION | WS_THICKFRAME, False),
-        ("splash dialog", screen_w, screen_h, WS_POPUP | WS_CAPTION, False),
-        ("small popup", 400, 300, WS_POPUP, False),
+        # --- real windows, measured -------------------------------------------------
+        ("real: Program Manager", "Progman", 3640, 1920, 0x96000000, 0x00200080,
+         False, OTHER_PID, r"C:\Windows\explorer.exe", False, "shell class"),
+        # 0x00200000 carries NO NOACTIVATE - only the class rule catches this one.
+        ("real: Windows Input Experience", "Windows.UI.Core.CoreWindow",
+         2560, 1440, 0x94000000, 0x00200000, False, OTHER_PID,
+         r"C:\Windows\SystemApps\X\TextInputHost.exe", False, "shell class"),
+        ("real: cursor overlay", "Cua.AgentCursorOverlay", 3640, 1920, 0x94000000,
+         0x080800A0, False, OTHER_PID, r"C:\Users\x\cua-driver.exe",
+         False, "shell class"),
+        ("real: maximised browser", "Chrome_WidgetWin_1", 2576, 1408, 0x17CF0000,
+         0x00200100, True, OTHER_PID, r"C:\Program Files\Brave\brave.exe",
+         False, "maximised"),
+        # The real game: Garena Delta Force, borderless, WS_EX_APPWINDOW set.
+        ("real: Garena Delta Force", "UnrealWindow", 2560, 1440, 0x94020000,
+         0x00040000, False, OTHER_PID, GAME_PATH, True, "borderless fullscreen"),
+        # --- synthetic, pinning shapes with no specimen ------------------------------
+        ("borderless game at work area", "UnityWndClass", 2560, 1392, 0x90000000,
+         0, False, OTHER_PID, GAME_PATH, True, "borderless fullscreen"),
+        ("borderless game one pixel short", "UnityWndClass", 2559, 1391, 0x80000000,
+         0, False, OTHER_PID, GAME_PATH, True, "borderless fullscreen"),
+        ("browser fullscreen video", "Chrome_WidgetWin_1", 2560, 1440,
+         0x80C00000, 0x00000100, False, OTHER_PID,
+         r"C:\Program Files\Brave\brave.exe", False, "captioned popup"),
+        ("small splash window", "Dlg", 900, 600, 0x86800000, 0, False,
+         OTHER_PID, GAME_PATH, False, "too small"),
+        ("our own window, full screen", "Qt51519QWindowIcon", 2560, 1392,
+         0x96000000, 0, False, OWN_PID, GAME_PATH, False, "own process"),
+        ("tool window, full screen", "SomeTool", 2560, 1400, 0x94000000,
+         WS_EX_TOOLWINDOW, False, OTHER_PID, GAME_PATH, False, "tool window"),
+        ("click-through overlay", "Overlay", 2560, 1440, 0x94000000,
+         WS_EX_LAYERED | WS_EX_TRANSPARENT, False, OTHER_PID, GAME_PATH,
+         False, "click-through overlay"),
+        ("system binary, borderless", "SomeClass", 2560, 1440, 0x94000000,
+         0, False, OTHER_PID, SYS_PATH, False, "system binary"),
+        ("small ordinary window", "Qt51519QWindowIcon", 816, 633, 0x96CF0000,
+         0x00000100, False, OTHER_PID, r"E:\app\app.exe", False, "too small"),
+        ("game wider than the monitor", "UnityWndClass", 3640, 1920, 0x80000000,
+         0, False, OTHER_PID, GAME_PATH, True, "borderless fullscreen"),
     ]
-    for label, w, h, style, want in cases:
-        check(f"detector: {label}", classify(w, h, style) == want,
-              f"{w}x{h} style=0x{style:08X}")
 
-    # And the real desktop must not be a false positive while we sit in an editor.
-    from backend.safety.presence_guard import PresenceGuard
-    guard = PresenceGuard()
-    check("the real desktop is not misread as gaming",
-          guard._detect_gaming() in (True, False) and not (
-              # Only meaningful when an ordinary window is in front, which is
-              # what this check is for. Reported rather than asserted when a
-              # game is genuinely running, so the suite does not fail on the
-              # user's own gaming session.
-              _foreground_is_frameless(u)),
-          "a frameless window is in front right now (a game?) — rerun later")
+    for (label, cls, w, h, style, ex, zoomed, pid, path, want, want_why) in cases:
+        got, why = classify_window(
+            class_name=cls, width=w, height=h, style=style, exstyle=ex,
+            zoomed=zoomed, work_w=WORK_W, work_h=WORK_H,
+            pid=pid, own_pid=OWN_PID, image_path=path)
+        # Assert the REASON too. A row that returns False because it was "too
+        # small" proves nothing about the rule it was written for.
+        check(f"detector: {label}", got == want and why == want_why,
+              f"want {want} ({want_why}), got {got} ({why})")
 
-    # The classifier above mirrors the detector, so it could agree with itself
-    # while the real function drifted. These tie the two together: the shipped
-    # code must contain each rule the mirror applies.
-    from pathlib import Path
-    guard_src = Path(ROOT, "backend", "safety",
-                     "presence_guard.py").read_text(encoding="utf-8")
-    body = guard_src.split("def _detect_gaming")[1].split("def _has_user_input")[0]
-    for rule, needle in (
-        ("the detector reads the work area", "SPI_GETWORKAREA"),
-        ("it falls back to the screen when the work area is unavailable", "got_work"),
-        ("it allows a pixel of slack", "SLACK"),
-        ("it inspects the window style", "GWL_STYLE"),
-        ("it rejects a framed non-popup window (a maximised app)",
-         "looks_like_a_window and not is_popup"),
-        ("it rejects a captioned popup (a splash)", "has_caption and not has_frame"),
-    ):
-        check(rule, needle in body, "the mirror may not match the shipping code")
+    # The floor must be the WORK AREA, not the screen. A borderless game that
+    # does not cover the taskbar is 1392 tall; measured on this machine it
+    # would be judged too small against the 1440-tall screen. This is the exact
+    # regression the old code was fixed for, so pin it by size.
+    got, why = classify_window(
+        class_name="UnityWndClass", width=2560, height=1392, style=0x90000000,
+        exstyle=0, zoomed=False, work_w=WORK_W, work_h=WORK_H,
+        pid=OTHER_PID, own_pid=OWN_PID, image_path=GAME_PATH)
+    check("a game sized to the work area is still a game",
+          (got, why) == (True, "borderless fullscreen"), f"got {got} ({why})")
+
+    # And the floor itself is real: a frameless POPUP that covers everything
+    # except its size is not full-screen. Without this, a small borderless
+    # window would be called a game (found by ablation).
+    got, why = classify_window(
+        class_name="SomePopup", width=800, height=600, style=0x80000000,
+        exstyle=0, zoomed=False, work_w=WORK_W, work_h=WORK_H,
+        pid=OTHER_PID, own_pid=OWN_PID, image_path=GAME_PATH)
+    check("a small frameless popup is not a game",
+          (got, why) == (False, "too small"), f"got {got} ({why})")
+
+    # The no-activate rule has no specimen on this machine - nothing observed
+    # carries WS_EX_NOACTIVATE AND passes every other rule - so it is pinned by
+    # construction here. Without this row the rule is untested, and removing it
+    # broke nothing (found by ablation).
+    got, why = classify_window(
+        class_name="SomeOverlay", width=2560, height=1440, style=0x94000000,
+        exstyle=WS_EX_NOACTIVATE, zoomed=False, work_w=WORK_W, work_h=WORK_H,
+        pid=OTHER_PID, own_pid=OWN_PID, image_path=GAME_PATH)
+    check("a no-activate window is not a game",
+          (got, why) == (False, "no-activate overlay"), f"got {got} ({why})")
+
+    # The same window with the same flags, minus NOACTIVATE, IS a game. This is
+    # what makes the row above a test of that rule rather than of the shape.
+    got, why = classify_window(
+        class_name="SomeOverlay", width=2560, height=1440, style=0x94000000,
+        exstyle=0, zoomed=False, work_w=WORK_W, work_h=WORK_H,
+        pid=OTHER_PID, own_pid=OWN_PID, image_path=GAME_PATH)
+    check("and the same window without it is", got is True, why)
+
+    # The overlay rule is a judgement call, so it is a parameter rather than a
+    # hardcoded assumption: a support report can turn it off without a rebuild.
+    got, why = classify_window(
+        class_name="SomeOverlay", width=2560, height=1440, style=0x94000000,
+        exstyle=WS_EX_NOACTIVATE, zoomed=False, work_w=WORK_W, work_h=WORK_H,
+        pid=OTHER_PID, own_pid=OWN_PID, image_path=GAME_PATH,
+        noactivate_rejects=False)
+    check("the no-activate rule can be turned off", got is True, why)
+
+    # A prefix test must not match a sibling directory: C:\WindowsApps is not
+    # under C:\Windows. This failed open while it was being written.
+    check("system-path check respects the separator",
+          _under_system(("C:\\Windows",), r"C:\WindowsApps\Foo\foo.exe") is False)
+    check("system-path check is case-folded",
+          _under_system(("C:\\Windows",), r"C:\WINDOWS\System32\x.exe") is True)
+    check("a real game path is not a system path",
+          _under_system(("C:\\Windows",), GAME_PATH) is False)
 
     print()
     print("=== the engine hook is wired ===")
