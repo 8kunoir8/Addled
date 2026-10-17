@@ -435,21 +435,28 @@ class ActionExecutor:
             log.debug("approval policy unavailable: %s", e)
             return False
         try:
-            # The session grant is checked first because it is the only one a
-            # content-classified action can have. `run_command` is granted for
-            # the sitting and not permanently, so looking for the permanent
-            # answer first would leave that grant unable to take effect.
+            # The grant is the (skill, command) pair the user was shown when
+            # they answered the card - the same pair `allow_for_session` stores
+            # as TOOL/<command>. It is NOT the skill alone.
+            #
+            # This used to check the skill bucket first, by action_type, and
+            # return True for the whole action. So one answer during a
+            # `git status` prompt covered every command afterwards: measured
+            # against the live install, `del /f` then ran without a card
+            # because "allow run_command for the session" had been given.
+            #
+            # Actions that carry no command keep name-keyed grants, because
+            # for those the name IS the whole request.
+            name = str(params.get("command", "")).strip() if params else ""
+            if name:
+                if policy.is_allowed_for_session(policy.TOOL, name):
+                    return True
+                if policy.is_always_allowed(policy.TOOL, name):
+                    return True
+                return False
             if policy.is_allowed_for_session(policy.SKILL, action_type):
                 return True
             if policy.is_always_allowed(policy.SKILL, action_type):
-                return True
-            # A destructive command carried on a non-destructive action type
-            # still has to be recognised, so the gate's content check is
-            # repeated here rather than trusted to the caller's action name.
-            name = str(params.get("command", "")).strip() if params else ""
-            if name and policy.is_allowed_for_session(policy.TOOL, name):
-                return True
-            if name and policy.is_always_allowed(policy.TOOL, name):
                 return True
             return False
         except Exception as e:  # noqa: BLE001
@@ -615,6 +622,20 @@ class ActionExecutor:
         """Main entry point. All actions go through this pipeline."""
         self._lazy_init()
         self._cancel_flag = False
+
+        # 0. The halt latch. No tool runs while it is set - not even to raise
+        # an approval card, because a user who pressed the panic key is not
+        # sitting there approving things. `cancel_current()` used to be the
+        # whole of this: its flag was set, then cleared here at the top of the
+        # next call, and read by nothing in between.
+        from backend.safety import halt
+        if halt.is_halted():
+            return ActionResult(
+                False, request.action_type,
+                error=("The agent is halted"
+                       + (f" ({halt.reason()})" if halt.reason() else "")
+                       + ". Resume it from Safety before running anything."),
+                data={"halted": True, "reason": halt.reason()})
         started = time.monotonic()
 
         # 1. Rate limiter
@@ -634,6 +655,16 @@ class ActionExecutor:
             # queued the request and left no trace of who raised it.
             self._note_origin(approval_id, request)
             _console_note_pending(approval_id, request)
+            # The other two sites that queue an approval also announce it.
+            # This one did not, so a gated action sent from the dashboard's
+            # "execute" path or a bot step was queued with no card and no way
+            # to answer it - the request waited until it expired. That is the
+            # orphaned-approval finding, and `code.verify` overrides now come
+            # through here too.
+            try:
+                self._broadcast_approval_request(approval_id, request)
+            except Exception as e:  # noqa: BLE001
+                log.debug("approval broadcast failed: %s", e)
             return ActionResult(False, request.action_type,
                 error="Destructive action awaiting approval",
                 data={"approval_id": approval_id, "action": request.action_type,

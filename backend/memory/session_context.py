@@ -50,15 +50,14 @@ class SessionContext:
 
     def save(self):
         """Persist session context to disk."""
-        CONTEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(CONTEXT_PATH, "w", encoding="utf-8") as f:
-            json.dump({
-                "last_app_context": self.last_app_context,
-                "last_action": self.last_action,
-                "active_workspace": self.active_workspace,
-                "open_apps": self.open_apps,
-                "interaction_count": self.interaction_count,
-            }, f, indent=2)
+        from backend.memory._atomic import write_json_safe
+        write_json_safe(CONTEXT_PATH, {
+            "last_app_context": self.last_app_context,
+            "last_action": self.last_action,
+            "active_workspace": self.active_workspace,
+            "open_apps": self.open_apps,
+            "interaction_count": self.interaction_count,
+        })
 
     def record_interaction(self):
         self.interaction_count += 1

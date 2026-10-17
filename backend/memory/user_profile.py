@@ -33,19 +33,17 @@ _DEFAULTS = {
 
 def _load() -> dict:
     if PROFILE_PATH.exists():
-        try:
-            data = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        from backend.memory._atomic import read_json
+        data = read_json(PROFILE_PATH, default=None)
+        if isinstance(data, dict):
             return {**_DEFAULTS, **data}
-        except (json.JSONDecodeError, OSError):
-            pass
     return dict(_DEFAULTS)
 
 
 def _save(profile: dict) -> None:
     try:
-        PROFILE_PATH.write_text(json.dumps(profile, indent=2,
-                                           ensure_ascii=False),
-                                encoding="utf-8")
+        from backend.memory._atomic import write_json_safe
+        write_json_safe(PROFILE_PATH, profile)
     except OSError as e:
         log.warning("profile save failed: %s", e)
 

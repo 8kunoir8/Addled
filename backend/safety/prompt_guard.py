@@ -25,7 +25,20 @@ INJECTION_PATTERNS = [
     r"roleplay as.*unfiltered",
     r"new system message",
     r"forget (everything|all) (you know|above)",
+    # Measured phrasings that passed the list above. Each was accepted by the
+    # guard and reached the model as ordinary text.
+    r"prior instructions",
+    r"previous instructions",
+    r"disregard (the )?(above|previous|prior|earlier)",
+    r"the system prompt (says|tells|instructs)",
+    r"your (real|true|actual) (instructions|task) (is|are)",
+    r"(send|post|upload|email) (the|your|all) (api ?key|keys|token|password)",
 ]
+
+# Characters that render as nothing but split a word, so `ig\u200bnore` is not
+# matched by `ignore`. Stripped before matching, because the guard reads the
+# same text the model does, and to the model these are invisible.
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"), None)
 
 EXFIL_PATTERNS = [
     r"send (it|this|the|that) to https?://",
@@ -35,13 +48,14 @@ EXFIL_PATTERNS = [
     r"post (it|this) to",
 ]
 
-
 def sanitize(text: str) -> tuple[str, bool]:
     """
     Check text for injection/exfiltration patterns.
     Returns (sanitized_text, was_blocked).
     """
-    text_lower = text.lower()
+    # Strip zero-width joiners first: they are invisible to a reader but they
+    # break every literal pattern above.
+    text_lower = str(text).translate(_INVISIBLE).lower()
 
     for pattern in INJECTION_PATTERNS:
         if re.search(pattern, text_lower):

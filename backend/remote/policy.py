@@ -56,6 +56,20 @@ REMOTE_FORBIDDEN_METHODS = {
     # below describes it correctly.
     "system.rtkInstall",
     "system.uvInstall",
+    # `code.verify` runs a command the CALLER supplies, through PowerShell with
+    # `-ExecutionPolicy Bypass`. The only thing in front of it was the
+    # destruction gate, and five measured payloads passed that. A remote
+    # session must not be able to run shell this way; the local Code page
+    # still can, where the user is the one asking.
+    "code.verify",
+    # Granting yourself standing permission is a local decision. A remote
+    # caller that could write its own grants would erase the approval card
+    # for the rest of the session.
+    "approvals.always_allow",
+    "approvals.session",
+    # Resuming the agent is the one act the halt latch exists to reserve for
+    # the person at the keyboard.
+    "safety.resume",
 }
 
 # Action types held back from remote sessions unless deliberately opened.

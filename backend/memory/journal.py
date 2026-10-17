@@ -49,18 +49,18 @@ def _day_path(date_str: str) -> Path:
 def _load_day(date_str: str) -> dict:
     path = _day_path(date_str)
     if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+        from backend.memory._atomic import read_json
+        data = read_json(path, default=None)
+        if isinstance(data, dict):
+            return data
     return {"date": date_str, "entries": [], "summary": "", "summarized": False}
 
 
 def _save_day(day: dict) -> None:
     try:
         JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
-        _day_path(day["date"]).write_text(
-            json.dumps(day, indent=2, ensure_ascii=False), encoding="utf-8")
+        from backend.memory._atomic import write_json_safe
+        write_json_safe(_day_path(day["date"]), day)
     except OSError as e:
         log.warning("journal save failed: %s", e)
 

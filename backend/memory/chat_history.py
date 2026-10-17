@@ -30,18 +30,15 @@ class ChatHistory:
     def _load(self):
         if self._loaded:
             return
-        if HISTORY_PATH.exists():
-            try:
-                with open(HISTORY_PATH, "r", encoding="utf-8") as f:
-                    self._data = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                self._data = {"conversations": {}, "current_conversation": None}
+        from backend.memory._atomic import read_json
+        default = {"conversations": {}, "current_conversation": None}
+        data = read_json(HISTORY_PATH, default=None)
+        self._data = data if isinstance(data, dict) else default
         self._loaded = True
 
     def _save(self):
-        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(HISTORY_PATH, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2, ensure_ascii=False)
+        from backend.memory._atomic import write_json_safe
+        write_json_safe(HISTORY_PATH, self._data)
 
     def create_conversation(self, title: str = "") -> str:
         """Create a new conversation, return its ID."""

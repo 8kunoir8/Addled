@@ -174,6 +174,20 @@ def allow_for_session(kind: str, name: str) -> dict:
         return {"success": False, "error": f"unknown kind: {kind!r}"}
     if not clean:
         return {"success": False, "error": "a name is required"}
+    # A SKILL grant means "let this SKILL run without asking until restart".
+    # Its scope is that skill, not every action that goes through the same
+    # executor door. `session_send` is therefore the only name refused here:
+    # it types into a live shell, which is the one thing this sitting-wide
+    # answer must not cover, and its own approval remains per call.
+    #
+    # What this does NOT mean is that a grant for one command covers all of
+    # them. `_is_granted` used to treat it that way, for every action; it now
+    # treats each gated action as its own approval, so granting `run_command`
+    # during a `git status` prompt covers `git status` and not `del /f x`.
+    if k == SKILL and clean == "session_send":
+        return {"success": False, "protected": True,
+                "error": ("'session_send' types into a live shell and always "
+                          "asks first. Approve each one.")}
     with _SESSION_LOCK:
         bucket = _SESSION[k]
         if clean not in bucket:
@@ -186,9 +200,14 @@ def allow_for_session(kind: str, name: str) -> dict:
 
 def is_allowed_for_session(kind: str, name: str) -> bool:
     """Whether this session has already answered for this name. Never raises."""
+
     k = _valid_kind(kind)
     clean = str(name or "").strip()
     if k is None or not clean:
+        return False
+    # Belt and braces: the same refusal as on the way in, because an older
+    # build could have written such a grant into the in-memory store.
+    if k == SKILL and clean == "session_send":
         return False
     try:
         with _SESSION_LOCK:

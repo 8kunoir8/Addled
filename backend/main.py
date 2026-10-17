@@ -547,16 +547,29 @@ def main():
 
     def _on_kill():
         log.warning("KILL SWITCH: halting engine and all actions")
+        # The latch is the part that actually stops anything. Without it the
+        # tick loop restarts on the next tick and `cancel_current()`'s flag is
+        # reset by the next `execute()` - so the panic key ended one turn and
+        # the agent carried on. This survives until the user resumes.
+        from backend.safety import halt
+        halt.halt(reason="kill switch")
         engine.stop()
         from backend.actions.executor import executor
         executor.cancel_current()
         from backend.ws_server import get_server
-        get_server().broadcast_nowait("kill.activated", {"ts": time.time()})
+        get_server().broadcast_nowait("kill.activated",
+                                      {"ts": time.time(), **halt.status()})
         engine.sig_agent_state.emit("sleeping")
 
     hotkey = config.get("safety", "kill_switch_hotkey", default="ctrl+shift+alt+k")
     kill_switch.on_activated(_on_kill)
     kill_switch.start(hotkey)
+
+    # A halt that was set before this process started is still in force. The
+    # Electron shell respawns the backend within seconds of a kill, so without
+    # this the panic key would have been undone by its own restart.
+    from backend.safety import halt as _halt
+    _halt._reload()
 
     # ---- voice input (wake word → command → chat → speak) --------------------
     from backend.voice.stt import voice_listener

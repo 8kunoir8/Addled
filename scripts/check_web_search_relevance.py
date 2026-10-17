@@ -207,14 +207,16 @@ def the_message_stops_asserting_success(registry) -> None:
         "RTX 4090 price", "bing",
         [{"title": "RTX 4090 price", "context": "price for the RTX 4090"}])
     smsg = _tool_result_message("web_search", {"success": True, "data": strong})
+    # Tool output is now wrapped in the untrusted envelope, so the claim is
+    # looked for inside it rather than at position zero.
     check("a strong result still reads as a success",
-          smsg["content"].startswith("Tool 'web_search' succeeded."),
+          "Tool 'web_search' succeeded." in smsg["content"],
           smsg["content"][:80])
 
     plain = _tool_result_message(
         "run_command", {"success": True, "data": {"stdout": "hi"}})
     check("a skill that sets no quality is unaffected",
-          plain["content"].startswith("Tool 'run_command' succeeded."),
+          "Tool 'run_command' succeeded." in plain["content"],
           plain["content"][:80])
 
 

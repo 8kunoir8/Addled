@@ -369,15 +369,19 @@ def run():
               executor._is_granted("delete_file", {}) is False,
               "delete_file reported as granted")
 
-        # A content-classified action is reachable through the SESSION grant,
-        # which is the whole point of having one: without it `run_command`
-        # would prompt on every single call and the user would learn to approve
-        # without reading.
-        policy.allow_for_session(policy.SKILL, "run_command")
+        # A session grant answers for the request the user was taught to think
+        # of as "this skill". For a command-carrying action the card shows a
+        # command, so the grant is keyed on that command - granting the skill
+        # by name must NOT also release a command nobody was shown.
+        policy.allow_for_session(policy.TOOL, "echo hi")
         check("a session grant is honoured by the executor",
               executor._is_granted("run_command", {"command": "echo hi"})
               is True,
               "the session grant did not reach the gate")
+        check("but it does not cover another command",
+              executor._is_granted("run_command", {"command": "del /f x"})
+              is False,
+              "a grant for one command released every command")
         check("and it does not arrive as a permanent one",
               policy.is_always_allowed(policy.SKILL, "run_command") is False,
               "the session grant was stored")
@@ -386,6 +390,17 @@ def run():
               executor._is_granted("run_command", {"command": "echo hi"})
               is False,
               "a cleared session grant still applied")
+        # A name-keyed skill grant is the user switching a skill off-ask for
+        # the sitting, which is what the Skills page toggle means.
+        policy.allow_for_session(policy.SKILL, "close_app")
+        check("a skill grant still covers that skill",
+              executor._is_granted("close_app", {}) is True,
+              "the named-skill grant did not apply")
+        policy.clear_session()
+        check("session_send can never be granted by name",
+              policy.allow_for_session(policy.SKILL, "session_send")
+              .get("success") is False,
+              "a scheme-wide grant reached a live shell")
 
         policy.always_allow(policy.SKILL, "read_the_news")
         check("a granted skill is treated as granted",

@@ -58,19 +58,22 @@ class TaskStore:
     def _load(self) -> dict[str, ScheduledTask]:
         if not STORE_PATH.exists():
             return {}
+        from backend.memory._atomic import read_json
+        raw = read_json(STORE_PATH, default=[])
+        if not isinstance(raw, list):
+            return {}
         try:
-            raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
             return {t["id"]: ScheduledTask.from_dict(t)
-                    for t in raw if t.get("id")}
-        except (json.JSONDecodeError, OSError, TypeError):
+                    for t in raw if isinstance(t, dict) and t.get("id")}
+        except (TypeError, KeyError) as e:
+            log.warning("task store could not be rebuilt: %s", e)
             return {}
 
     def _save(self) -> None:
         try:
-            STORE_PATH.write_text(
-                json.dumps([t.to_dict() for t in self._tasks.values()],
-                           indent=2, ensure_ascii=False),
-                encoding="utf-8")
+            from backend.memory._atomic import write_json_safe
+            write_json_safe(
+                STORE_PATH, [t.to_dict() for t in self._tasks.values()])
         except OSError as e:
             log.warning("task save failed: %s", e)
 

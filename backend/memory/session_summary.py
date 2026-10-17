@@ -27,19 +27,17 @@ MAX_SUMMARIES = 50
 
 def _load() -> list[dict]:
     if SUMMARIES_PATH.exists():
-        try:
-            return json.loads(SUMMARIES_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return []
+        from backend.memory._atomic import read_json
+        data = read_json(SUMMARIES_PATH, default=[])
+        return data if isinstance(data, list) else []
     return []
 
 
 def _save(entries: list[dict]) -> None:
     try:
         SUMMARIES_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SUMMARIES_PATH.write_text(
-            json.dumps(entries[-MAX_SUMMARIES:], indent=2, ensure_ascii=False),
-            encoding="utf-8")
+        from backend.memory._atomic import write_json_safe
+        write_json_safe(SUMMARIES_PATH, entries[-MAX_SUMMARIES:])
     except OSError as e:
         log.warning("Could not save session summaries: %s", e)
 

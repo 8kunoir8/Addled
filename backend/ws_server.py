@@ -148,6 +148,18 @@ def set_engine(engine):
 
 HandlerFunc = Callable[[dict, WebSocketServerProtocol], Awaitable[dict | None]]
 
+# Methods that make the agent do work, and so are refused while the halt latch
+# is set. Everything not listed here is a read or a local state question, and
+# stays open - a halted agent the user cannot inspect or resume is a brick.
+_MUTATING_METHODS = {
+    "chat.send", "chat.stop",
+    "action.execute",
+    "goal.create", "goal.start", "goal.replan",
+    "code.applyPlan", "code.verify",
+    "skills.installFrom", "skills.execute",
+    "swarm.start", "task.start",
+}
+
 
 class WSServer:
     """JSON-RPC 2.0 WebSocket server with method dispatch."""
@@ -516,6 +528,27 @@ class WSServer:
                         "jsonrpc": "2.0",
                         "id": msg_id,
                         "error": {"code": -32001, "message": refusal},
+                    }
+
+            # The halt latch, ahead of every handler. The executor check alone
+            # is not enough: starting a goal, sending a chat turn or applying a
+            # plan are mutations that never pass through a tool, and a halted
+            # agent that still accepts a chat turn is not halted. Reads stay
+            # open so the dashboard can show its state and Safety can resume.
+            if method in _MUTATING_METHODS:
+                from backend.safety import halt
+                if halt.is_halted():
+                    if is_notification:
+                        return None
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {"code": -32003,
+                                  "message": ("The agent is halted"
+                                              + (f" ({halt.reason()})"
+                                                 if halt.reason() else "")
+                                              + ". Resume it from Safety "
+                                                "first.")},
                     }
 
             result = await handler(params, ws)
@@ -3344,29 +3377,34 @@ def _register_default_handlers():
                     "error": ("name is required, or an approvalId whose "
                               "request is still known")}
 
-        # A content-classified action is remembered by the COMMAND, not by
-        # the skill. `run_command` cannot answer for itself -- the danger is in
-        # the argument -- so granting it by name released every later command,
-        # including ones the user was never shown. `_is_granted` already reads a
-        # command-keyed grant from the TOOL bucket; this is what puts one there.
-        grant_kind, grant_name = kind, name
+        # What gets remembered is the request the user was SHOWN: the skill
+        # plus the command it was carrying. Never the skill alone when there
+        # is a command, and never the `kind` the caller sent - taking that on
+        # trust is how one RPC stored a grant that outlived the request.
+        #
+        # `_is_granted` reads the same pair back, so a grant made while
+        # answering a `git status` prompt covers `git status` and not the
+        # next command. Actions with no command are still keyed by name: for
+        # those the name is the whole request.
+        from backend.approvals import policy as _p
+        grant_kind, grant_name = _p.SKILL, name
         try:
-            from backend.approvals import policy as _p
-            if _p.is_protected(name):
-                entry = pending_origins.get(approval_id) if approval_id else None
-                command = ""
-                if entry:
-                    command = str(entry.get("command") or "").strip()
-                if not command:
-                    from backend.actions.executor import executor as _ex
-                    _req = _ex._pending_approvals.get(approval_id)
-                    if _req is not None:
-                        command = str((_req.params or {}).get("command") or "").strip()
-                if command:
-                    # The command the user was shown, and only that one.
-                    grant_kind, grant_name = _p.TOOL, command
+            command = ""
+            entry = pending_origins.get(approval_id) if approval_id else None
+            if entry:
+                command = str(entry.get("command") or "").strip()
+            if not command:
+                from backend.actions.executor import executor as _ex
+                _req = _ex._pending_approvals.get(approval_id)
+                if _req is not None:
+                    command = str((_req.params or {}).get("command") or "").strip()
+            if command:
+                grant_kind, grant_name = _p.TOOL, command
+            else:
+                grant_kind, grant_name = _p.SKILL, name
         except Exception as e:  # noqa: BLE001
             log.debug("could not key the grant to a command: %s", e)
+            grant_kind, grant_name = _p.SKILL, name
 
         if session_only:
             result = policy.allow_for_session(grant_kind, grant_name)
@@ -3400,6 +3438,34 @@ def _register_default_handlers():
         """Drop every session grant now, without waiting for a restart."""
         from backend.approvals import policy
         return policy.clear_session()
+
+    async def safety_status(params: dict, ws) -> dict:
+        """Whether the agent is halted, so Safety can show it on load."""
+        from backend.safety import halt
+        return {"success": True, **halt.status()}
+
+    async def safety_resume(params: dict, ws) -> dict:
+        """Clear the halt latch. Local only, and it must be asked for.
+
+        Resuming is the one thing a remote or automated caller must not be
+        able to do: the whole point of the latch is that it holds until the
+        person at the keyboard says otherwise. Hence `confirm: true` - a
+        caller has to mean it - and the local-only entry in the remote policy.
+        """
+        from backend.safety import halt
+        if params.get("confirm") is not True:
+            return {"success": False,
+                    "error": "resume needs {\"confirm\": true}"}
+        if not halt.is_halted():
+            return {"success": True, **halt.status(),
+                    "note": "The agent was not halted."}
+        halt.resume()
+        try:
+            from backend.ws_server import get_server
+            get_server().broadcast_nowait("safety.resumed", {"ts": time.time()})
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not broadcast the resume: %s", e)
+        return {"success": True, **halt.status()}
 
     async def approvals_revoke(params: dict, ws) -> dict:
         """Take standing permission back, so the prompt returns."""
@@ -4520,8 +4586,31 @@ def _register_default_handlers():
         detected = verify_mod.detect_command(wp)
         if params.get("detectOnly"):
             return {"ok": False, "ran": False, **detected}
+        # A command the CALLER supplied is not "the project's own check" — it
+        # is whatever was typed, run through PowerShell with
+        # `-ExecutionPolicy Bypass`. It goes through the approval card, the
+        # same door `run_command` uses, so a destructive override is shown to
+        # the user before it runs rather than being judged by a word list.
+        # A DETECTED command keeps the direct path: it came from the project's
+        # own manifest, not from the request.
+        override = str(params.get("command") or "").strip()
+        if override:
+            from backend.actions.executor import executor as _ex
+            gate_result = await _ex.execute_for_chat("run_command",
+                                                     {"command": override})
+            if not gate_result.success and not (
+                    (gate_result.data or {}).get("approval_id")):
+                return {"ok": False, "ran": False, "command": override,
+                        "error": (gate_result.error
+                                  or "the command could not be run")}
+            if (gate_result.data or {}).get("approval_id"):
+                return {"ok": False, "ran": False, "command": override,
+                        "requires_approval": True,
+                        "data": gate_result.data,
+                        "error": ("Running this command needs your approval: "
+                                  "it is not the project's own check.")}
         result = await verify_mod.run_verification(
-            wp, command=str(params.get("command") or detected.get("command") or ""),
+            wp, command=override or str(detected.get("command") or ""),
             timeout=int(params.get("timeout") or 300))
         result["verdict"] = verify_mod.verdict_line(result)
         return result
@@ -6986,6 +7075,10 @@ def _register_default_handlers():
     _server.register("goal.replan", goal_replan)
     _server.register("goal.start", goal_start)
     _server.register("goal.cancel", goal_cancel)
+
+    # Safety: the halt latch
+    _server.register("safety.status", safety_status)
+    _server.register("safety.resume", safety_resume)
 
     # Phase 5 Code engine
     _server.register("code.bind", code_bind)

@@ -855,7 +855,7 @@ class SkillRegistry:
             return False
 
     @staticmethod
-    def _is_granted(name: str) -> bool:
+    def _is_granted(name: str, params: dict | None = None) -> bool:
         """Has the user already answered for this skill — permanently OR for
         this session?
 
@@ -889,6 +889,18 @@ class SkillRegistry:
         except Exception as e:  # noqa: BLE001
             log.debug("could not read the approval policy for %s: %s", name, e)
             return False
+        # A command-carrying action is granted by the command the user was
+        # shown, not by the skill's name: "allow this once more" during a
+        # `git status` prompt must not cover the next `del /f x`.
+        command = str((params or {}).get("command") or "").strip()
+        if command:
+            try:
+                return (policy.is_allowed_for_session(policy.TOOL, command)
+                        or policy.is_always_allowed(policy.TOOL, command))
+            except Exception as e:  # noqa: BLE001
+                log.debug("could not read the command grant for %s: %s",
+                          name, e)
+                return False
         try:
             if policy.is_allowed_for_session(policy.SKILL, name):
                 return True
@@ -1550,7 +1562,7 @@ class SkillRegistry:
         executor predates the policy still honours the grant — and so the
         reason a skill did not prompt is visible at the seam that decided it.
         """
-        if self._is_granted(name):
+        if self._is_granted(name, params):
             return None
         try:
             from backend.actions.executor import executor as _exec

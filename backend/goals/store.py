@@ -45,15 +45,14 @@ class GoalStore:
     def save(self, goal: dict):
         goal["updated_at"] = time.time()
         path = STORE_DIR / f"{goal['id']}.json"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(goal, f, indent=2, ensure_ascii=False)
+        from backend.memory._atomic import write_json_safe
+        write_json_safe(path, goal)
 
     def load(self, goal_id: str) -> dict | None:
         path = STORE_DIR / f"{goal_id}.json"
-        if not path.exists():
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        from backend.memory._atomic import read_json
+        data = read_json(path, default=None)
+        return data if isinstance(data, dict) else None
 
     def list_all(self, status: str | None = None) -> list[dict]:
         goals = []

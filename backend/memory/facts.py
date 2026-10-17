@@ -32,21 +32,23 @@ from backend import app_paths
 _COUNTER_PATH = app_paths.MEMORY_DIR / "facts_counter.json"
 
 
+
+# A corrupt file used to load as [] and the next _save then replaced the whole
+# list with the one fact being added. `read_json` moves the damaged file aside
+# instead, so the history survives the corruption.
 def _load() -> list[dict]:
     if FACTS_PATH.exists():
-        try:
-            data = json.loads(FACTS_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
+        from backend.memory._atomic import read_json
+        data = read_json(FACTS_PATH, default=[])
+        if isinstance(data, list):
+            return data
     return []
 
 
 def _save(facts: list[dict]) -> None:
     try:
-        FACTS_PATH.write_text(
-            json.dumps(facts, indent=2, ensure_ascii=False), encoding="utf-8")
+        from backend.memory._atomic import write_json_safe
+        write_json_safe(FACTS_PATH, facts)
     except OSError as e:
         log.warning("Could not save facts: %s", e)
 
@@ -54,13 +56,10 @@ def _save(facts: list[dict]) -> None:
 def _next_id() -> int:
     """The next unused fact id. Monotonic — never reuses a retired id."""
     nid = 1
-    try:
-        if _COUNTER_PATH.exists():
-            data = json.loads(_COUNTER_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and isinstance(data.get("next_id"), int):
-                nid = int(data["next_id"])
-    except (json.JSONDecodeError, OSError):
-        nid = 1
+    from backend.memory._atomic import read_json
+    data = read_json(_COUNTER_PATH, default={})
+    if isinstance(data, dict) and isinstance(data.get("next_id"), int):
+        nid = int(data["next_id"])
     if nid <= 1:
         # No usable counter (fresh install, or an upgrade from before it
         # existed): continue past whatever the stored facts already use, so
@@ -70,8 +69,8 @@ def _next_id() -> int:
         except Exception:  # noqa: BLE001
             nid = 1
     try:
-        _COUNTER_PATH.write_text(json.dumps({"next_id": nid + 1}),
-                                 encoding="utf-8")
+        from backend.memory._atomic import write_json_safe
+        write_json_safe(_COUNTER_PATH, {"next_id": nid + 1}, indent=None)
     except OSError as e:
         log.warning("Could not save the facts id counter: %s", e)
     return nid
