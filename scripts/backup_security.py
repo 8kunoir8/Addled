@@ -49,6 +49,11 @@ FILES = [
     "goals/store.py",
     "skills/tool_loop.py",
     "remote/policy.py",
+    # Browser launch policy: the search leg that opens a window, the ordering
+    # inside navigate(), and the forge's own browser research.
+    "skills/forge.py",
+    "skills/registry.py",
+    "browser/browser_engine.py",
 ]
 
 

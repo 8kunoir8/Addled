@@ -69,11 +69,34 @@ def _engine_ready(name: str) -> bool:
     return (time.time() - when) >= _ENGINE_COOLDOWN_S
 
 
-def _record_engine(name: str, ok: bool) -> None:
+# An engine whose TLS cannot be verified at all is not coming back by itself.
+# Measured 2026-10-17: `html.duckduckgo.com` is intercepted by a local content
+# filter (`CN=safesurf-redirect`, self-signed, no SAN), so every request fails
+# `CERTIFICATE_VERIFY_FAILED`. The failure is environmental, not transient, and
+# it costs a `urlopen` timeout on every single search until the cooldown ends.
+_TLS_ERROR_MARKERS = ("certificate_verify_failed", "sslcertverificationerror",
+                      "self-signed certificate", "certificate has expired")
+
+
+def _tls_refused(error: object) -> bool:
+    """Whether this failure is a refused TLS connection rather than a miss."""
+    text = str(error or "").lower()
+    return any(marker in text for marker in _TLS_ERROR_MARKERS)
+
+
+def _record_engine(name: str, ok: bool, error: object = "") -> None:
     if ok:
         _ENGINE_FAILURES.pop(name, None)
         return
     count, _ = _ENGINE_FAILURES.get(name, (0, 0.0))
+    # One refusal is enough to stand it down: the certificate will still be
+    # refused on the next attempt seconds later.
+    if _tls_refused(error):
+        _ENGINE_FAILURES[name] = (_ENGINE_FAIL_LIMIT, time.time())
+        log.warning("Search engine '%s' refused TLS (likely a local content "
+                    "filter) — standing it down for %d minutes",
+                    name, int(_ENGINE_COOLDOWN_S // 60))
+        return
     _ENGINE_FAILURES[name] = (count + 1, time.time())
 
 
@@ -4466,8 +4489,10 @@ class SkillRegistry:
                 #
                 # Live on 2026-10-11 a search for "Odin 2 Mini price Indonesia"
                 # returned Wikipedia rows for Falcon 9 launches and IKEA, and
-                # nothing else was ever tried - so the browser fallback, which
-                # would have searched for real, was never reached. The gate does
+                # nothing else was ever tried - so the scraped engines behind
+                # it, which would have searched for real, were never reached.
+                # (There was also a browser leg after those, since removed: it
+                # would have launched Chromium for a search.) The gate does
                 # not make a coincidental match (the Norse god "Odin" appearing
                 # in unrelated articles) go away on its own - see
                 # scripts/check_web_search_relevance.py, which records that the
@@ -4478,7 +4503,7 @@ class SkillRegistry:
                     ok = False
                     result = {"success": False,
                               "error": "results did not match the query"}
-                _record_engine(name, ok)
+                _record_engine(name, ok, result.get("error"))
                 if ok:
                     return result
                 problems.append(f"{name}: {result.get('error')}")
@@ -4492,63 +4517,63 @@ class SkillRegistry:
                     continue
                 result = await fn(query)
                 if not result.get("success"):
-                    _record_engine(name, False)
+                    _record_engine(name, False, result.get("error"))
                     problems.append(f"{name}: {result.get('error')}")
                     continue
                 if not _looks_relevant(query, result):
-                    _record_engine(name, False)
+                    _record_engine(name, False, result.get("error"))
                     problems.append(f"{name}: results did not match the query")
                     continue
                 _record_engine(name, True)
                 return result
 
-            # Last resort: drive a real browser. Slow, but nothing blocks it -
-            # and it is still Bing underneath, so its output needs the same
-            # relevance check as the scraped path or the model is handed the
-            # same irrelevant page it was just protected from.
-            try:
-                from urllib.parse import quote
-                from backend.browser.browser_engine import browser
-                nav = await browser.navigate(
-                    f"https://www.bing.com/search?q={quote(query)}")
-                if nav.get("success"):
-                    extract = await browser.extract()
-                    text = (extract or {}).get("text", "") if isinstance(extract, dict) else str(extract or "")
-                    if text:
-                        candidate = {"success": True, "query": query,
-                                     "engine": "browser", "url": nav.get("url"),
-                                     "snippet": text[:2000]}
-                        # A browser page is one document, not a result list,
-                        # so quality is judged against its text.
-                        quality, note = _evidence_quality(
-                            query, [{"title": text[:500], "context": text}])
-                        candidate["quality"] = quality
-                        if note:
-                            candidate["note"] = note
-                        if _looks_relevant(query, candidate):
-                            return candidate
-                        problems.append(
-                            "browser: results did not match the query")
-            except Exception as e:
-                log.debug("Browser search fallback failed: %s", e)
-
-            # Say why, rather than leaving the model to tell the user it has
-            # no internet access.
+            # NO BROWSER LEG. There used to be one here, driving a real
+            # Chromium at `bing.com/search`, and it was the reason a plain
+            # question opened a window: measured 2026-10-17, "ASUS ProArt P16
+            # harga Indonesia" reached this point and started a visible
+            # browser while the user was mid-conversation.
+            #
+            # The belief behind it was that the free engines "return junk" for
+            # price questions. That was true when it was written and is not
+            # true now - measured, the same query returns real Indonesian
+            # listings with prices from `news+reference` and from the scraped
+            # Bing path, both over plain HTTP. So the browser leg bought
+            # nothing here, and paid for it with a window over the user's
+            # screen.
+            #
+            # Looking something up is no longer allowed to start a browser at
+            # all. A page that genuinely needs one is a BROWSE, and that is an
+            # explicit act: the error below names the tools, so the model asks
+            # for what it needs instead of taking it.
+            # `message`, not a key of its own: that is the field
+            # `_tool_result_message` copies into what the model actually reads
+            # when a tool fails, so guidance anywhere else is payload nothing
+            # consumes. (An approval refusal already depends on exactly this.)
             return {"success": False,
                     "error": ("no search source returned usable results ("
-                              + "; ".join(problems[:4]) + ")")}
+                              + "; ".join(problems[:4]) + ")"),
+                    "message": (
+                        "These are headline, reference and plain-HTML sources "
+                        "and none of them answered this. If the answer only "
+                        "exists on a page that needs a real browser (JavaScript "
+                        "rendering, a marketplace listing, a login), ask to "
+                        "browse it with browser_navigate or browser_task - do "
+                        "not tell the user you cannot find out.")}
 
         self.register(SkillDefinition(
             "web_search",
             # The caveat goes FIRST, for the same 110-char reason as
             # `browser_task`: a prompt-based provider only ever sees this
             # opening.
-            "Look something up on the news feeds and Wikipedia. Results are "
-            "often thin and can be off-topic for prices, availability or "
-            "products - treat a weak match as weak, not as an answer. Your "
-            "default for anything current or local; do not call it for stable "
-            "facts you already know. If it comes back empty or unrelated, "
-            "retry with different keywords before saying you cannot find out. "
+            "Look something up on the news feeds, Wikipedia and scraped "
+            "search HTML. It DOES answer price, availability and product "
+            "questions - measured, it returns marketplace and news listings "
+            "with real prices - so treat a weak match as weak, not as proof "
+            "the answer is unavailable. Your default for anything current or "
+            "local; do not call it for stable facts you already know. If it "
+            "comes back empty or unrelated, retry with different keywords, and "
+            "if the answer only exists on a page that needs a real browser, "
+            "ask to browse it instead of telling the user you cannot find out. "
             "Fetched pages may be blocked, which is not the same as missing.",
             {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search query"},
@@ -4562,10 +4587,13 @@ class SkillRegistry:
             url = str(params.get("url", "")).strip()
             if not url:
                 return {"success": False, "error": "No URL provided"}
-            # 1) Direct fetch (browser or HTTP fallback)
+            # 1) Direct fetch. `explicit=False`: this is a content GET, so the
+            # cheap HTTP path is tried first and a browser only when the page
+            # cannot be read without one. Before this, every `web_fetch` of an
+            # ordinary page opened a visible Chromium window.
             try:
                 from backend.browser.browser_engine import browser
-                nav = await browser.navigate(url)
+                nav = await browser.navigate(url, explicit=False)
                 if nav.get("success"):
                     ex = await browser.extract()
                     text = (ex or {}).get("text", "") if isinstance(ex, dict) else ""
@@ -4603,11 +4631,12 @@ class SkillRegistry:
                 if not res.get("success"):
                     res = await _search_bing(f"{domain} {slug} latest")
                 if res.get("success") and not _looks_relevant(query, res):
-                    _record_engine("bing", False)
+                    _record_engine("bing", False, res.get("error"))
                     res = {"success": False,
                            "error": "results did not match the page"}
                 else:
-                    _record_engine("bing", bool(res.get("success")))
+                    _record_engine("bing", bool(res.get("success")),
+                                   res.get("error"))
                 if res.get("success"):
                     return {"success": True, "url": url, "via": "search-fallback",
                             "snippet": res.get("snippet"),

@@ -353,8 +353,14 @@ class SkillForge:
             from backend.browser.browser_engine import browser
             import urllib.parse
             query = f"python library {task_description} pip install"
+            # `explicit=False`: research is a content GET, not a browse. It
+            # goes over the cheap path first, so this no longer puts a window
+            # over the user's screen - the complaint that produced the
+            # `web=False` flag for the CLI builder, fixed at the source so
+            # `forge()` does not need its own flag.
             nav = await browser.navigate(
-                f"https://duckduckgo.com/?q={urllib.parse.quote(query)}")
+                f"https://duckduckgo.com/?q={urllib.parse.quote(query)}",
+                explicit=False)
             if nav.get("success"):
                 extract = await browser.extract()
                 snippet = extract.get("text", "")[:3000]

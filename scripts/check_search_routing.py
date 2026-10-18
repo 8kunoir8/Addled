@@ -4,10 +4,16 @@ The goal this pins: Chromium opens when the user asks to OPERATE a page, not
 when they ask to FIND SOMETHING OUT. Addled has two ways to reach the web and
 they are not interchangeable:
 
-  web_search     cheap, keyless, news feeds + Wikipedia + scraped HTML
-  browser_*      a real Chromium, slow, visible, the only thing that answers
-                 price/availability questions because the free engines return
-                 junk for them (see check_web_search_relevance.py)
+  web_search     cheap, keyless, news feeds + Wikipedia + scraped HTML.
+                 It DOES answer price/availability questions - measured
+                 2026-10-17 on "ASUS ProArt P16 harga Indonesia", it returned
+                 Indonesian listings with real rupiah prices over plain HTTP.
+                 An earlier version of this comment claimed the opposite
+                 ("the free engines return junk for them") and that claim is
+                 what justified putting a Chromium window at the end of the
+                 search chain. Corrected, because the code followed it.
+  browser_*      a real Chromium, slow, visible. Used when the user asks to
+                 OPERATE a page, or when a page cannot be read without one
 
 ## What was measured
 

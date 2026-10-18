@@ -143,14 +143,12 @@ def engine_health_checks(registry) -> None:
     registry._ENGINE_FAILURES.clear()
 
 
-class _FakeBrowser:
-    """Stands in for the real browser, returning the same junk Bing served."""
-
-    async def navigate(self, url: str) -> dict:
-        return {"success": True, "url": url, "title": "Bing"}
-
-    async def extract(self) -> dict:
-        return {"text": APA_RESULT["snippet"]}
+# There used to be a `_FakeBrowser` patched in here, standing in for the last
+# leg of the chain: `web_search` drove a real Chromium at Bing when the scraped
+# engines did not answer. That leg is gone (a lookup must not launch a browser -
+# see check_browser_launch_policy.py), so the fake was removed with it. It was
+# patched in and never called, which meant this suite was passing partly on the
+# strength of a stub for code that no longer existed.
 
 
 def chain_checks(registry) -> None:
@@ -178,7 +176,6 @@ def chain_checks(registry) -> None:
          mock.patch.object(registry, "_search_bing_news", fail_news), \
          mock.patch.object(registry, "_search_bing", irrelevant_bing), \
          mock.patch.object(registry, "_search_ddg_html", tracked_ddg), \
-         mock.patch("backend.browser.browser_engine.browser", _FakeBrowser()), \
          mock.patch.object(registry, "_engine_ready", lambda name: True):
         result = asyncio.run(handler({"query": JAKARTA_QUERY}))
 

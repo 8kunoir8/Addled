@@ -18,6 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
     "check_record_scope.py",
     "check_search_routing.py",
+    "check_browser_launch_policy.py",
     "verify_python.py",
     "check_tools.py",
     "check_tool_calls.py",

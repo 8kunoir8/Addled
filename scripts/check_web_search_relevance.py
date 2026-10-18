@@ -49,9 +49,11 @@ mislabeled.
 FIXED, and provable: `_search_news_and_reference` is the FIRST source tried,
 and it returned on `success` alone without the relevance gate that the scraped
 engines below it already applied. An irrelevant set from it short-circuited
-every later engine - including the browser fallback that would have searched
-for real. The gate now applies there too, so a set that fails relevance is
-marked failed and the chain continues.
+every later engine - including the scraped Bing and DuckDuckGo paths that would
+have searched for real. (The chain then ended in a browser leg too, since
+removed: a lookup must not launch a browser - see
+check_browser_launch_policy.py.) The gate now applies there too, so a set that
+fails relevance is marked failed and the chain continues.
 
 FIXED (the labelling): `_tool_result_message` told the model the tool
 "succeeded" and handed over the rows with nothing to distinguish them from an

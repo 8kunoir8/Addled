@@ -430,12 +430,23 @@ class PlaywrightBrowser:
         self._state.history_index = len(self._state.history) - 1
         return {"success": True, "url": url, "title": title, "engine": "http"}
 
-    async def navigate(self, url: str) -> dict:
+    async def navigate(self, url: str, *, explicit: bool = True) -> dict:
         """Navigate to a URL. Returns page info.
 
-        Falls back from Playwright → plain HTTP fetch, so navigation works
-        even without a browser installed. Bot-guarded sites that refuse
-        automated access come back with a hint to use web_fetch/web_search.
+        `explicit` says who asked. A browse the user requested (the
+        `browser_navigate` tool, the dashboard's browser page) wants the real
+        browser and gets it. A caller whose job is to GET THE CONTENT —
+        `web_fetch`, the forge's research step — must not raise a window, so it
+        passes `explicit=False` and the cheap HTTP path is tried first.
+
+        The order used to be the other way round for everyone: Playwright was
+        attempted before the plain fetch, so simply fetching an ordinary page
+        opened Chromium. Measured 2026-10-17: a plain `web_search` did it. The
+        cheap path is tried first now and the browser is kept for when the
+        fetch genuinely cannot serve the page.
+
+        Bot-guarded sites that refuse automated access come back with a hint to
+        use web_fetch/web_search.
         """
         if not url:
             return {"success": False, "error": "No URL provided"}
@@ -470,6 +481,32 @@ class PlaywrightBrowser:
         # That difference is invisible in the payload otherwise: both paths
         # return success=True, and a fetch has no screenshot, no JS, no clicks.
         degrade_reason = ""
+
+        # A browser this call started, and should therefore close again. One
+        # the caller (or an earlier turn) already had open is left alone: the
+        # user's browsing session is not ours to end. Without this, a single
+        # fallback left Chromium resident for the rest of the day - `close()` is
+        # only ever reached from the `browser.close` RPC, so nothing collected
+        # it.
+        started_here = not (self._page and not self._page.is_closed())
+
+        # An implicit fetch tries the cheap path first and only escalates to a
+        # browser when the page cannot be read without one.
+        probe: dict | None = None
+        if not explicit:
+            try:
+                probe = await self._fetch_http(url)
+                text = (probe.get("text") or self._http_text or "").strip()
+                if probe.get("success") and self._looks_loaded(text):
+                    return probe
+                degrade_reason = "the plain fetch returned no usable text"
+                log.info("HTTP fetch yielded no usable text — escalating to a "
+                         "browser for %s", url)
+            except Exception as e:
+                degrade_reason = f"the plain fetch failed: {e}"
+                log.info("HTTP fetch failed (%s) — escalating to a browser "
+                         "for %s", e, url)
+
         if engine in ("auto", "playwright"):
             if await self._ensure_browser():
                 try:
@@ -503,8 +540,14 @@ class PlaywrightBrowser:
                             "automated access. Verify before relying on it, or "
                             "try web_search / web_fetch."
                         )
+                    if not explicit and started_here:
+                        # This call raised the window; it takes it down. The
+                        # text is already captured, so nothing is lost.
+                        await self._release_implicit_browser()
                     return result
                 except Exception as e:
+                    if not explicit and started_here:
+                        await self._release_implicit_browser()
                     if engine == "playwright":
                         return {"success": False,
                                 "error": f"Playwright navigate failed: {e}"}
@@ -531,7 +574,10 @@ class PlaywrightBrowser:
         # no screenshot and no interactivity while claiming to have browsed.
         log.info("Using lightweight HTTP fetch")
         try:
-            result = await self._fetch_http(url)
+            # The implicit path already fetched this URL to decide whether a
+            # browser was needed at all; reuse that answer rather than hitting
+            # the same server twice.
+            result = probe if probe is not None else await self._fetch_http(url)
             result["degraded"] = True
             result["fallback_reason"] = (
                 degrade_reason or "browser engine not available")
@@ -786,6 +832,24 @@ class PlaywrightBrowser:
             ),
         }
 
+
+    async def _release_implicit_browser(self) -> None:
+        """Close a browser that no one asked for. Never raises.
+
+        Only ever called for a navigation the user did not request, and only
+        when this call is what started the browser. A CDP attachment is left
+        alone - that is the user's own browser and closing the connection would
+        not close it anyway.
+        """
+        if self._cdp is not None:
+            return
+        if not (self._page and not self._page.is_closed()):
+            return
+        try:
+            await self.close()
+            log.info("Closed the browser this call started")
+        except Exception as e:  # noqa: BLE001
+            log.debug("could not close the implicitly started browser: %s", e)
 
     async def close(self) -> dict:
         """Close the browser (own instance or CDP connection — never the
