@@ -840,13 +840,27 @@ class SkillRegistry:
 
     def __init__(self):
         self._skills: dict[str, SkillDefinition] = {}
+        self._index = None
         self._register_all()
+
+    def invalidate_index(self) -> None:
+        """Invalidate the cached BM25 retrieval index."""
+        self._index = None
 
     def register(self, skill: SkillDefinition):
         self._skills[skill.name] = skill
+        self.invalidate_index()
 
     def unregister(self, name: str) -> None:
         self._skills.pop(name, None)
+        self.invalidate_index()
+
+    def get_index(self):
+        """Get or lazily construct the BM25 retrieval index over enabled skills."""
+        if self._index is None:
+            from backend.skills.index import SkillIndex
+            self._index = SkillIndex(self.enabled_list_all())
+        return self._index
 
     def get(self, name: str) -> SkillDefinition | None:
         return self._skills.get(name)
@@ -2628,12 +2642,16 @@ class SkillRegistry:
             return await FileOps().read(
                 str(params.get("path", "")),
                 params.get("encoding", "utf-8"),
+                start_line=params.get("start_line"),
+                end_line=params.get("end_line"),
             )
         self.register(SkillDefinition(
-            "read_file", "Read the contents of a file",
+            "read_file", "Read the contents of a file, optionally bounded to a line range",
             {"type": "object", "properties": {
                 "path": {"type": "string", "description": "Absolute or relative file path"},
                 "encoding": {"type": "string", "description": "File encoding", "default": "utf-8"},
+                "start_line": {"type": "integer", "description": "Optional 1-based start line"},
+                "end_line": {"type": "integer", "description": "Optional 1-based end line"},
             }, "required": ["path"]},
             read_file, "files",
             aliases={"path": ("file_path", "filepath", "filename", "file")},
@@ -2819,6 +2837,105 @@ class SkillRegistry:
             }, "required": ["query"]},
             search_in_files, "files",
         ))
+
+        async def search_passages(params: dict) -> dict:
+            """Search workspace files for ranked, line-anchored passages.
+
+            Rather than reading entire large files into context or viewing single
+            flat grep lines, this slides a 30-line window across workspace text files
+            and ranks candidate passages using hybrid BM25 and exact matching.
+            Returns the top passages with file paths and line numbers.
+            """
+            import os as _os
+            from backend.codemode import OutsideWorkspace, resolve_in_workspace
+            from backend.workspace import root as _workspace_root
+            from backend.passage import chunk_lines, PassageIndex
+
+            query = str(params.get("query") or params.get("q") or "").strip()
+            if len(query) < 2:
+                return {"success": False, "error": "Query must be at least 2 characters.", "matches": []}
+
+            where = str(params.get("directory") or ".").strip() or "."
+            limit = max(1, min(int(params.get("limit") or 5), 20))
+            suffix = params.get("extensions") or ""
+            if isinstance(suffix, (list, tuple)):
+                suffix = ",".join(str(x) for x in suffix)
+            suffix = str(suffix).strip()
+
+            ws_root = _workspace_root() or "."
+            try:
+                root = resolve_in_workspace(ws_root, ".")
+                start = resolve_in_workspace(ws_root, where)
+            except OutsideWorkspace as exc:
+                return {"success": False, "error": str(exc), "matches": []}
+
+            if not _os.path.isdir(start):
+                return {"success": False, "error": f"Directory not found: {where}", "matches": []}
+
+            wanted = tuple(
+                s if s.startswith(".") else "." + s
+                for s in (x.strip() for x in suffix.split(",")) if s
+            )
+            skip = {
+                ".git", "node_modules", "__pycache__", ".venv", "venv", "dist",
+                "build", ".next", ".cache", "AppData", "$RECYCLE.BIN", "System Volume Information"
+            }
+
+            all_passages = []
+            scanned_files = 0
+            max_files = 200
+            for dirpath, dirnames, filenames in _os.walk(start):
+                dirnames[:] = sorted(d for d in dirnames if d not in skip and not d.startswith("."))
+                for name in sorted(filenames):
+                    if name.startswith("."):
+                        continue
+                    if wanted and not name.endswith(wanted):
+                        continue
+                    fpath = _os.path.join(dirpath, name)
+                    try:
+                        if _os.path.getsize(fpath) > 500_000:
+                            continue
+                        with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
+                            text = fh.read()
+                    except OSError:
+                        continue
+                    if "\x00" in text:
+                        continue
+                    scanned_files += 1
+                    rel = _os.path.relpath(fpath, root).replace(_os.sep, "/")
+                    file_chunks = chunk_lines(text, window=30, stride=15)
+                    for sl, el, chunk_text in file_chunks:
+                        all_passages.append((rel, sl, el, chunk_text))
+                    if scanned_files >= max_files:
+                        break
+                if scanned_files >= max_files:
+                    break
+
+            if not all_passages:
+                return {"success": True, "query": query, "scanned_files": scanned_files, "matches": []}
+
+            idx = PassageIndex(all_passages)
+            results = idx.search(query, limit=limit)
+            return {
+                "success": True,
+                "query": query,
+                "scanned_files": scanned_files,
+                "matches": results,
+            }
+
+        self.register(SkillDefinition(
+            "search_passages",
+            "Search workspace files for ranked, line-anchored passages (functions or code blocks) "
+            "rather than reading whole files or searching single lines.",
+            {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Code or concept to search for"},
+                "directory": {"type": "string", "description": "Folder relative to workspace root", "default": "."},
+                "extensions": {"type": "string", "description": "Optional file filter e.g. '.py' or '.ts'"},
+                "limit": {"type": "integer", "description": "Max passages to return", "default": 5},
+            }, "required": ["query"]},
+            search_passages, "files",
+        ))
+
 
         async def delete_file(params: dict) -> dict:
             from backend.actions.file_ops import FileOps
@@ -3728,13 +3845,28 @@ class SkillRegistry:
                 return {"success": False, "error": f"File not found: {path}"}
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
+            start_line = params.get("start_line")
+            end_line = params.get("end_line")
+            res_content = content
+            extra_meta = {}
+            if start_line is not None or end_line is not None:
+                lines = content.splitlines()
+                total_lines = len(lines)
+                s = max(1, int(start_line or 1))
+                e = min(total_lines, int(end_line or total_lines))
+                res_content = "\n".join(lines[s - 1:e])
+                extra_meta = {"start_line": s, "end_line": e, "total_lines": total_lines}
             from backend.codemode.lang_detect import detect
-            return {"success": True, "content": content,
-                    "language": detect(path), "path": path}
+            res = {"success": True, "content": res_content,
+                   "language": detect(path), "path": path}
+            res.update(extra_meta)
+            return res
         self.register(SkillDefinition(
-            "code_read", "Read source code from a file with language detection",
+            "code_read", "Read source code from a file with language detection and optional line range",
             {"type": "object", "properties": {
                 "path": {"type": "string", "description": "Path to source file"},
+                "start_line": {"type": "integer", "description": "Optional 1-based start line"},
+                "end_line": {"type": "integer", "description": "Optional 1-based end line"},
             }, "required": ["path"]},
             code_read, "code",
         ))
@@ -4911,22 +5043,15 @@ class SkillRegistry:
             query = str(params.get("query") or params.get("q") or "").strip()
             if not query:
                 return {"success": False, "error": "No search query given"}
-            words = [w for w in query.lower().replace("_", " ").split()
-                     if len(w) > 2]
-            hits = []
-            for skill in skill_registry.enabled_list_all():
-                hay = f"{skill.name} {skill.description}".lower()
-                score = sum(1 for w in words if w in hay)
-                if score:
-                    hits.append((score, skill))
-            hits.sort(key=lambda pair: (-pair[0], pair[1].name))
+            idx = skill_registry.get_index()
+            scored = idx.search(query, limit=12)
             return {"success": True, "query": query,
-                    "count": len(hits),
+                    "count": len(scored),
                     "skills": [{"name": s.name, "description": s.description,
                                 "category": s.category,
                                 "has_instructions": bool(
                                     getattr(s, "body", ""))}
-                               for _, s in hits[:12]]}
+                               for _, s in scored]}
 
         self.register(SkillDefinition(
             "skill_search",

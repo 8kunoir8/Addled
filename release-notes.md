@@ -1,3 +1,32 @@
+# Addled 1.0.44
+
+## Passage-level code retrieval and line-range reading
+
+Working on large codebases in local models with ~8k token contexts previously risked
+blowing context by reading whole large files or relying solely on single-line grep matches.
+Addled now includes zero-dependency passage-level code retrieval and bounded line reads:
+
+- **Ranked passage retrieval (`search_passages`)**: Slides a 30-line window with a 15-line
+  stride across workspace source files, indexing candidates with BM25 plus exact symbol and
+  phrase boosts. Returns top ranked passages with exact file paths and line ranges.
+- **Line-range reads**: `read_file` and `code_read` accept `start_line` and `end_line` bounds,
+  returning targeted slices without loading unnecessary lines.
+- **Swarm and planning integration**: `search_passages` is wired into code planning, edit
+  tools, and the swarm coder desk.
+
+## Safety and operational controls
+
+- Search routing prevents informational queries from launching an unwanted browser window.
+- Security boundary hardening across destruction gates, path traversal defenses, and tool approvals.
+- Gaming detection recognizes borderless/captioned fullscreen states while preventing false pauses on Windows shell flyouts.
+
+## Verification
+
+All 132 runnable test suites pass (1 skipped: office integration requiring external office suite).
+Built-in skills reachability, packaging exclusions, and live deployed backend verified clean.
+
+---
+
 # Addled 1.0.43
 
 ## Formatting stays formatting: the chat renders markdown, the voice speaks words

@@ -147,6 +147,8 @@ SUITES = [
     "check_plan_mode.py",
     "check_gate_hygiene.py",
     "check_screen_privacy.py",
+    "check_skill_search_precision.py",
+    "check_passage_retrieval.py",
 ]
 
 

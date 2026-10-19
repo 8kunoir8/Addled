@@ -78,7 +78,7 @@ DEFAULT_TYPES: dict[str, dict] = {
                    "efficient, well-documented code; prefer the smallest "
                    "change that solves the problem. Read before you write, and "
                    "verify with the project's own test command when one exists."),
-        "skills": ["code_read", "search_in_files", "verify_code", "run_command",
+        "skills": ["code_read", "search_in_files", "search_passages", "verify_code", "run_command",
                    "guidelines:karpathy", "guidelines:ponytail",
                    "test-driven-development", "systematic-debugging",
                    "executing-plans", "word_create", "pdf_read"],

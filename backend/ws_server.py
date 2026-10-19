@@ -661,7 +661,7 @@ def _extract_json_object(text: str) -> dict | None:
 # or save a new procedure without going through the Chat page where the user
 # sees the call. `wiki_write`, `wiki_ingest`, and `sop_save` are deliberately
 # excluded — a code edit must not have side effects beyond the diff.
-_CODE_EDIT_TOOLS = ("code_read", "read_file", "list_dir", "search_files",
+_CODE_EDIT_TOOLS = ("code_read", "search_passages", "read_file", "list_dir", "search_files",
                     "file_info",
                     "wiki_search", "wiki_read", "sop_lookup", "sop_list")
 
@@ -681,7 +681,7 @@ _CODE_EDIT_TOOLS = ("code_read", "read_file", "list_dir", "search_files",
 # `sop_list`: a good plan names the right files, but it also follows the
 # project's own conventions and standard procedures. Without these, the
 # planner invented a structure that contradicted a documented standard.
-_PLAN_TOOLS = ("code_read", "search_in_files", "read_file", "list_dir",
+_PLAN_TOOLS = ("code_read", "search_in_files", "search_passages", "read_file", "list_dir",
                "search_files", "file_info",
                "wiki_search", "wiki_read", "sop_lookup", "sop_list")
 
@@ -1208,7 +1208,7 @@ def _questions_for(params: dict) -> list[dict]:
 # `check_parity.py` caught it, which is the only reason it is not live.
 _PLAN_TOOLS = [
     # The original list, verbatim.
-    "code_read", "search_in_files", "read_file", "list_dir",
+    "code_read", "search_in_files", "search_passages", "read_file", "list_dir",
     "search_files", "file_info",
     "wiki_search", "wiki_read", "sop_lookup", "sop_list",
     # Added: the ones plan mode needed and the code page's planner did not have.

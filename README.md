@@ -106,6 +106,8 @@ while the reasoning desk uses a cloud one.
 Bind a folder and get a real editor (tabs, syntax highlighting, search), with all
 reads and writes **confined to that folder**.
 
+- **Passage-level retrieval & bounded reads** — searches ranked 30-line code
+  passages with BM25 and symbol boosts, and reads line ranges without blowing context.
 - **Plan first** — a multi-file request searches the project and names the files
   before proposing anything.
 - **Verified** — after applying, it runs *your* project's own check and reports

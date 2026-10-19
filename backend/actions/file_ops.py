@@ -31,7 +31,9 @@ class FileOps:
                           "path": str(path)}
         return str(resolved), None
 
-    async def read(self, path: str, encoding: str = "utf-8") -> dict:
+    async def read(self, path: str, encoding: str = "utf-8",
+                   start_line: int | None = None,
+                   end_line: int | None = None) -> dict:
         path, refused = self._guard(path)
         if refused:
             return refused
@@ -40,6 +42,21 @@ class FileOps:
                 return {"success": False, "error": f"Not a file: {path}"}
             with open(path, "r", encoding=encoding, errors="replace") as f:
                 content = f.read()
+            if start_line is not None or end_line is not None:
+                lines = content.splitlines()
+                total_lines = len(lines)
+                s = max(1, int(start_line or 1))
+                e = min(total_lines, int(end_line or total_lines))
+                sliced = lines[s - 1:e]
+                return {
+                    "success": True,
+                    "content": "\n".join(sliced),
+                    "size": sum(len(l) for l in sliced),
+                    "start_line": s,
+                    "end_line": e,
+                    "total_lines": total_lines,
+                    "path": path,
+                }
             return {"success": True, "content": content, "size": len(content),
                     "path": path}
         except Exception as e:

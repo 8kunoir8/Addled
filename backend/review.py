@@ -320,6 +320,7 @@ def _write_skill(skill: dict) -> str:
             return ""
         existing.body = body
         existing.description = desc or existing.description
+        skill_registry.invalidate_index()
         return name
 
     async def _guidance(params: dict) -> dict:

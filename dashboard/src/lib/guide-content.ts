@@ -391,6 +391,7 @@ export const GUIDE: GuideEntry[] = [
       'Bind a folder on the Code page. Addled opens whatever the Workspace setting points at, so set that first if you would rather not retype it.',
       'Open a file from the tree, edit it, and press Ctrl+S to save. Ctrl+F finds inside the file.',
       'Use the search panel to find a word across the whole workspace and jump to the line.',
+      'Search code passages with search_passages to get ranked 30-line context blocks instead of loading whole large files into limited model context windows.',
       'Ask for a change in the box at the bottom. Addled proposes an edit, you see the diff, and nothing is written until you press Apply. Unsaved editor text is saved first, so the diff always describes what you are looking at.',
       'For a change that spans files, ask it to plan first: Addled searches the project, names the files it believes are involved, and only then proposes edits — so a multi-file change is not guessed from one open file.',
       'When the change depends on the rest of the project, let Addled read it: the suggestions run with read-only tools, so it can look up a helper, a documented convention or a saved procedure instead of guessing. It still cannot write — approving the diff is the only way a file changes.',
@@ -400,7 +401,7 @@ export const GUIDE: GuideEntry[] = [
     ],
     routes: [{ href: '/code', label: 'Code' }],
     settingsTabs: ['workspace', 'safety'],
-    skills: ['code_read', 'code_edit', 'read_file', 'write_file', 'verify_code'],
+    skills: ['code_read', 'code_edit', 'read_file', 'write_file', 'verify_code', 'search_passages'],
     needs: [
       {
         flag: 'workspace_configured',
